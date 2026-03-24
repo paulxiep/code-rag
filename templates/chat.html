@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Code RAG Chat{% endblock %}
+
+{% block content %}
+<header>
+    <h1>📁 Code RAG Chat</h1>
+    <p class="subtitle">Ask questions about indexed projects</p>
+</header>
+
+<main>
+    <div id="chat-container">
+        <div id="messages">
+            <div class="message assistant">
+                <div class="message-content">
+                    <strong>Assistant:</strong>
+                    <p>Hello! I can answer questions about the portfolio projects. Try asking about specific projects, technologies used, or how things work!</p>
+                </div>
+            </div>
+        </div>
+
+        <form id="chat-form" 
+              hx-post="/api/chat" 
+              hx-target="#messages" 
+              hx-swap="beforeend"
+              hx-on::after-request="this.reset(); document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;">
+            <div class="input-group">
+                <input type="text" 
+                       name="query" 
+                       placeholder="Ask about my projects..." 
+                       autocomplete="off"
+                       required>
+                <button type="submit">
+                    <span class="send-icon">➤</span>
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <aside id="info-panel">
+        <h3>📂 Indexed Projects</h3>
+        <div id="projects-list" hx-get="/api/projects-list" hx-trigger="load">
+            <p class="loading">Loading projects...</p>
+        </div>
+        
+        <h3>💡 Example Questions</h3>
+        <ul class="examples">
+            <li><button class="example-btn" onclick="askQuestion('What projects are indexed?')">What projects are indexed?</button></li>
+            <li><button class="example-btn" onclick="askQuestion('What does the invoice-parse project do?')">What does the invoice-parse project do?</button></li>
+            <li><button class="example-btn" onclick="askQuestion('How does the quant-trading-gym simulation work?')">How does the quant-trading-gym simulation work?</button></li>
+            <li><button class="example-btn" onclick="askQuestion('What does code-raptor crate do?')">What does code-raptor crate do?</button></li>
+        </ul>
+    </aside>
+</main>
+
+<script>
+function askQuestion(question) {
+    const input = document.querySelector('input[name="query"]');
+    input.value = question;
+    document.getElementById('chat-form').requestSubmit();
+}
+</script>
+{% endblock %}

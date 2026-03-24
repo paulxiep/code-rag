@@ -1,0 +1,9 @@
+target/
+data/
+cache/
+.git/
+.env
+*.md
+docs/
+.gitignore
+.dockerignore

@@ -1,0 +1,10 @@
+{% if success %}
+<div class="ingest-success">
+    <p>✅ {{ message }}</p>
+    <p><small>Code chunks: {{ code_chunks }} | README chunks: {{ readme_chunks }}</small></p>
+</div>
+{% else %}
+<div class="ingest-error">
+    <p>❌ {{ message }}</p>
+</div>
+{% endif %}

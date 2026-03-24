@@ -1,0 +1,20 @@
+# One-time ingestion compose file
+# Usage: docker-compose -f docker-compose-ingest.yaml up --build
+# Ingests all sibling directories (../project-a, ../project-b, etc.)
+# Parent directory name doesn't matter — each subdirectory becomes a project.
+
+services:
+  ingest:
+    build:
+      context: ..  # Parent directory (contains this repo + sibling projects)
+      dockerfile: ./code-rag/dockerfile/Dockerfile
+      target: raptor
+    container_name: code-raptor-ingest
+    volumes:
+      - ./data:/app/data              # Persist Lance DB
+      - ./cache:/tmp/.cache           # Embedding model cache
+      - ..:/repos:ro                  # Mount parent directory (all siblings) read-only
+    environment:
+      - RUST_LOG=info
+      - DB_PATH=/app/data/portfolio.lance
+    command: ["/app/code-raptor", "ingest", "/repos", "--db-path", "/app/data/portfolio.lance"]

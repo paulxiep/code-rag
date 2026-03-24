@@ -1,0 +1,10 @@
+[package]
+name = "code-rag-types"
+version = "0.1.0"
+authors = ["paulxiep"]
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+uuid = { version = "1.20", features = ["v4"] }

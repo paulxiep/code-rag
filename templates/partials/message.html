@@ -1,0 +1,29 @@
+<div class="message user">
+    <div class="message-content">
+        <strong>You:</strong>
+        <p>{{ query }}</p>
+    </div>
+</div>
+<div class="message assistant">
+    <div class="message-content">
+        <strong>Assistant:</strong>
+        <div class="answer">{{ answer }}</div>
+        {% if !sources.is_empty() %}
+        <details class="sources">
+            <summary>Sources ({{ sources.len() }}) &mdash; intent: {{ intent }}</summary>
+            <ul class="source-list">
+            {% for source in sources %}
+                <li class="source-item">
+                    <span class="chunk-type chunk-type--{{ source.chunk_type }}">{{ source.chunk_type }}</span>
+                    <code class="source-path">{{ source.path }}</code>
+                    {% if source.line > 0 %}<span class="source-line">:{{ source.line }}</span>{% endif %}
+                    <span class="source-label">{{ source.label }}</span>
+                    <span class="source-project">[{{ source.project }}]</span>
+                    <span class="source-relevance">{{ source.relevance_pct }}%</span>
+                </li>
+            {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+    </div>
+</div>

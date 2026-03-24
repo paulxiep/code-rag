@@ -1,0 +1,28 @@
+[package]
+name = "code-rag-store"
+version = "0.1.0"
+authors = ["paulxiep"]
+edition = "2024"
+
+[dependencies]
+code-rag-types = { path = "../code-rag-types" }
+
+# Embeddings
+fastembed = "5.5"
+
+# Storage
+lancedb = "0.23"
+arrow-array = "56.2"
+arrow-schema = "56.2"
+arrow-buffer = "56.2"
+
+# Async
+tokio = { version = "1.48", features = ["full"] }
+futures = "0.3.31"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3.13"

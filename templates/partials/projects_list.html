@@ -1,0 +1,10 @@
+{% if projects.is_empty() %}
+<p class="no-projects">No projects indexed yet.</p>
+{% else %}
+<ul class="project-list">
+{% for project in projects %}
+    <li>📁 {{ project }}</li>
+{% endfor %}
+</ul>
+<p class="project-count">{{ count }} project(s) indexed</p>
+{% endif %}

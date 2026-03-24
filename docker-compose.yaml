@@ -1,0 +1,29 @@
+# Main application compose file
+# Prerequisites: Run ingestion first with docker-compose-ingest.yaml
+# Usage: docker-compose up --build
+
+services:
+  code-rag-chat:
+    build:
+      context: ..  # Build from parent directory to access all sibling projects
+      dockerfile: ./code-rag/dockerfile/Dockerfile
+      target: chat
+    container_name: code-rag-chat
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data      # Lance DB
+      - ./cache:/tmp/.cache   # Embedding model cache
+    environment:
+      - RUST_LOG=info
+      - HOST=0.0.0.0
+      - PORT=3000
+      - DB_PATH=/app/data/portfolio.lance
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/code-rag-chat", "--health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
