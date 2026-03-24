@@ -19,6 +19,10 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# Install trunk and WASM target for frontend build
+RUN cargo install trunk && \
+    rustup target add wasm32-unknown-unknown
+
 WORKDIR /build
 
 # Copy workspace manifests
@@ -26,33 +30,41 @@ COPY code-rag/Cargo.toml code-rag/Cargo.lock ./
 COPY code-rag/crates/code-rag-types/Cargo.toml ./crates/code-rag-types/
 COPY code-rag/crates/code-rag-store/Cargo.toml ./crates/code-rag-store/
 COPY code-rag/crates/code-raptor/Cargo.toml ./crates/code-raptor/
+COPY code-rag/crates/code-rag-ui/Cargo.toml ./crates/code-rag-ui/
 
 # Create dummy sources for dependency caching
-RUN mkdir -p src crates/code-rag-types/src crates/code-rag-store/src crates/code-raptor/src && \
+RUN mkdir -p src crates/code-rag-types/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
     echo "fn main() {println!(\"dummy\")}" > src/main.rs && \
     echo "// dummy" > crates/code-rag-types/src/lib.rs && \
     echo "// dummy" > crates/code-rag-store/src/lib.rs && \
     echo "fn main() {}" > crates/code-raptor/src/main.rs && \
-    echo "// dummy" > crates/code-raptor/src/lib.rs
+    echo "// dummy" > crates/code-raptor/src/lib.rs && \
+    echo "fn main() {}" > crates/code-rag-ui/src/main.rs
 
-# Build all workspace crates to cache dependencies
-RUN cargo build --release --workspace && \
-    rm -rf src crates/code-rag-types/src crates/code-rag-store/src crates/code-raptor/src
+# Build server crates to cache dependencies (exclude UI — different target)
+RUN cargo build --release --workspace --exclude code-rag-ui && \
+    rm -rf src crates/code-rag-types/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src
 
 # Copy actual source for all crates
 COPY code-rag/src ./src
 COPY code-rag/crates/code-rag-types/src ./crates/code-rag-types/src
 COPY code-rag/crates/code-rag-store/src ./crates/code-rag-store/src
 COPY code-rag/crates/code-raptor/src ./crates/code-raptor/src
-COPY code-rag/templates ./templates
+COPY code-rag/crates/code-rag-ui/src ./crates/code-rag-ui/src
+COPY code-rag/crates/code-rag-ui/index.html ./crates/code-rag-ui/index.html
+COPY code-rag/crates/code-rag-ui/style ./crates/code-rag-ui/style
+COPY code-rag/crates/code-rag-ui/public ./crates/code-rag-ui/public
 
-# Rebuild with real source (touch ALL source files to invalidate cache)
+# Rebuild server with real source
 RUN touch src/main.rs \
           crates/code-rag-types/src/lib.rs \
           crates/code-rag-store/src/lib.rs \
           crates/code-raptor/src/lib.rs \
           crates/code-raptor/src/main.rs && \
-    cargo build --release --workspace
+    cargo build --release --workspace --exclude code-rag-ui
+
+# Build WASM frontend
+RUN cd crates/code-rag-ui && trunk build --release
 
 # ============================================================
 # Target: chat - The query server (default)
@@ -62,10 +74,10 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS chat
 WORKDIR /app
 
 COPY --from=builder /build/target/release/code-rag-chat ./code-rag-chat
-COPY code-rag/static ./static
-COPY code-rag/templates ./templates
+COPY --from=builder /build/crates/code-rag-ui/dist ./dist
 
 ENV DB_PATH=/app/data/portfolio.lance
+ENV UI_DIST=/app/dist
 ENV RUST_LOG=info
 ENV HOST=0.0.0.0
 ENV PORT=3000

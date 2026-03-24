@@ -1,5 +1,82 @@
 # Development Log
 
+## 2026-03-25: Leptos Migration — WASM Frontend
+
+### Summary
+
+Replaced the server-rendered htmx/Askama frontend with a Leptos WASM SPA (client-side rendered). The frontend compiles to WebAssembly and runs entirely in the browser, communicating with the Axum backend via JSON API. This is Step 1 toward a fully static GitHub Pages demo where the entire RAG pipeline runs in-browser.
+
+### Motivation
+
+- **GitHub Pages demo**: The end goal is a static demo that runs the full RAG pipeline (embedding, vector search, intent classification) in WASM without a backend. Leptos WASM is the foundation.
+- **Performance and file size**: Leptos produces ~100-300KB gzipped WASM bundles (no virtual DOM). Much smaller than a React/JS equivalent.
+- **Architectural coherence**: One language (Rust) for the entire stack — engine, API, and UI.
+- **Theme consistency**: Visual design matches the paulxie Astro portfolio (Atkinson font, `#2337ff` accent, same spacing and component patterns).
+
+### Architecture
+
+```
+Browser (WASM)                    Axum Server
+┌──────────────────┐              ┌──────────────────┐
+│  Leptos SPA      │  fetch()     │  JSON API        │
+│  ├─ ChatView     │────────────→ │  POST /chat      │
+│  ├─ SourcesPanel │              │  GET /projects   │
+│  ├─ IntentBadge  │              │  GET /health     │
+│  └─ ProjectTags  │              │                  │
+└──────────────────┘              └──────────────────┘
+```
+
+Axum serves the WASM bundle via `ServeDir` with SPA fallback. The `UI_DIST` env var points to the trunk build output.
+
+### What Changed
+
+**New crate**: `crates/code-rag-ui/`
+- Leptos 0.8 CSR app with trunk build tooling
+- Components: `ChatView`, `SourcesPanel`, `IntentBadge`
+- API client: `gloo-net` fetch to Axum JSON endpoints
+- CSS: Portfolio design tokens (Atkinson font, accent colors, card/tag patterns)
+
+**Removed**:
+- `src/api/web.rs` — Askama HTML form handler
+- `templates/` — Askama HTML templates
+- `static/` — htmx.min.js, old CSS
+- `askama` dependency
+
+**Modified**:
+- `src/api/mod.rs` — Removed HTML routes, added `ServeDir` + SPA fallback
+- `Cargo.toml` — Removed `askama`, added `code-rag-ui` to workspace
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Leptos over Yew/Dioxus | Smallest WASM bundles (fine-grained reactivity, no virtual DOM) |
+| CSR-only (no SSR) | Targeting GitHub Pages — must work as static files |
+| `gloo-net` over `reqwest` | Lighter WASM footprint for HTTP requests |
+| Portfolio theme reuse | Consistent visual identity across paulxie projects |
+| `ServeDir` + SPA fallback | Single binary serves both API and frontend |
+
+### Separation of Concerns (Step 2 prep)
+
+The UI uses a simple API client module (`api.rs`). In Step 2 (GitHub Pages demo), this will be replaced by a `RagEngine` trait with two implementations:
+- `ApiEngine`: Current HTTP client (Step 1)
+- `WasmEngine`: In-browser embedding (tract-onnx), vector search, intent classification (Step 2)
+
+The UI layer only depends on the trait, not on how the engine is implemented.
+
+### Verification
+
+- `trunk build` compiles WASM bundle successfully
+- `cargo check` — server compiles without Askama
+- `cargo test` — all 28 tests pass, 0 regressions
+- UI components: ChatView, SourcesPanel, IntentBadge all render
+
+### Test Results
+
+```
+test result: ok. 28 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out
+```
+
 ## 2026-02-08: V2.3 Retrieval Traces (V2 Phase 3)
 
 ### Summary
