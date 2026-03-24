@@ -2,7 +2,6 @@ mod dto;
 mod error;
 mod handlers;
 mod state;
-mod web;
 
 pub use state::AppState;
 
@@ -12,21 +11,26 @@ use axum::{
 };
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// Build the application router
 pub fn router(state: Arc<AppState>) -> Router {
+    // Path to the WASM UI dist directory
+    let ui_dist = std::env::var("UI_DIST")
+        .unwrap_or_else(|_| "crates/code-rag-ui/dist".into());
+
+    let index_file = format!("{}/index.html", ui_dist);
+
     Router::new()
-        // HTML routes (frontend)
-        .route("/", get(web::index))
-        .route("/api/chat", post(web::chat_html))
-        .route("/api/projects-list", get(web::projects_list_html))
         // JSON API routes
         .route("/chat", post(handlers::chat))
         .route("/projects", get(handlers::list_projects))
         .route("/health", get(handlers::health))
-        // Static files
-        .nest_service("/static", ServeDir::new("static"))
+        // Serve WASM UI — static files + SPA fallback to index.html
+        .fallback_service(
+            ServeDir::new(&ui_dist)
+                .not_found_service(ServeFile::new(&index_file)),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

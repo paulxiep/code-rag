@@ -43,6 +43,7 @@ To clean, run `sh clean_docker.sh`.
 | **V2.1** | 2026-02-07 | Inline call context (AST-based call extraction) |
 | **V2.2** | 2026-02-08 | Intent classification + query routing (cosine similarity) |
 | **V2.3** | 2026-02-08 | Retrieval traces (scored sources, cross-type ranking) |
+| **Leptos Migration** | 2026-03-25 | WASM frontend (replace htmx/Askama with Leptos) |
 
 ## Purpose
 
@@ -59,7 +60,7 @@ To clean, run `sh clean_docker.sh`.
 - **LLM**: Google Gemini (via rig-core)
 - **Vector DB**: LanceDB
 - **Embeddings**: FastEmbed
-- **Frontend**: htmx + Askama templates
+- **Frontend**: Leptos (Rust WASM, CSR)
 
 ---
 
@@ -80,7 +81,8 @@ To clean, run `sh clean_docker.sh`.
 | `code-raptor` | Ingestion CLI — parsing, chunk extraction |
 | `code-rag-store` | Storage — embeddings, vector search |
 | `code-rag-types` | Shared types — no logic |
-| `code-rag-chat` | Query API — retrieval, LLM, web UI |
+| `code-rag-chat` | Query API — retrieval, LLM, serves WASM UI |
+| `code-rag-ui` | Leptos WASM SPA — chat interface |
 
 ## Current State (V2 Complete)
 
@@ -113,7 +115,7 @@ See [project-vision.md](project-vision.md) and [development_plan.md](development
 - **LLM & RAG:** `RAG (Retrieval-Augmented Generation)` · `LLM Integration` · `Google Gemini API` · `rig-core` · `Semantic Search` · `Chatbot` · `Intent Classification (Cosine Similarity)` · `Prototype Query Embeddings` · `Intent-Aware Retrieval` · `Cross-Type Source Ranking` · `Distance-to-Relevance Scoring` · `Retrieval Transparency`
 - **Vector Database:** `LanceDB` · `FastEmbed` · `BGE Embeddings`
 - **Code Analysis:** `Tree-sitter` · `AST Parsing` · `Code Chunking` · `Docstring Extraction` · `JSDoc Parsing` · `Multi-Language (Rust, Python, TypeScript)` · `Incremental Ingestion (SHA256)` · `Call Graph Extraction (AST-based)` · `Function Call Detection (Direct + Method)`
-- **Web Framework:** `Axum` · `htmx` · `Askama Templates` · `Tower HTTP` · `CORS`
+- **Web Framework:** `Axum` · `Leptos (WASM CSR)` · `Tower HTTP` · `CORS`
 - **Async & Runtime:** `Tokio Runtime` · `Async Programming`
 - **DevOps:** `Docker` · `Docker Compose`
 - **Rust Ecosystem:** `tracing` · `Error Handling (anyhow/thiserror)` · `Serde` · `Let-Chaining`

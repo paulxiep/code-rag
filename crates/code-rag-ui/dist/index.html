@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Code RAG Chat</title>
+    <link rel="stylesheet" href="/main-4cfbd15a35258197.css" integrity="sha384-86txZZM6tFSg5qQfPm6DLZE1i69vTRCFqKa+CXejVWlOOUbrCMJlbSUPO2nr/HjH"/>
+    
+<link rel="modulepreload" href="/code-rag-ui-526591fe329f81e4.js" crossorigin="anonymous" integrity="sha384-6U/djqKmJFT8lVYAmq4acUJ4iBwwl6OlIeiMlrjAsS94W2ROsrGUEZaR20ckiVsc"><link rel="preload" href="/code-rag-ui-526591fe329f81e4_bg.wasm" crossorigin="anonymous" integrity="sha384-raEK5C0ScWzrnOeWvRHKEnH4NiqHcw5aLtHt0x3bLYWDaIStDEnKDnn/+0bB7ZbY" as="fetch" type="application/wasm"></head>
+<body>
+
+<script type="module">
+import init, * as bindings from '/code-rag-ui-526591fe329f81e4.js';
+const wasm = await init({ module_or_path: '/code-rag-ui-526591fe329f81e4_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
+</html>

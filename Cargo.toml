@@ -38,8 +38,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Config
 dotenvy = "0.15"
 
-# Templating
-askama = "0.15"
 
 [dev-dependencies]
 tempfile = "3.13"
