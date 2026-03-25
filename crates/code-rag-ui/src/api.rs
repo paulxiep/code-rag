@@ -1,7 +1,11 @@
+#[cfg(not(feature = "standalone"))]
 use gloo_net::http::Request;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(not(feature = "standalone"))]
+use serde::Serialize;
 
 /// POST /chat request
+#[cfg(not(feature = "standalone"))]
 #[derive(Debug, Serialize)]
 pub struct ChatRequest {
     pub query: String,
@@ -29,13 +33,14 @@ pub struct SourceInfo {
 }
 
 /// GET /projects response
+#[cfg(not(feature = "standalone"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectsResponse {
     pub projects: Vec<String>,
-    pub count: usize,
 }
 
 /// Send a chat query to the backend API.
+#[cfg(not(feature = "standalone"))]
 pub async fn send_chat(base_url: &str, query: &str) -> Result<ChatResponse, String> {
     let url = format!("{}/chat", base_url);
     let body = ChatRequest {
@@ -62,6 +67,7 @@ pub async fn send_chat(base_url: &str, query: &str) -> Result<ChatResponse, Stri
 }
 
 /// Fetch the list of indexed projects.
+#[cfg(not(feature = "standalone"))]
 pub async fn fetch_projects(base_url: &str) -> Result<Vec<String>, String> {
     let url = format!("{}/projects", base_url);
 

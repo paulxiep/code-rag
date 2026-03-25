@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use leptos::html::Textarea;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::api::{self, ChatResponse};
+#[cfg(not(feature = "standalone"))]
+use crate::api;
+use crate::api::ChatResponse;
 use crate::components::{IntentBadge, SourcesPanel};
 
 /// A single message in the chat history.
@@ -19,13 +21,26 @@ struct AssistantMessage {
 }
 
 #[component]
-pub fn ChatView(api_base: String) -> impl IntoView {
+pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
     let (messages, set_messages) = signal(Vec::<ChatMessage>::new());
     let (input, set_input) = signal(String::new());
     let (loading, set_loading) = signal(false);
     let textarea_ref = NodeRef::<Textarea>::new();
 
+    // Standalone mode: grab context signals set up by main.rs
+    #[cfg(feature = "standalone")]
+    let index_signal = use_context::<RwSignal<Option<std::sync::Arc<crate::data::ChunkIndex>>>>()
+        .expect("ChunkIndex context missing");
+    #[cfg(feature = "standalone")]
+    let classifier_signal = use_context::<RwSignal<Option<std::sync::Arc<code_rag_engine::intent::IntentClassifier>>>>()
+        .expect("IntentClassifier context missing");
+    #[cfg(feature = "standalone")]
+    let auth_signal = use_context::<RwSignal<Option<crate::auth::AuthMethod>>>()
+        .expect("AuthMethod context missing");
+
+    #[cfg(not(feature = "standalone"))]
     let api_base_submit = api_base.clone();
+
     let on_submit = move || {
         let query = input.get().trim().to_string();
         if query.is_empty() || loading.get() {
@@ -34,31 +49,48 @@ pub fn ChatView(api_base: String) -> impl IntoView {
 
         set_input.set(String::new());
         set_loading.set(true);
-
-        // Add user message
         set_messages.update(|msgs| msgs.push(ChatMessage::User(query.clone())));
 
-        let base = api_base_submit.clone();
-        spawn_local(async move {
-            match api::send_chat(&base, &query).await {
-                Ok(response) => {
-                    set_messages.update(|msgs| {
-                        msgs.push(ChatMessage::Assistant(AssistantMessage { response }));
-                    });
+        #[cfg(feature = "standalone")]
+        {
+            let _index = index_signal;
+            let _classifier = classifier_signal;
+            let _auth = auth_signal;
+            spawn_local(async move {
+                let result = standalone_chat(&query, _index, _classifier, _auth).await;
+                match result {
+                    Ok(response) => {
+                        set_messages.update(|msgs| {
+                            msgs.push(ChatMessage::Assistant(AssistantMessage { response }));
+                        });
+                    }
+                    Err(e) => {
+                        set_messages.update(|msgs| msgs.push(ChatMessage::Error(e)));
+                    }
                 }
-                Err(e) => {
-                    set_messages.update(|msgs| msgs.push(ChatMessage::Error(e)));
-                }
-            }
-            set_loading.set(false);
+                set_loading.set(false);
+                scroll_to_bottom();
+            });
+        }
 
-            // Scroll to bottom after response
-            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                if let Some(el) = doc.query_selector(".chat-container").ok().flatten() {
-                    el.set_scroll_top(el.scroll_height());
+        #[cfg(not(feature = "standalone"))]
+        {
+            let base = api_base_submit.clone();
+            spawn_local(async move {
+                match api::send_chat(&base, &query).await {
+                    Ok(response) => {
+                        set_messages.update(|msgs| {
+                            msgs.push(ChatMessage::Assistant(AssistantMessage { response }));
+                        });
+                    }
+                    Err(e) => {
+                        set_messages.update(|msgs| msgs.push(ChatMessage::Error(e)));
+                    }
                 }
-            }
-        });
+                set_loading.set(false);
+                scroll_to_bottom();
+            });
+        }
     };
 
     let on_submit_click = on_submit.clone();
@@ -104,13 +136,14 @@ pub fn ChatView(api_base: String) -> impl IntoView {
                                 let resp = am.response;
                                 let intent = resp.intent.clone();
                                 let sources = resp.sources.clone();
+                                let answer_html = md_to_html(&resp.answer);
                                 view! {
                                     <div class="message assistant">
                                         <span class="message-label">
                                             "Assistant "
                                             <IntentBadge intent=intent />
                                         </span>
-                                        <div class="message-bubble" inner_html=resp.answer></div>
+                                        <div class="message-bubble" inner_html=answer_html></div>
                                         <SourcesPanel sources=sources />
                                     </div>
                                 }
@@ -167,5 +200,45 @@ pub fn ChatView(api_base: String) -> impl IntoView {
                 </button>
             </div>
         </div>
+    }
+}
+
+#[cfg(feature = "standalone")]
+async fn standalone_chat(
+    query: &str,
+    index_signal: RwSignal<Option<std::sync::Arc<crate::data::ChunkIndex>>>,
+    classifier_signal: RwSignal<Option<std::sync::Arc<code_rag_engine::intent::IntentClassifier>>>,
+    auth_signal: RwSignal<Option<crate::auth::AuthMethod>>,
+) -> Result<ChatResponse, String> {
+    let embedding = crate::embedder::embed_query(query).await?;
+
+    let index = index_signal.get_untracked().ok_or("Index not loaded")?;
+    let classifier = classifier_signal
+        .get_untracked()
+        .ok_or("Classifier not loaded")?;
+
+    match auth_signal.get_untracked() {
+        Some(ref a) if a.is_valid() => {
+            crate::standalone_api::send_chat_standalone(query, &embedding, &index, &classifier, a)
+                .await
+        }
+        _ => {
+            crate::standalone_api::send_chat_rag_only(query, &embedding, &index, &classifier).await
+        }
+    }
+}
+
+fn md_to_html(md: &str) -> String {
+    let parser = pulldown_cmark::Parser::new(md);
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    html
+}
+
+fn scroll_to_bottom() {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.query_selector(".chat-container").ok().flatten() {
+            el.set_scroll_top(el.scroll_height());
+        }
     }
 }

@@ -406,6 +406,78 @@ pre > code {
 	margin: 0;
 }
 
+/* Auth panel */
+.header-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1em;
+}
+
+.auth-panel {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	font-size: 0.75em;
+}
+
+.auth-btn {
+	background: rgb(var(--gray-light));
+	color: rgb(var(--gray-dark));
+	border: none;
+	border-radius: 6px;
+	padding: 0.4em 0.8em;
+	font-family: "Atkinson", sans-serif;
+	font-size: 1em;
+	font-weight: 700;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.auth-btn:hover {
+	background: rgb(var(--gray));
+	color: #fff;
+}
+
+.auth-btn.google {
+	background: var(--accent);
+	color: #fff;
+}
+
+.auth-btn.google:hover {
+	background: var(--accent-dark);
+}
+
+.auth-btn.sign-out {
+	font-weight: 400;
+}
+
+.auth-status {
+	color: #16a34a;
+	font-weight: 700;
+}
+
+.auth-error {
+	color: #dc2626;
+	font-size: 0.9em;
+}
+
+/* Loading status */
+.loading-status {
+	color: var(--accent);
+	font-size: 0.85em;
+	font-style: italic;
+}
+
+.error-banner {
+	background: #fef2f2;
+	color: #dc2626;
+	padding: 0.75em 1em;
+	border-radius: 8px;
+	margin: 0.5em 0;
+	font-size: 0.9em;
+}
+
 /* Responsive */
 @media (max-width: 720px) {
 	body {

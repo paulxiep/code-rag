@@ -17,11 +17,17 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/models
+      HF_HOME: /home/runner/.cache/models
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -41,19 +47,29 @@ jobs:
       - name: Cache embedding model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/huggingface
-          key: ${{ runner.os }}-hf-bge-small
+          path: /home/runner/.cache/models
+          key: ${{ runner.os }}-fastembed-bge-small
 
       - name: Install trunk
         run: cargo install trunk --locked
 
-      - name: Export data from LanceDB
-        run: cargo run --release -p code-raptor -- export --db-path data/portfolio.lance --output crates/code-rag-ui/static/index.json
+      - name: Ingest target repos
+        run: |
+          jq -c '.[]' config/targets.json | while read -r entry; do
+            repo=$(echo "$entry" | jq -r '.repo')
+            name=$(echo "$entry" | jq -r '.name')
+            dir="/tmp/targets/$name"
+            git clone "$repo" "$dir"
+            cargo run --release -p code-raptor -- ingest "$dir" --db-path /tmp/demo.lance --project-name "$name"
+          done
+
+      - name: Export to static JSON
+        run: cargo run --release -p code-raptor -- export --db-path /tmp/demo.lance --output crates/code-rag-ui/static/index.json
 
       - name: Build WASM (standalone mode)
         env:
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-        run: trunk build --release --features standalone crates/code-rag-ui/index.html
+        run: trunk build --release --features standalone --public-url /code-rag/ crates/code-rag-ui/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

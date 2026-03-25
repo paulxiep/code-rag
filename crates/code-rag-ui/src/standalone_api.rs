@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use code_rag_engine::context;
-use code_rag_engine::intent::{self, IntentClassifier, QueryIntent, RoutingTable};
-use code_rag_engine::retriever;
+use code_rag_engine::intent::{self, ClassificationResult, IntentClassifier, QueryIntent, RoutingTable};
+use code_rag_engine::retriever::{self, RetrievalResult};
 
 use crate::api::{ChatResponse, SourceInfo};
 use crate::auth::AuthMethod;
@@ -30,6 +30,30 @@ pub fn build_classifier(index: &ChunkIndex) -> IntentClassifier {
     IntentClassifier::from_prototypes(prototypes)
 }
 
+/// Run RAG retrieval only (no LLM) — works without auth.
+pub async fn send_chat_rag_only(
+    _query: &str,
+    query_embedding: &[f32],
+    index: &ChunkIndex,
+    classifier: &IntentClassifier,
+) -> Result<ChatResponse, String> {
+    let (result, classification) = run_retrieval(query_embedding, index, classifier);
+    let sources = build_source_list(&result);
+    let intent_str = format_intent(classification.intent);
+
+    let answer = format!(
+        "<p>Found <strong>{}</strong> relevant sources. \
+         Sign in with Google or provide an API key to get an AI-generated answer.</p>",
+        sources.len()
+    );
+
+    Ok(ChatResponse {
+        answer,
+        sources,
+        intent: intent_str,
+    })
+}
+
 /// Run the full RAG pipeline in-browser and return a ChatResponse.
 pub async fn send_chat_standalone(
     query: &str,
@@ -38,29 +62,57 @@ pub async fn send_chat_standalone(
     classifier: &IntentClassifier,
     auth: &AuthMethod,
 ) -> Result<ChatResponse, String> {
-    let routing = RoutingTable::default();
+    let (result, classification) = run_retrieval(query_embedding, index, classifier);
 
-    // Classify intent
+    let ctx = context::build_context(&result);
+    let prompt = context::build_prompt(query, &ctx);
+    let answer = gemini::generate(&prompt, auth).await?;
+
+    let sources = build_source_list(&result);
+    let intent_str = format_intent(classification.intent);
+
+    Ok(ChatResponse {
+        answer,
+        sources,
+        intent: intent_str,
+    })
+}
+
+// --- Internal helpers ---
+
+fn run_retrieval(
+    query_embedding: &[f32],
+    index: &ChunkIndex,
+    classifier: &IntentClassifier,
+) -> (RetrievalResult, ClassificationResult) {
+    let routing = RoutingTable::default();
     let classification = intent::classify(query_embedding, classifier);
     let config = intent::route(classification.intent, &routing);
 
-    // Brute-force vector search
     let (code_raw, readme_raw, crate_raw, module_doc_raw) =
         search::brute_force_search(query_embedding, index, &config);
 
-    // Score and build retrieval result
-    let result =
-        retriever::to_retrieval_result(code_raw, readme_raw, crate_raw, module_doc_raw, classification.intent);
+    let result = retriever::to_retrieval_result(
+        code_raw,
+        readme_raw,
+        crate_raw,
+        module_doc_raw,
+        classification.intent,
+    );
 
-    // Build context and prompt
-    let ctx = context::build_context(&result);
-    let prompt = context::build_prompt(query, &ctx);
+    (result, classification)
+}
 
-    // Call Gemini API
-    let answer = gemini::generate(&prompt, auth).await?;
+fn format_intent(intent: QueryIntent) -> String {
+    serde_json::to_string(&intent)
+        .unwrap_or_else(|_| "\"unknown\"".to_string())
+        .trim_matches('"')
+        .to_string()
+}
 
-    // Build source list (same format as backend API response)
+fn build_source_list(result: &RetrievalResult) -> Vec<SourceInfo> {
     let mut sources: Vec<SourceInfo> = Vec::new();
+
     for s in &result.code_chunks {
         sources.push(SourceInfo {
             chunk_type: "code".into(),
@@ -105,20 +157,12 @@ pub async fn send_chat_standalone(
             line: 0,
         });
     }
+
     sources.sort_by(|a, b| {
         b.relevance
             .partial_cmp(&a.relevance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let intent_str = serde_json::to_string(&classification.intent)
-        .unwrap_or_else(|_| "\"unknown\"".to_string())
-        .trim_matches('"')
-        .to_string();
-
-    Ok(ChatResponse {
-        answer,
-        sources,
-        intent: intent_str,
-    })
+    sources
 }

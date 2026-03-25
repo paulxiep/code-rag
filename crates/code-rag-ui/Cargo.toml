@@ -18,11 +18,17 @@ js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
-    "HtmlTextAreaElement", "KeyboardEvent", "ScrollBehavior", "ScrollIntoViewOptions",
+    "HtmlTextAreaElement", "HtmlInputElement", "KeyboardEvent",
+    "ScrollBehavior", "ScrollIntoViewOptions",
+    "Document", "Element",
     # standalone feature needs these for OAuth2 + crypto
     "Crypto", "SubtleCrypto", "Window", "Location",
+    "History", "UrlSearchParams", "Storage",
+    "console",
 ] }
 console_error_panic_hook = "0.1"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+uuid = { version = "1.20", features = ["js"] }
 
 # standalone-only deps (activated by feature flag)
 code-rag-engine = { path = "../code-rag-engine", optional = true }

@@ -1,10 +1,10 @@
 # Development Log
 
-## 2026-03-25: GitHub Pages Demo — Shared Engine + Static Deployment
+## 2026-03-26: GitHub Pages Demo
 
 ### Summary
 
-Infrastructure for deploying code-rag-chat as a fully static GitHub Pages demo. The existing Leptos WASM frontend gains a `standalone` feature flag that switches from calling a backend API to running the entire RAG pipeline in-browser. A new shared `code-rag-engine` crate ensures both deployment modes compile the same algorithms.
+Deployed code-rag-chat as a fully static GitHub Pages demo. The Leptos WASM frontend's `standalone` feature flag switches from calling a backend API to running the entire RAG pipeline in-browser — embedding queries via transformers.js, brute-force vector search, intent classification, and context building all run client-side. The shared `code-rag-engine` crate ensures both Docker and GitHub Pages deployments compile the same algorithms. LLM generation (Gemini) is optional, unlocked via Google OAuth2 or API key.
 
 ### Motivation
 
@@ -24,11 +24,15 @@ code-rag-engine (shared, pure Rust, no I/O)
 code-rag-ui (Leptos WASM)
 ├── [default]     — api.rs calls /chat endpoint (Docker)
 └── [standalone]  — runs engine in-browser:
+    ├── embedder.rs    — wasm-bindgen bridge to transformers.js
     ├── data.rs        — load pre-computed ChunkIndex from static JSON
     ├── search.rs      — brute-force L2 vector search
     ├── gemini.rs      — direct Gemini REST API (optional, needs auth)
     ├── auth.rs        — OAuth2 PKCE + API key, localStorage persistence
-    └── standalone_api.rs — orchestrates pipeline using code-rag-engine functions
+    ├── standalone_api.rs — full + rag-only pipeline variants
+    └── components/auth_panel.rs — sign-in UI (Google OAuth2 + API key)
+
+static/embedder.js — transformers.js wrapper (BGE-small-en-v1.5 via CDN)
 ```
 
 ### What Changed
@@ -50,7 +54,11 @@ code-rag-ui (Leptos WASM)
 - `search.rs` — brute-force L2 search over `EmbeddedChunk<T>` vectors.
 - `gemini.rs` — direct Gemini REST API client, supports both `AuthMethod::ApiKey` and `AuthMethod::OAuth2`.
 - `auth.rs` — PKCE flow helpers (code verifier, SHA-256 challenge, token exchange), localStorage persistence.
-- `standalone_api.rs` — full in-browser RAG pipeline: embed → classify → route → search → score → context → prompt → generate.
+- `standalone_api.rs` — two variants: `send_chat_standalone()` (full pipeline with Gemini) and `send_chat_rag_only()` (retrieval without LLM, works unauthenticated).
+- `embedder.rs` — wasm-bindgen bridge calling `window.__codeRagEmbedQuery()` from transformers.js.
+- `components/auth_panel.rs` — Google OAuth2 sign-in button + API key input, handles PKCE callback on page load.
+- `main.rs` — feature-gated: standalone mode loads `ChunkIndex` from `/index.json`, pre-warms embedder, provides context signals; default mode fetches from backend API.
+- `chat_view.rs` — feature-gated submit handler: standalone embeds query in-browser → runs pipeline; default calls HTTP `/chat`.
 - Default build (no flag) unchanged — still calls `/chat` API.
 
 **New subcommand: `code-raptor export`**
@@ -59,9 +67,23 @@ code-rag-ui (Leptos WASM)
 - Outputs single JSON file matching the `ChunkIndex` format.
 - Usage: `code-raptor export --db-path data/portfolio.lance --output crates/code-rag-ui/static/index.json`
 
-**New: `.github/workflows/gh-pages.yml`**
-- CI pipeline: export data → `trunk build --features standalone` → deploy to GitHub Pages.
+**New: `static/embedder.js`**
+- Thin wrapper around transformers.js v3.8.1 (loaded via CDN, no npm/bundler).
+- Model: `Xenova/bge-small-en-v1.5` — same 384-dim vectors as native fastembed, fully compatible.
+- Lazy-loads on first query; model cached in IndexedDB (~33MB).
+- Exposes `window.__codeRagEmbedQuery()` and `window.__codeRagInitEmbedder()`.
+
+**New: `config/targets.json`**
+- Configurable list of repos for CI ingestion (repo URL + project name).
+- Workflow loops over entries, cloning and ingesting each into the same LanceDB.
+
+**Rewritten: `.github/workflows/gh-pages.yml`**
+- Installs `protobuf-compiler` (required by lance-encoding).
+- Reads `config/targets.json`, clones each repo, runs ingestion → export → `trunk build --features standalone` → deploy.
 - Injects `GOOGLE_OAUTH_CLIENT_ID` from GitHub secrets at build time.
+
+**Updated: `dockerfile/Dockerfile`**
+- Added `COPY` for `static/` directory (embedder.js).
 
 ### Key Design Decisions
 
@@ -71,14 +93,17 @@ code-rag-ui (Leptos WASM)
 
 3. **Optional LLM generation** — retrieval results (intent, chunks, sources, scores) display without auth. Both Docker and GitHub Pages modes benefit. Auth unlocks Gemini answers.
 
-4. **Closure-based `IntentClassifier::build()`** — avoids trait overhead while decoupling from concrete `Embedder`. The WASM build passes tract-onnx embeddings, native passes fastembed, export tool pre-computes them.
+4. **Closure-based `IntentClassifier::build()`** — avoids trait overhead while decoupling from concrete `Embedder`. The WASM build uses pre-computed prototypes, native passes fastembed, export tool pre-computes them.
+
+5. **transformers.js over ort-WASM** — ort's WASM target is experimental. transformers.js v3.8.1 is battle-tested, runs the same BGE-small-en-v1.5 model, loads from CDN with no build tooling, and caches in IndexedDB. Thin JS interop via `#[wasm_bindgen]`.
+
+6. **Config-driven ingestion targets** — `config/targets.json` lists repos to ingest in CI, making it easy to add projects without editing the workflow.
 
 ### Remaining Work
 
-- Wire standalone modules into ChatView UI (auth screen → chat with retrieval → optional generation)
-- `tract-onnx` WASM embedder for query embedding
-- Service Worker for ONNX model caching
 - End-to-end testing of GitHub Pages deployment
+- OAuth2 redirect URI configuration in GCP Console (`https://paulxiep.github.io/code-rag/`)
+- Progress indicator for first-time model download (~33MB)
 
 ### Test Results
 

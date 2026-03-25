@@ -29,6 +29,7 @@ pub fn SourcesPanel(sources: Vec<SourceInfo>) -> impl IntoView {
                             view! {
                                 <div class="source-card">
                                     <div class="source-header">
+                                        <span class="source-project">{s.project.clone()}</span>
                                         <span class="source-label">{s.label.clone()}</span>
                                         <span class="source-type">{s.chunk_type.clone()}</span>
                                         <span class="source-relevance">

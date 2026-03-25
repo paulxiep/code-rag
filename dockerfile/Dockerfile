@@ -57,6 +57,7 @@ COPY code-rag/crates/code-rag-ui/src ./crates/code-rag-ui/src
 COPY code-rag/crates/code-rag-ui/index.html ./crates/code-rag-ui/index.html
 COPY code-rag/crates/code-rag-ui/style ./crates/code-rag-ui/style
 COPY code-rag/crates/code-rag-ui/public ./crates/code-rag-ui/public
+COPY code-rag/crates/code-rag-ui/static ./crates/code-rag-ui/static
 
 # Rebuild server with real source
 RUN touch src/main.rs \
