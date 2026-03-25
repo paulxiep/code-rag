@@ -1,5 +1,5 @@
 use super::retriever::{RetrievalResult, ScoredChunk};
-use crate::models::{CrateChunk, ModuleDocChunk};
+use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 
 /// System prompt - instructs the LLM how to behave
 pub const SYSTEM_PROMPT: &str = r#"You are a helpful assistant answering questions about a developer's portfolio of coding projects.
@@ -42,7 +42,7 @@ pub fn build_context(result: &RetrievalResult) -> String {
     sections.join("\n\n")
 }
 
-fn format_code_section(chunks: &[ScoredChunk<crate::models::CodeChunk>]) -> String {
+fn format_code_section(chunks: &[ScoredChunk<CodeChunk>]) -> String {
     let mut out = String::from("## Relevant Code\n");
 
     for scored in chunks {
@@ -64,7 +64,7 @@ fn format_code_section(chunks: &[ScoredChunk<crate::models::CodeChunk>]) -> Stri
     out
 }
 
-fn format_readme_section(chunks: &[ScoredChunk<crate::models::ReadmeChunk>]) -> String {
+fn format_readme_section(chunks: &[ScoredChunk<ReadmeChunk>]) -> String {
     let mut out = String::from("## Project Documentation\n");
 
     for scored in chunks {
@@ -145,8 +145,7 @@ fn truncate(s: &str, max_chars: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::intent::QueryIntent;
-    use crate::models::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+    use crate::intent::QueryIntent;
 
     fn scored<T>(chunk: T, score: f32) -> ScoredChunk<T> {
         ScoredChunk { chunk, score }

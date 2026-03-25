@@ -37,10 +37,12 @@
 
 | Crate | Purpose | Key Files |
 |-------|---------|-----------|
-| `code-raptor` | Ingestion CLI — tree-sitter parsing, language handlers, incremental ingestion, docstring + call extraction | `ingestion/parser.rs`, `ingestion/language.rs`, `ingestion/languages/`, `main.rs` |
+| `code-raptor` | Ingestion CLI — tree-sitter parsing, language handlers, incremental ingestion, data export | `ingestion/`, `export.rs`, `main.rs` |
+| `code-rag-engine` | Shared algorithms — intent classification, context building, scoring (pure, no I/O, compiles to wasm32) | `intent.rs`, `context.rs`, `config.rs`, `retriever.rs` |
 | `code-rag-store` | Embedder (FastEmbed) + VectorStore (LanceDB) with scored search API | `embedder.rs`, `vector_store.rs` |
 | `code-rag-types` | Shared types — CodeChunk, ReadmeChunk, etc. with UUID, content_hash | `lib.rs` |
-| `code-rag-chat` | Query API — intent classification, query routing, retrieval traces, context builder, LLM | `api/`, `engine/` |
+| `code-rag-chat` | Query API — retrieval, LLM, serves WASM UI | `api/`, `engine/` |
+| `code-rag-ui` | Leptos WASM SPA — chat interface (default: backend API, standalone: in-browser RAG) | `components/`, `standalone_api.rs` |
 
 ## Query Pipeline
 
@@ -144,8 +146,12 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 10. **Distance → relevance**: `1.0 / (1.0 + dist)` — simple, monotonic, metric-agnostic
 11. **Two-consumer SoC**: Context builder uses chunk content (ignores scores). Source builder uses scores (ignores content)
 12. **Mutex on Embedder**: Only resource needing synchronization (model weights)
-13. **htmx frontend**: Server-rendered HTML with async updates, minimal JS
+13. **Leptos WASM frontend**: Client-side rendered SPA with reactive signals
 14. **Two-stage Docker**: Separate ingestion from query serving
+15. **Shared engine crate**: `code-rag-engine` contains pure algorithms — compiles to both native and wasm32
+16. **Feature-flag deployment**: `code-rag-ui --features standalone` switches data source from backend API to in-browser RAG pipeline
+17. **Closure-based decoupling**: `IntentClassifier::build()` takes embedding closure, not concrete type — works with fastembed (native) or tract-onnx (WASM)
+18. **Optional LLM generation**: Retrieval pipeline works without auth; LLM answers are an add-on
 
 ## Intent-Aware Retrieval
 
@@ -162,9 +168,12 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 # Ingest repositories
 docker-compose -f docker-compose-ingest.yaml up
 
-# Run query server
+# Run query server (Docker)
 docker-compose up
 
-# Clean up
-sh clean_docker.sh
+# Export data for static demo
+cargo run -p code-raptor -- export --db-path data/portfolio.lance --output crates/code-rag-ui/static/index.json
+
+# Build static GitHub Pages demo
+trunk build --release --features standalone crates/code-rag-ui/index.html
 ```

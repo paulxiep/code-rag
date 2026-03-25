@@ -1,10 +1,11 @@
-mod config;
-pub mod context;
 pub mod generator;
-pub mod intent;
 pub mod retriever;
 
-pub use config::EngineConfig;
+// Re-export shared engine logic from the platform-agnostic crate
+pub use code_rag_engine::context;
+pub use code_rag_engine::intent;
+
+pub use code_rag_engine::config::EngineConfig;
 pub use generator::LlmClient;
 
 use thiserror::Error;

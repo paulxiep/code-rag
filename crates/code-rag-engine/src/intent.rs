@@ -1,9 +1,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::EngineError;
 use super::config::RetrievalConfig;
-use crate::store::Embedder;
 
 /// Query intent categories.
 ///
@@ -67,8 +65,12 @@ pub struct IntentClassifier {
 
 impl IntentClassifier {
     /// Build the classifier by embedding all prototype queries.
-    /// Called once at startup before embedder is wrapped in Mutex.
-    pub fn build(embedder: &mut Embedder) -> Result<Self, EngineError> {
+    ///
+    /// Accepts any embedding function — caller provides their platform-specific
+    /// embedder as a closure. This keeps the engine crate free of I/O dependencies.
+    pub fn build<E>(
+        mut embed_batch: impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, E>,
+    ) -> Result<Self, E> {
         let mut prototypes = HashMap::new();
 
         for (intent, texts) in [
@@ -77,7 +79,7 @@ impl IntentClassifier {
             (QueryIntent::Relationship, RELATIONSHIP_PROTOTYPES),
             (QueryIntent::Comparison, COMPARISON_PROTOTYPES),
         ] {
-            let embeddings = embedder.embed_batch(texts)?;
+            let embeddings = embed_batch(texts)?;
             prototypes.insert(intent, embeddings);
         }
 
@@ -86,6 +88,15 @@ impl IntentClassifier {
             default: QueryIntent::Implementation,
             threshold: 0.3,
         })
+    }
+
+    /// Build from pre-computed prototype embeddings (e.g., loaded from exported data).
+    pub fn from_prototypes(prototypes: HashMap<QueryIntent, Vec<Vec<f32>>>) -> Self {
+        Self {
+            prototypes,
+            default: QueryIntent::Implementation,
+            threshold: 0.3,
+        }
     }
 }
 
@@ -134,7 +145,7 @@ pub fn classify(query_embedding: &[f32], classifier: &IntentClassifier) -> Class
 
 /// Compute cosine similarity between two vectors.
 /// Returns 0.0 if either vector has zero magnitude.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "vectors must have same dimension");
 
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -320,91 +331,37 @@ mod tests {
         assert_eq!(config.code_limit, 99);
     }
 
-    // --- Classification tests (require model download) ---
+    // --- Classification tests with mock embedder ---
 
     #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classifier_build() {
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
+    fn test_classifier_build_with_closure() {
+        // Mock embedder that returns fixed-dimension vectors
+        let classifier = IntentClassifier::build(|texts: &[&str]| {
+            Ok::<_, String>(texts.iter().map(|_| vec![0.1; 384]).collect())
+        })
+        .unwrap();
         assert_eq!(classifier.prototypes.len(), 4);
     }
 
     #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classify_overview() {
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
-        let embedding = embedder.embed_one("What is this project about?").unwrap();
-        let result = classify(&embedding, &classifier);
-        assert_eq!(result.intent, QueryIntent::Overview);
-        assert!(result.confidence > 0.3);
+    fn test_classifier_build_propagates_error() {
+        let result = IntentClassifier::build(|_texts: &[&str]| {
+            Err::<Vec<Vec<f32>>, _>("mock embed error")
+        });
+        assert!(result.is_err());
     }
 
     #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classify_implementation() {
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
-        let embedding = embedder.embed_one("How does the retriever work?").unwrap();
-        let result = classify(&embedding, &classifier);
-        assert_eq!(result.intent, QueryIntent::Implementation);
-        assert!(result.confidence > 0.3);
-    }
+    fn test_classify_below_threshold_returns_default() {
+        // Build with zero vectors so all similarities are 0
+        let classifier = IntentClassifier::build(|texts: &[&str]| {
+            Ok::<_, String>(texts.iter().map(|_| vec![0.0; 3]).collect())
+        })
+        .unwrap();
 
-    #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classify_relationship() {
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
-        let embedding = embedder
-            .embed_one("What calls the retrieve function?")
-            .unwrap();
-        let result = classify(&embedding, &classifier);
-        assert_eq!(result.intent, QueryIntent::Relationship);
-        assert!(result.confidence > 0.3);
-    }
-
-    #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classify_comparison() {
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
-        let embedding = embedder
-            .embed_one("What are the differences between the retriever and the generator?")
-            .unwrap();
-        let result = classify(&embedding, &classifier);
-        assert_eq!(result.intent, QueryIntent::Comparison);
-        assert!(result.confidence > 0.3);
-    }
-
-    #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classify_paraphrase_implementation() {
-        // This query would FAIL with keyword matching ("explain" → Overview)
-        // Embedding similarity should correctly classify as Implementation
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
-        let embedding = embedder
-            .embed_one("Explain how the retriever implements caching")
-            .unwrap();
-        let result = classify(&embedding, &classifier);
-        assert_eq!(result.intent, QueryIntent::Implementation);
-    }
-
-    #[test]
-    #[ignore = "downloads model, run with --ignored"]
-    fn test_classify_and_route_overview() {
-        let mut embedder = Embedder::new().unwrap();
-        let classifier = IntentClassifier::build(&mut embedder).unwrap();
-        let routing = RoutingTable::default();
-
-        let embedding = embedder.embed_one("What is code-raptor?").unwrap();
-        let classification = classify(&embedding, &classifier);
-        let config = route(classification.intent, &routing);
-
-        assert_eq!(classification.intent, QueryIntent::Overview);
-        assert_eq!(config.code_limit, 5);
-        assert_eq!(config.crate_limit, 3);
+        let query = vec![1.0, 0.0, 0.0];
+        let result = classify(&query, &classifier);
+        assert_eq!(result.intent, QueryIntent::Implementation); // default
+        assert_eq!(result.confidence, 0.0);
     }
 }

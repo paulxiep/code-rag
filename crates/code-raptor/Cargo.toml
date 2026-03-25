@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 code-rag-types = { path = "../code-rag-types" }
+code-rag-engine = { path = "../code-rag-engine" }
 code-rag-store = { path = "../code-rag-store" }
 
 # Parsing
@@ -16,6 +17,12 @@ tree-sitter-typescript = "0.23"
 streaming-iterator = "0.1"
 toml = "0.8"
 walkdir = "2.5"
+
+# Arrow / LanceDB (for export)
+arrow-array = "56.2"
+arrow-buffer = "56.2"
+lancedb = "0.23"
+futures = "0.3.31"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

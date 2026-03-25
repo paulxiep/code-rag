@@ -1,5 +1,7 @@
 //! code-raptor CLI - Code knowledge graph construction tool
 
+mod export;
+
 use clap::{Parser, Subcommand};
 use code_raptor::{
     DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
@@ -57,6 +59,16 @@ enum Commands {
         #[arg(short, long, default_value = "data/portfolio.lance")]
         db_path: String,
     },
+    /// Export all chunks with embeddings for static GitHub Pages demo
+    Export {
+        /// Path to the LanceDB database
+        #[arg(short, long, default_value = "data/portfolio.lance")]
+        db_path: String,
+
+        /// Output JSON file path
+        #[arg(short, long)]
+        output: String,
+    },
 }
 
 #[tokio::main]
@@ -113,6 +125,11 @@ async fn main() -> anyhow::Result<()> {
             let store = VectorStore::new(&db_path, 384).await?;
             let projects = store.list_projects().await?;
             info!("Projects indexed: {:?}", projects);
+        }
+        Commands::Export { db_path, output } => {
+            info!("Exporting from {} to {}", db_path, output);
+            export::run_export(&db_path, &output).await?;
+            info!("Export complete: {}", output);
         }
     }
 

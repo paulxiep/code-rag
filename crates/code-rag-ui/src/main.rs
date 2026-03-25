@@ -1,6 +1,17 @@
 mod api;
 mod components;
 
+#[cfg(feature = "standalone")]
+mod auth;
+#[cfg(feature = "standalone")]
+mod data;
+#[cfg(feature = "standalone")]
+mod gemini;
+#[cfg(feature = "standalone")]
+mod search;
+#[cfg(feature = "standalone")]
+mod standalone_api;
+
 use leptos::prelude::*;
 use leptos::mount::mount_to_body;
 use wasm_bindgen_futures::spawn_local;

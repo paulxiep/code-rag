@@ -10,6 +10,7 @@ edition = "2024"
 
 [dependencies]
 code-rag-types = { path = "crates/code-rag-types" }
+code-rag-engine = { path = "crates/code-rag-engine" }
 code-rag-store = { path = "crates/code-rag-store" }
 
 # LLM

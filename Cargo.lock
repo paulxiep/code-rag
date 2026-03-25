@@ -1470,6 +1470,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
  "dotenvy",
@@ -1483,6 +1484,15 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "code-rag-engine"
+version = "0.1.0"
+dependencies = [
+ "code-rag-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1515,10 +1525,13 @@ dependencies = [
 name = "code-rag-ui"
 version = "0.1.0"
 dependencies = [
+ "code-rag-engine",
+ "code-rag-types",
  "console_error_panic_hook",
  "gloo-net",
  "gloo-storage",
  "gloo-timers",
+ "js-sys",
  "leptos",
  "serde",
  "serde_json",
@@ -1532,9 +1545,14 @@ name = "code-raptor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-buffer",
  "clap",
+ "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
+ "futures",
+ "lancedb",
  "serde",
  "serde_json",
  "streaming-iterator",
