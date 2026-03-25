@@ -1470,6 +1470,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
  "dotenvy",
@@ -1483,6 +1484,15 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "code-rag-engine"
+version = "0.1.0"
+dependencies = [
+ "code-rag-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

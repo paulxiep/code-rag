@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::intent::QueryIntent;
-use crate::engine::retriever::{RetrievalResult, ScoredChunk};
+use code_rag_engine::intent::QueryIntent;
+use code_rag_engine::retriever::{RetrievalResult, ScoredChunk};
 use crate::models::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 
 /// POST /chat request
@@ -135,7 +135,7 @@ pub struct ProjectsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::intent::QueryIntent;
+    use code_rag_engine::intent::QueryIntent;
 
     fn scored<T>(chunk: T, score: f32) -> ScoredChunk<T> {
         ScoredChunk { chunk, score }

@@ -24,7 +24,7 @@ impl AppState {
         let mut embedder = Embedder::new()?;
 
         // Build classifier BEFORE wrapping embedder in Mutex
-        let classifier = IntentClassifier::build(&mut embedder)?;
+        let classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
 
         let store = VectorStore::new(db_path, embedder.dimension()).await?;
         let llm = LlmClient::from_env(model)?;
