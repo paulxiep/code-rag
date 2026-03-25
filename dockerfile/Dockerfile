@@ -28,14 +28,16 @@ WORKDIR /build
 # Copy workspace manifests
 COPY code-rag/Cargo.toml code-rag/Cargo.lock ./
 COPY code-rag/crates/code-rag-types/Cargo.toml ./crates/code-rag-types/
+COPY code-rag/crates/code-rag-engine/Cargo.toml ./crates/code-rag-engine/
 COPY code-rag/crates/code-rag-store/Cargo.toml ./crates/code-rag-store/
 COPY code-rag/crates/code-raptor/Cargo.toml ./crates/code-raptor/
 COPY code-rag/crates/code-rag-ui/Cargo.toml ./crates/code-rag-ui/
 
 # Create dummy sources for dependency caching
-RUN mkdir -p src crates/code-rag-types/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
+RUN mkdir -p src crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
     echo "fn main() {println!(\"dummy\")}" > src/main.rs && \
     echo "// dummy" > crates/code-rag-types/src/lib.rs && \
+    echo "// dummy" > crates/code-rag-engine/src/lib.rs && \
     echo "// dummy" > crates/code-rag-store/src/lib.rs && \
     echo "fn main() {}" > crates/code-raptor/src/main.rs && \
     echo "// dummy" > crates/code-raptor/src/lib.rs && \
@@ -43,11 +45,12 @@ RUN mkdir -p src crates/code-rag-types/src crates/code-rag-store/src crates/code
 
 # Build server crates to cache dependencies (exclude UI — different target)
 RUN cargo build --release --workspace --exclude code-rag-ui && \
-    rm -rf src crates/code-rag-types/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src
+    rm -rf src crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src
 
 # Copy actual source for all crates
 COPY code-rag/src ./src
 COPY code-rag/crates/code-rag-types/src ./crates/code-rag-types/src
+COPY code-rag/crates/code-rag-engine/src ./crates/code-rag-engine/src
 COPY code-rag/crates/code-rag-store/src ./crates/code-rag-store/src
 COPY code-rag/crates/code-raptor/src ./crates/code-raptor/src
 COPY code-rag/crates/code-rag-ui/src ./crates/code-rag-ui/src
@@ -58,6 +61,7 @@ COPY code-rag/crates/code-rag-ui/public ./crates/code-rag-ui/public
 # Rebuild server with real source
 RUN touch src/main.rs \
           crates/code-rag-types/src/lib.rs \
+          crates/code-rag-engine/src/lib.rs \
           crates/code-rag-store/src/lib.rs \
           crates/code-raptor/src/lib.rs \
           crates/code-raptor/src/main.rs && \

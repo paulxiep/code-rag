@@ -44,6 +44,7 @@ To clean, run `sh clean_docker.sh`.
 | **V2.2** | 2026-02-08 | Intent classification + query routing (cosine similarity) |
 | **V2.3** | 2026-02-08 | Retrieval traces (scored sources, cross-type ranking) |
 | **Leptos Migration** | 2026-03-25 | WASM frontend (replace htmx/Askama with Leptos) |
+| **GitHub Pages Demo** | 2026-03-25 | Shared engine crate + standalone WASM deployment |
 
 ## Purpose
 
@@ -78,13 +79,14 @@ To clean, run `sh clean_docker.sh`.
 
 | Crate | Single Responsibility |
 |-------|----------------------|
-| `code-raptor` | Ingestion CLI — parsing, chunk extraction |
-| `code-rag-store` | Storage — embeddings, vector search |
+| `code-raptor` | Ingestion CLI — parsing, chunk extraction, data export |
+| `code-rag-engine` | Shared algorithms — intent, context, scoring (pure, no I/O) |
+| `code-rag-store` | Storage — embeddings, vector search (native) |
 | `code-rag-types` | Shared types — no logic |
 | `code-rag-chat` | Query API — retrieval, LLM, serves WASM UI |
-| `code-rag-ui` | Leptos WASM SPA — chat interface |
+| `code-rag-ui` | Leptos WASM SPA — chat interface (backend or standalone mode) |
 
-## Current State (V2 Complete)
+## Current State
 
 - Function-level chunking: 1 function/class → 1 vector (BGE-small, 384 dim)
 - Supports Rust, Python, and TypeScript via tree-sitter AST parsing
@@ -94,7 +96,9 @@ To clean, run `sh clean_docker.sh`.
 - Query routing: declarative routing table maps intent → retrieval limits
 - Retrieval traces: all 4 chunk types surfaced with relevance scores, sorted by relevance
 - Incremental ingestion: SHA256 file hashing, skips unchanged files
-- 132 tests, 0 warnings
+- Shared `code-rag-engine` crate: pure algorithms compile to native + wasm32
+- GitHub Pages demo: `standalone` feature runs full RAG pipeline in-browser (LLM generation optional)
+- 135 tests, 0 warnings
 
 ## Known Limitations
 

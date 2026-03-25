@@ -22,8 +22,10 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **4 chunk types**: Code functions, README files, Crate metadata, Module docs
 - **Trait-based language abstraction**: Add new languages by implementing `LanguageHandler` trait
 - **Vector search**: LanceDB with FastEmbed (BGE-small-en-v1.5, 384 dimensions)
-- **LLM integration**: Google Gemini via rig-core
-- **Web UI**: htmx + Askama templates for server-rendered chat interface
+- **LLM integration**: Google Gemini via rig-core (optional — retrieval works without API key)
+- **Web UI**: Leptos WASM SPA (Rust compiled to WebAssembly)
+- **GitHub Pages demo**: Full RAG pipeline runs in-browser via `standalone` feature — no backend needed
+- **Shared engine**: `code-rag-engine` crate compiles to both native and wasm32
 
 ## Quick Start
 
@@ -39,11 +41,13 @@ Open http://localhost:3000 for the chat interface.
 
 ## Current State
 
-**V2.3** — Query Intelligence complete (132 tests, 0 warnings):
-- `code-raptor`: Ingestion CLI — trait-based language handlers, incremental ingestion, docstring + call extraction
+135 tests, 0 warnings:
+- `code-raptor`: Ingestion CLI — trait-based language handlers, incremental ingestion, docstring + call extraction, data export
+- `code-rag-engine`: Shared algorithms — intent classification, context building, scoring (compiles to native + wasm32)
 - `code-rag-store`: Embedder + VectorStore — scored search API, distance-aware retrieval
 - `code-rag-types`: Shared types — UUID chunk IDs, content hashes, nullable docstrings
-- `code-rag-chat`: Query API — intent classification, query routing, retrieval traces, structured logging
+- `code-rag-chat`: Query API — retrieval, LLM, serves WASM UI
+- `code-rag-ui`: Leptos WASM SPA — default mode calls backend API, standalone mode runs full RAG pipeline in-browser
 
 ## Technology
 
@@ -53,4 +57,5 @@ Open http://localhost:3000 for the chat interface.
 - **Vector Database**: LanceDB
 - **Embeddings**: FastEmbed (BGE-small-en-v1.5)
 - **Code Parsing**: tree-sitter (Rust, Python, TypeScript/TSX)
-- **Frontend**: htmx + Askama templates
+- **Frontend**: Leptos 0.8 (Rust WASM, CSR)
+- **Deployment**: Docker (local) + GitHub Pages (static demo)

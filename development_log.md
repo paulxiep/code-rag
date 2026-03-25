@@ -1,5 +1,91 @@
 # Development Log
 
+## 2026-03-25: GitHub Pages Demo — Shared Engine + Static Deployment
+
+### Summary
+
+Infrastructure for deploying code-rag-chat as a fully static GitHub Pages demo. The existing Leptos WASM frontend gains a `standalone` feature flag that switches from calling a backend API to running the entire RAG pipeline in-browser. A new shared `code-rag-engine` crate ensures both deployment modes compile the same algorithms.
+
+### Motivation
+
+- **Portfolio demo without Docker**: Visitors can try the RAG pipeline directly in their browser — no clone, no build, no backend.
+- **Automatic sync**: Improvements to intent classification, context building, or retrieval routing in `code-rag-engine` automatically apply to both Docker and GitHub Pages deployments.
+- **LLM generation is optional**: The retrieval pipeline (embedding, intent classification, vector search, context formatting) works without any API key. Auth unlocks Gemini-powered answers.
+
+### Architecture
+
+```
+code-rag-engine (shared, pure Rust, no I/O)
+├── intent.rs     — classify(), route(), cosine_similarity()
+├── context.rs    — build_context(), build_prompt(), SYSTEM_PROMPT
+├── config.rs     — RetrievalConfig, EngineConfig, RoutingTable
+└── retriever.rs  — ScoredChunk<T>, RetrievalResult, distance_to_relevance()
+
+code-rag-ui (Leptos WASM)
+├── [default]     — api.rs calls /chat endpoint (Docker)
+└── [standalone]  — runs engine in-browser:
+    ├── data.rs        — load pre-computed ChunkIndex from static JSON
+    ├── search.rs      — brute-force L2 vector search
+    ├── gemini.rs      — direct Gemini REST API (optional, needs auth)
+    ├── auth.rs        — OAuth2 PKCE + API key, localStorage persistence
+    └── standalone_api.rs — orchestrates pipeline using code-rag-engine functions
+```
+
+### What Changed
+
+**New crate: `code-rag-engine`** (`crates/code-rag-engine/`)
+- Extracted pure, platform-agnostic functions from `src/engine/` — no I/O, no HTTP, compiles to wasm32.
+- `IntentClassifier::build()` takes a closure `impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, E>` instead of concrete `Embedder`. Caller provides their own embedding function.
+- Added `IntentClassifier::from_prototypes()` for loading pre-computed embeddings.
+- Added `retriever::to_retrieval_result()` helper for building results from raw search tuples.
+- 25 tests (includes 3 new closure-based classifier tests).
+
+**Updated: `src/engine/`**
+- Now re-exports from `code-rag-engine`. Keeps only I/O-bound `retrieve()` and platform-specific `EngineError`.
+- `src/api/state.rs` passes closure to `IntentClassifier::build`.
+- `src/api/dto.rs` imports directly from `code_rag_engine`.
+
+**New feature: `code-rag-ui --features standalone`**
+- `data.rs` — `ChunkIndex` type, `load_index()` fetches pre-computed JSON.
+- `search.rs` — brute-force L2 search over `EmbeddedChunk<T>` vectors.
+- `gemini.rs` — direct Gemini REST API client, supports both `AuthMethod::ApiKey` and `AuthMethod::OAuth2`.
+- `auth.rs` — PKCE flow helpers (code verifier, SHA-256 challenge, token exchange), localStorage persistence.
+- `standalone_api.rs` — full in-browser RAG pipeline: embed → classify → route → search → score → context → prompt → generate.
+- Default build (no flag) unchanged — still calls `/chat` API.
+
+**New subcommand: `code-raptor export`**
+- Reads all 4 chunk types from LanceDB including embedding vectors.
+- Embeds intent prototype queries and includes them in the export.
+- Outputs single JSON file matching the `ChunkIndex` format.
+- Usage: `code-raptor export --db-path data/portfolio.lance --output crates/code-rag-ui/static/index.json`
+
+**New: `.github/workflows/gh-pages.yml`**
+- CI pipeline: export data → `trunk build --features standalone` → deploy to GitHub Pages.
+- Injects `GOOGLE_OAUTH_CLIENT_ID` from GitHub secrets at build time.
+
+### Key Design Decisions
+
+1. **Shared crate, no traits** — `code-rag-engine` contains only pure functions and data types. No trait abstractions, no generics over I/O. Both platforms call the same functions with different data sources.
+
+2. **Feature flag, not separate crate** — `code-rag-ui` with `standalone` feature reuses all UI components. Only the data layer switches (API calls vs in-browser pipeline).
+
+3. **Optional LLM generation** — retrieval results (intent, chunks, sources, scores) display without auth. Both Docker and GitHub Pages modes benefit. Auth unlocks Gemini answers.
+
+4. **Closure-based `IntentClassifier::build()`** — avoids trait overhead while decoupling from concrete `Embedder`. The WASM build passes tract-onnx embeddings, native passes fastembed, export tool pre-computes them.
+
+### Remaining Work
+
+- Wire standalone modules into ChatView UI (auth screen → chat with retrieval → optional generation)
+- `tract-onnx` WASM embedder for query embedding
+- Service Worker for ONNX model caching
+- End-to-end testing of GitHub Pages deployment
+
+### Test Results
+
+135 tests pass across all workspace crates (up from 132 — 3 new closure-based classifier tests in `code-rag-engine`).
+
+---
+
 ## 2026-03-25: Leptos Migration — WASM Frontend
 
 ### Summary
