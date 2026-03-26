@@ -69,7 +69,9 @@ jobs:
       - name: Build WASM (standalone mode)
         env:
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-        run: trunk build --release --features standalone --public-url /code-rag/ crates/code-rag-ui/index.html
+        run: |
+          rm -rf crates/code-rag-ui/dist
+          trunk build --release --features standalone --public-url /code-rag/ --dist crates/code-rag-ui/dist crates/code-rag-ui/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
