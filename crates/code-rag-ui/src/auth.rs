@@ -95,7 +95,7 @@ extern "C" {
     fn gis_revoke(access_token: &str);
 }
 
-const SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/generative-language.retriever";
+const SCOPE: &str = "https://www.googleapis.com/auth/generative-language.peruserquota https://www.googleapis.com/auth/generative-language.retriever";
 
 /// Open the Google sign-in popup and return an OAuth2 credential.
 pub async fn request_google_token(client_id: &str) -> Result<AuthMethod, String> {
