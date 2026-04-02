@@ -111,6 +111,16 @@ impl TestDataset {
 
         warnings
     }
+
+    /// Strict validation for CI and baseline runs.
+    /// Calls validate() and promotes warnings to errors.
+    pub fn validate_strict(&self) -> anyhow::Result<()> {
+        let warnings = self.validate();
+        if !warnings.is_empty() {
+            anyhow::bail!("Dataset validation failed:\n{}", warnings.join("\n"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +313,22 @@ mod tests {
         let json = r#"{"id": "test", "query": "q"}"#;
         let case: TestCase = serde_json::from_str(json).unwrap();
         assert!(case.excluded_files.is_empty());
+    }
+
+    #[test]
+    fn validate_strict_good_dataset() {
+        let dataset = sample_dataset();
+        assert!(dataset.validate_strict().is_ok());
+    }
+
+    #[test]
+    fn validate_strict_rejects_bad_dataset() {
+        let dataset = TestDataset {
+            description: "Test".to_string(),
+            schema_version: 1,
+            cases: vec![], // zero cases triggers warning
+        };
+        assert!(dataset.validate_strict().is_err());
     }
 
     #[test]

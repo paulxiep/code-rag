@@ -1,5 +1,75 @@
 # Development Log
 
+## 2026-04-02: V3.2 — Recall Measurement Harness
+
+### Summary
+
+Built `code-rag-harness`, a second binary that measures retrieval quality by running test queries against the real engine pipeline (embed → classify → route → retrieve), stopping before LLM generation. Produces JSON + Markdown reports with recall@K, MRR, intent accuracy, and latency percentiles. Includes a structural refactor: extracted `src/lib.rs` and added `FlatChunk`/`flatten()` to centralize chunk flattening across harness and API.
+
+### Motivation
+
+- **Quantitative baseline for Tracks A/B/C:** Every future improvement (hierarchy, BM25, call graph) needs a "before" number. The harness produces this baseline.
+- **Two evaluation modes:** Full pipeline (real classifier) catches end-to-end regressions. Ground-truth mode (bypasses classifier) isolates pure retrieval quality for A/B comparisons.
+- **lib.rs extraction:** Rust requires shared library code for multi-binary crates. This structural correction unlocks all future binary extensions without modifying the library again.
+
+### What Changed
+
+**New files:**
+- `src/lib.rs` — Module declarations extracted from main.rs (structural correction for multi-binary crate)
+- `src/bin/harness.rs` — CLI entry point with clap (dataset, db-path, output, ground-truth-intent, strict, tag, verbose flags)
+- `src/harness/runner.rs` — `QueryResult`, `RetrievedItem` types; `run_all()` async execution against real pipeline; `to_retrieved_items()` flattening with 1-indexed ranks
+- `src/harness/matching.rs` — Pure hit detection functions (`matches_file`, `matches_identifier`, `matches_chunk_type`, `matches_project`, `matches_excluded_file`); `HitResult` struct; `evaluate_hits()` for all 7 TestCase expectation fields
+- `src/harness/metrics.rs` — `recall_at_k()`, `mrr()`, `percentile()`; `AggregateMetrics` and `IntentMetrics` structs; `compute_aggregate()` and `compute_by_intent()` aggregation
+- `src/harness/report.rs` — `HarnessReport`, `SystemConfig`, `QueryReport` structs; JSON + Markdown output; post-run warning generation; `git_short_hash()` helper
+
+**Modified files:**
+- `src/main.rs` — `mod` declarations replaced with `use code_rag_chat::*` imports
+- `src/engine/mod.rs` — Added re-exports for `RetrievalConfig` and `FlatChunk`
+- `src/harness/mod.rs` — Added submodule declarations (runner, matching, metrics, report)
+- `src/harness/dataset.rs` — Added `validate_strict()` method (promotes warnings to errors for CI)
+- `crates/code-rag-engine/src/retriever.rs` — Added `FlatChunk` struct and `RetrievalResult::flatten()` method (centralized flattening with relevance DESC, file_path ASC sort)
+- `crates/code-rag-engine/src/intent.rs` — Added `impl FromStr for QueryIntent` (parses "overview"/"implementation"/"relationship"/"comparison")
+- `src/api/dto.rs` — Simplified `build_sources()` to use `flatten()`, removed 4 `from_scored_*` helper methods
+- `Cargo.toml` — Added `[[bin]]` entries for both binaries, `clap` and `chrono` dependencies
+
+### Key Design Decisions
+
+- **`FlatChunk` + `flatten()` centralization:** Single source of truth for flattening typed chunk vectors. Used by both API (`build_sources()`) and harness evaluation. When Track A adds `FolderChunk`, only one `flatten()` arm needs updating.
+- **Pure matching/metrics modules:** All hit detection and metric computation are pure functions with no I/O — fully unit-testable without embedder, database, or async runtime.
+- **Coverage checks separate from recall:** `expected_projects`, `expected_chunk_types`, `min_relevant_results`, and `excluded_files` are boolean checks in `HitResult`, not part of the recall denominator. Recall stays focused on content retrieval (files + identifiers).
+- **Warmup embed before measurement:** Prevents embedder model load cost (~50MB) from skewing latency percentiles on small datasets.
+- **Ground-truth mode hard error:** Missing `expected_intent` in ground-truth mode fails the run immediately — prevents biased metrics from silent fallback.
+
+### Architecture
+
+```
+code-rag-harness binary
+  → harness module (dataset, runner, matching, metrics, report)
+  → engine module (classify, route, retrieve, FlatChunk, flatten)
+  → store module (Embedder, VectorStore)
+
+Does NOT depend on:
+  ✗ api module (no HTTP layer)
+  ✗ engine::generator (no LLM calls)
+```
+
+### Test Results
+
+96 tests pass (41 new + 55 existing), 0 failures, 1 ignored (requires GEMINI_API_KEY). Clippy clean. Fmt clean.
+
+| Module | New Tests |
+|--------|-----------|
+| `code-rag-engine/retriever.rs` | 5 (flatten sort, tiebreaker, line/no-line, empty) |
+| `code-rag-engine/intent.rs` | 2 (FromStr valid variants, invalid) |
+| `api/dto.rs` | 6 (refactored: build_sources per chunk type + sort + relevance_pct) |
+| `harness/dataset.rs` | 2 (validate_strict good/bad) |
+| `harness/runner.rs` | 2 (to_retrieved_items ranking, empty) |
+| `harness/matching.rs` | 25 (5 match functions + 20 evaluate_hits scenarios) |
+| `harness/metrics.rs` | 11 (recall, MRR, percentile, aggregate) |
+| `harness/report.rs` | 3 (JSON round-trip, Markdown render, git hash) |
+
+---
+
 ## 2026-04-02: V3.1 — Retrieval Test Dataset
 
 ### Summary

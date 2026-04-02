@@ -19,6 +19,19 @@ pub enum QueryIntent {
     Comparison,
 }
 
+impl std::str::FromStr for QueryIntent {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "overview" => Ok(Self::Overview),
+            "implementation" => Ok(Self::Implementation),
+            "relationship" => Ok(Self::Relationship),
+            "comparison" => Ok(Self::Comparison),
+            _ => Err(format!("unknown intent: {s}")),
+        }
+    }
+}
+
 // --- Prototype queries (static data, replaces keyword lists) ---
 
 const OVERVIEW_PROTOTYPES: &[&str] = &[
@@ -362,5 +375,34 @@ mod tests {
         let result = classify(&query, &classifier);
         assert_eq!(result.intent, QueryIntent::Implementation); // default
         assert_eq!(result.confidence, 0.0);
+    }
+
+    // --- FromStr tests ---
+
+    #[test]
+    fn test_from_str_all_variants() {
+        assert_eq!(
+            "overview".parse::<QueryIntent>().unwrap(),
+            QueryIntent::Overview
+        );
+        assert_eq!(
+            "implementation".parse::<QueryIntent>().unwrap(),
+            QueryIntent::Implementation
+        );
+        assert_eq!(
+            "relationship".parse::<QueryIntent>().unwrap(),
+            QueryIntent::Relationship
+        );
+        assert_eq!(
+            "comparison".parse::<QueryIntent>().unwrap(),
+            QueryIntent::Comparison
+        );
+    }
+
+    #[test]
+    fn test_from_str_invalid() {
+        assert!("nonsense".parse::<QueryIntent>().is_err());
+        assert!("Overview".parse::<QueryIntent>().is_err()); // case-sensitive
+        assert!("".parse::<QueryIntent>().is_err());
     }
 }
