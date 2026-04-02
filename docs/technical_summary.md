@@ -3,34 +3,45 @@
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Cargo Workspace                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌─────────────────┐   ┌─────────────────┐                  │
-│  │   code-raptor   │   │ portfolio-rag-  │                  │
-│  │   (Indexing)    │   │     chat        │                  │
-│  │                 │   │  (Query API)    │                  │
-│  │  - CLI          │   │                 │                  │
-│  │  - tree-sitter  │   │  - Axum server  │                  │
-│  │  - walkdir      │   │  - LLM client   │                  │
-│  └────────┬────────┘   └────────┬────────┘                  │
-│           │                     │                           │
-│           ▼                     ▼                           │
-│  ┌─────────────────────────────────────────┐                │
-│  │           code-rag-store                  │                │
-│  │  - Embedder (FastEmbed)                 │                │
-│  │  - VectorStore (LanceDB)                │                │
-│  └─────────────────┬───────────────────────┘                │
-│                    │                                        │
-│                    ▼                                        │
-│  ┌─────────────────────────────────────────┐                │
-│  │           code-rag-types                  │                │
-│  │  - CodeChunk, ReadmeChunk               │                │
-│  │  - CrateChunk, ModuleDocChunk           │                │
-│  └─────────────────────────────────────────┘                │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                        Cargo Workspace                            │
+├───────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌────────────────┐  │
+│  │   code-raptor   │   │  code-rag-chat  │   │  code-rag-ui   │  │
+│  │   (Indexing)    │   │  (Query API)    │   │ (Leptos WASM)  │  │
+│  │                 │   │                 │   │                │  │
+│  │  - CLI          │   │  - Axum server  │   │  - CSR SPA     │  │
+│  │  - tree-sitter  │   │  - LLM client   │   │  - standalone  │  │
+│  │  - walkdir      │   │  - Harness bin  │   │    mode        │  │
+│  └────────┬────────┘   └────────┬────────┘   └───────┬────────┘  │
+│           │                     │                     │          │
+│           │              ┌──────┴──────┐              │          │
+│           │              ▼             │              │          │
+│           │    ┌─────────────────┐     │              │          │
+│           │    │ code-rag-engine │     │              │          │
+│           │    │ (Pure Algos)    │◄────┼──────────────┘          │
+│           │    │ - intent        │     │  compiles to             │
+│           │    │ - context       │     │  native + wasm32         │
+│           │    │ - retriever     │     │                          │
+│           │    │ - FlatChunk     │     │                          │
+│           │    └────────┬────────┘     │                          │
+│           │             │              │                          │
+│           ▼             ▼              ▼                          │
+│  ┌──────────────────────────────────────────┐                    │
+│  │            code-rag-store                │                    │
+│  │  - Embedder (FastEmbed)                  │                    │
+│  │  - VectorStore (LanceDB)                 │                    │
+│  └─────────────────┬────────────────────────┘                    │
+│                    │                                             │
+│                    ▼                                             │
+│  ┌──────────────────────────────────────────┐                    │
+│  │            code-rag-types                │                    │
+│  │  - CodeChunk, ReadmeChunk                │                    │
+│  │  - CrateChunk, ModuleDocChunk            │                    │
+│  └──────────────────────────────────────────┘                    │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 ## Crate Responsibilities
@@ -41,7 +52,7 @@
 | `code-rag-engine` | Shared algorithms — intent classification, context building, scoring (pure, no I/O, compiles to wasm32) | `intent.rs`, `context.rs`, `config.rs`, `retriever.rs` |
 | `code-rag-store` | Embedder (FastEmbed) + VectorStore (LanceDB) with scored search API | `embedder.rs`, `vector_store.rs` |
 | `code-rag-types` | Shared types — CodeChunk, ReadmeChunk, etc. with UUID, content_hash | `lib.rs` |
-| `code-rag-chat` | Query API — retrieval, LLM, serves WASM UI | `api/`, `engine/` |
+| `code-rag-chat` | Query API — retrieval, LLM, quality harness, serves WASM UI | `api/`, `engine/`, `harness/`, `bin/harness.rs` |
 | `code-rag-ui` | Leptos WASM SPA — chat interface (default: backend API, standalone: in-browser RAG) | `components/`, `standalone_api.rs` |
 
 ## Query Pipeline
@@ -152,6 +163,64 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 16. **Feature-flag deployment**: `code-rag-ui --features standalone` switches data source from backend API to in-browser RAG pipeline
 17. **Closure-based decoupling**: `IntentClassifier::build()` takes embedding closure, not concrete type — works with fastembed (native) or tract-onnx (WASM)
 18. **Optional LLM generation**: Retrieval pipeline works without auth; LLM answers are an add-on
+19. **Quality harness with dual-run**: Measures recall@K, MRR, intent accuracy, latency across 43 test cases. Dual-run (classifier vs. ground-truth intent) isolates retrieval vs. classification quality
+20. **Report metadata for parallel tracks**: `label` + `completed_tracks` in JSON reports enables comparison across independently-developed Track improvements
+
+## Quality Harness (V3)
+
+### Structural Foundation
+
+V3 required a structural refactor: module declarations moved from `main.rs` to `src/lib.rs`, enabling a second binary target (`code-rag-harness`) to share library code. `FlatChunk` + `RetrievalResult::flatten()` centralize chunk flattening — used by both API (`build_sources()`) and harness evaluation. Single modification point when new chunk types are added.
+
+### Test Dataset (V3.1)
+
+43-query declarative test corpus with typed expectations. Three-tier strategy:
+
+| Tier | Count | Expectations | Purpose |
+|------|-------|-------------|---------|
+| Hero | 5 | All dimensions (files, identifiers, chunk types, projects, intent) | Regression anchors |
+| Directional | 20+ | 1-2 dimensions per intent category | Track quality per intent |
+| Smoke | 7 | Only `min_relevant_results` / `excluded_files` | Pipeline-agnostic sanity |
+
+Forward-compatible schema: all fields `Option<T>` or `Vec<T>` with `#[serde(default)]`. Future Track fields can be added without breaking existing cases.
+
+### Harness Binary (V3.2)
+
+Second binary (`code-rag-harness`) measures retrieval quality by running test queries against the real engine pipeline, stopping before LLM generation.
+
+```
+data/test_queries.json (43 cases)
+    │
+    ▼
+┌─────────────────┐
+│     Runner      │  embed → classify → route → retrieve (per query)
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌────────┐ ┌────────┐
+│Matching│ │Metrics │  recall@K, MRR, intent accuracy, latency
+└────┬───┘ └────┬───┘
+     │          │
+     ▼          ▼
+┌─────────────────┐
+│     Report      │  JSON + Markdown, per-intent breakdown, warnings
+└─────────────────┘
+```
+
+Matching: substring for file paths (survives directory restructuring), exact for identifiers/projects/chunk types. Recall excludes coverage checks — `expected_chunk_types`, `expected_projects`, `min_relevant_results`, and `excluded_files` are boolean checks alongside recall.
+
+### Baseline (V3.3)
+
+**Dual-run mode:** Full pipeline (real classifier) vs. ground-truth intent (bypassed classifier) isolates classifier-induced recall loss.
+
+| Metric | Full Pipeline | Ground-Truth |
+|--------|--------------|-------------|
+| recall@5 | 0.65 | 0.67 |
+| MRR | 0.60 | 0.61 |
+| Intent accuracy | 62% | 100% |
+
+Per-intent recall@5: overview 1.00, implementation 0.70, comparison 0.75, relationship 0.38. Ground-truth routing improves recall by only +0.02 — retrieval quality is the bottleneck, not classification. Report metadata (`label`, `completed_tracks`) enables comparison across parallel Track improvements.
 
 ## Intent-Aware Retrieval
 
@@ -176,4 +245,8 @@ cargo run -p code-raptor -- export --db-path data/portfolio.lance --output crate
 
 # Build static GitHub Pages demo
 trunk build --release --features standalone crates/code-rag-ui/index.html
+
+# Run quality harness (dual-run baseline)
+cargo run --release --bin code-rag-harness -- --verbose
+cargo run --release --bin code-rag-harness -- --ground-truth-intent --label baseline_gt --verbose
 ```

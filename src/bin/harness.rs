@@ -41,6 +41,14 @@ struct Cli {
     /// Print per-query results to stdout
     #[arg(long)]
     verbose: bool,
+
+    /// Report label for identification (e.g. "baseline", "post_a1", "post_a1_b1")
+    #[arg(long, default_value = "baseline")]
+    label: String,
+
+    /// Tracks completed at time of measurement (repeatable, e.g. --track a1 --track b1)
+    #[arg(long = "track")]
+    completed_tracks: Vec<String>,
 }
 
 #[tokio::main]
@@ -133,6 +141,8 @@ async fn main() -> anyhow::Result<()> {
             dataset_path: cli.dataset.clone(),
             total_cases: owned_cases.len(),
             use_classifier: !cli.ground_truth_intent,
+            label: cli.label.clone(),
+            completed_tracks: cli.completed_tracks.clone(),
         },
         aggregate,
         generation_cost: None,
@@ -143,8 +153,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 9. Write output
     std::fs::create_dir_all(&cli.output)?;
-    let json_path = std::path::Path::new(&cli.output).join(format!("{}.json", git_commit));
-    let md_path = std::path::Path::new(&cli.output).join(format!("{}.md", git_commit));
+    let json_path =
+        std::path::Path::new(&cli.output).join(format!("{}_{}.json", cli.label, git_commit));
+    let md_path =
+        std::path::Path::new(&cli.output).join(format!("{}_{}.md", cli.label, git_commit));
 
     report::write_json(&harness_report, &json_path)?;
     report::write_markdown(&harness_report, &md_path)?;

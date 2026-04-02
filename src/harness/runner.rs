@@ -55,7 +55,7 @@ pub fn to_retrieved_items(result: &RetrievalResult) -> Vec<RetrievedItem> {
 /// Run all test cases against the retrieval pipeline.
 ///
 /// If `ground_truth` is true, uses `expected_intent` from each test case for routing
-/// instead of the classifier. Missing `expected_intent` in ground-truth mode is a hard error.
+/// instead of the classifier. Cases without `expected_intent` are skipped with a warning.
 pub async fn run_all(
     cases: &[TestCase],
     embedder: &mut Embedder,
@@ -68,6 +68,19 @@ pub async fn run_all(
     let mut results = Vec::with_capacity(cases.len());
 
     for (i, case) in cases.iter().enumerate() {
+        // In ground-truth mode, skip cases without expected_intent
+        if ground_truth && case.expected_intent.is_none() {
+            if verbose {
+                println!(
+                    "Skipping query {}/{}: {} (no expected_intent for ground-truth mode)",
+                    i + 1,
+                    cases.len(),
+                    case.id
+                );
+            }
+            continue;
+        }
+
         if verbose {
             println!("Running query {}/{}: {}...", i + 1, cases.len(), case.id);
         }
@@ -79,12 +92,10 @@ pub async fn run_all(
 
         // 2. Classify or use ground-truth intent
         let (classified_intent, confidence) = if ground_truth {
-            let intent_str = case.expected_intent.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Ground-truth mode: test case '{}' missing expected_intent",
-                    case.id
-                )
-            })?;
+            let intent_str = case
+                .expected_intent
+                .as_deref()
+                .expect("already checked above");
             let intent: QueryIntent = intent_str
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!("{}", e))?;

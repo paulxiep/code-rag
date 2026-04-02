@@ -1,5 +1,86 @@
 # Development Log
 
+## 2026-04-03: V3.3 — Baseline Quality Metrics
+
+### Summary
+
+Ran the V3.2 harness against the V2 index in dual-run mode (full pipeline + ground-truth intent) and committed the first quantitative baseline. Added report metadata (`label`, `completed_tracks`) for tracking across parallel Tracks A/B/C. Changed ground-truth mode to skip cases without `expected_intent` instead of hard-erroring, making the dual-run workflow practical.
+
+### Motivation
+
+- **Quantitative "before":** Every future Track improvement needs a baseline to compare against. V3.3 establishes that baseline with concrete numbers.
+- **Classifier vs. retrieval isolation:** Dual-run reveals that ground-truth routing barely improves recall (+0.02), proving retrieval quality — not classification — is the bottleneck for Tracks A/B/C.
+- **Per-intent breakdown for Track prioritization:** Overview recall is perfect (1.00), implementation is solid (0.70), relationship is weak (0.38), comparison is good (0.75). This directly informs which Tracks to prioritize.
+
+### Baseline Results
+
+**Full Pipeline (real classifier):**
+
+| Metric | Value |
+|--------|-------|
+| recall@5 | 0.65 |
+| recall@10 | 0.65 |
+| MRR | 0.60 |
+| Intent accuracy | 62% |
+| Latency p50 | 115ms |
+| Latency p95 | 204ms |
+
+**Ground-Truth Intent (bypassed classifier):**
+
+| Metric | Value |
+|--------|-------|
+| recall@5 | 0.67 |
+| recall@10 | 0.67 |
+| MRR | 0.61 |
+| Intent accuracy | 100% |
+| Latency p50 | 57ms |
+| Latency p95 | 80ms |
+
+**Per-Intent Breakdown (full pipeline):**
+
+| Intent | Queries | recall@5 | Intent Acc |
+|--------|---------|----------|-----------|
+| overview | 8 | 1.00 | 62% |
+| implementation | 15 | 0.70 | 73% |
+| comparison | 4 | 0.75 | 50% |
+| relationship | 5 | 0.38 | 40% |
+
+### Key Observations
+
+- **Classifier doesn't hurt recall:** Ground-truth routing only improves recall@5 from 0.65 to 0.67 (+0.02). The classifier is wrong 38% of the time but retrieval still finds the right content. Focus on retrieval quality, not classification.
+- **Latency halves without classifier:** p50 drops from 115ms to 57ms. The classifier adds ~60ms overhead (embedding comparison against prototypes).
+- **Overview retrieval is solved:** recall@5 = 1.00 — README and crate chunks embed well with BGE-small.
+- **Relationship queries are weakest:** recall@5 = 0.38, exactly as predicted (0.2–0.5 range). Pure vector search cannot resolve call chains. This is the gap Track C addresses.
+- **recall@5 == recall@10:** No additional relevant results appear in positions 6–10. The system either finds it in top-5 or doesn't find it at all.
+- **4 never-found files:** `state.rs`, `export.rs`, `languages/mod.rs`, `rust.rs` — these exist in the codebase but never appear in any query's top-K results. Targets for Track B (hybrid search) improvement.
+
+### What Changed
+
+**New files:**
+- `data/reports/baseline_51e6de5.json` — Full pipeline baseline (JSON)
+- `data/reports/baseline_51e6de5.md` — Full pipeline baseline (Markdown)
+- `data/reports/baseline_gt_51e6de5.json` — Ground-truth intent baseline (JSON)
+- `data/reports/baseline_gt_51e6de5.md` — Ground-truth intent baseline (Markdown)
+
+**Modified files:**
+- `src/harness/report.rs` — Added `label: String` and `completed_tracks: Vec<String>` to `SystemConfig` for tracking across parallel Tracks; added label display in Markdown report header
+- `src/bin/harness.rs` — Added `--label` (default: `"baseline"`) and `--track` (repeatable) CLI args; filenames now use `{label}_{hash}` pattern
+- `src/harness/runner.rs` — Ground-truth mode now skips cases without `expected_intent` (with verbose warning) instead of hard-erroring; enables dual-run on full dataset
+- `v3.3.md` — Refined: added per-intent expectation table with Track mapping, Baseline→Track Handoff section, dual-run process, dataset freeze policy, metadata-based naming convention
+
+### Key Design Decisions
+
+- **Skip vs. hard-error in ground-truth mode:** Changed from hard error to skip-with-warning for cases without `expected_intent`. The original design prevented running ground-truth mode on the full 43-case dataset (11 smoke/edge cases lack intent). Skipping makes the dual-run workflow practical without requiring tag filtering.
+- **Metadata in JSON, not filenames:** `label` and `completed_tracks` stored in the report's `system` object. Handles parallel track completion (A1+B1) without combinatorial filename explosion.
+- **Baseline against pre-V3 index:** Intentionally did not re-ingest before baseline. V3 only added harness infrastructure — the baseline measures V2 retrieval quality, which is the correct "before" for Track comparisons.
+- **Dataset freeze policy:** The 43 test cases committed here are the baseline contract. Future Tracks add new cases but do not modify existing ones, preserving comparison validity.
+
+### Test Results
+
+192 tests pass (0 new tests in V3.3 — operational milestone), 0 failures, 5 ignored (require external resources). Clippy clean with `-D warnings`. Fmt clean.
+
+---
+
 ## 2026-04-02: V3.2 — Recall Measurement Harness
 
 ### Summary

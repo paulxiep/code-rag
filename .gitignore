@@ -2,3 +2,5 @@
 /data
 /cache
 .env
+/.fastembed_cache
+/dist

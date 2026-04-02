@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthMethod;
 
-const GEMINI_MODEL: &str = "gemini-2.5-flash";
+const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 #[derive(Serialize)]

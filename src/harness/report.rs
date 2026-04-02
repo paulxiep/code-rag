@@ -34,6 +34,10 @@ pub struct SystemConfig {
     pub dataset_path: String,
     pub total_cases: usize,
     pub use_classifier: bool,
+    /// Run label for report identification, e.g. "baseline", "post_a1", "post_a1_b1"
+    pub label: String,
+    /// Tracks completed at time of measurement, e.g. [] for baseline, ["a1", "b1"] for post-track
+    pub completed_tracks: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,9 +205,16 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
     writeln!(md, "# Quality Harness Report\n")?;
     writeln!(
         md,
-        "**Date:** {} | **Commit:** {} | **Model:** {}",
-        report.timestamp, report.git_commit, report.system.embedding_model
+        "**Label:** {} | **Date:** {} | **Commit:** {} | **Model:** {}",
+        report.system.label, report.timestamp, report.git_commit, report.system.embedding_model
     )?;
+    if !report.system.completed_tracks.is_empty() {
+        writeln!(
+            md,
+            "**Completed tracks:** {}",
+            report.system.completed_tracks.join(", ")
+        )?;
+    }
     writeln!(
         md,
         "**Dataset:** {} ({} queries)\n",
@@ -428,6 +439,8 @@ mod tests {
                 dataset_path: "data/test_queries.json".to_string(),
                 total_cases: 2,
                 use_classifier: true,
+                label: "baseline".to_string(),
+                completed_tracks: vec![],
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -469,6 +482,8 @@ mod tests {
                 dataset_path: "data/test_queries.json".to_string(),
                 total_cases: 2,
                 use_classifier: true,
+                label: "baseline".to_string(),
+                completed_tracks: vec![],
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
