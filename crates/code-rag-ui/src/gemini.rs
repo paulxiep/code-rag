@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthMethod;
 
-const GEMINI_MODEL: &str = "gemini-2.5-flash";
+const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 #[derive(Serialize)]
@@ -53,8 +53,8 @@ pub async fn generate(prompt: &str, auth: &AuthMethod) -> Result<String, String>
         }],
     };
 
-    let json_body = serde_json::to_string(&body)
-        .map_err(|e| format!("Failed to serialize request: {e}"))?;
+    let json_body =
+        serde_json::to_string(&body).map_err(|e| format!("Failed to serialize request: {e}"))?;
 
     let request = match auth {
         AuthMethod::ApiKey(key) => {

@@ -45,6 +45,9 @@ To clean, run `sh clean_docker.sh`.
 | **V2.3** | 2026-02-08 | Retrieval traces (scored sources, cross-type ranking) |
 | **Leptos Migration** | 2026-03-25 | WASM frontend (replace htmx/Askama with Leptos) |
 | **GitHub Pages Demo** | 2026-03-25 | Shared engine crate + standalone WASM deployment |
+| **V3.1** | 2026-04-02 | Retrieval test dataset (43 queries, 4 intent categories) |
+| **V3.2** | 2026-04-02 | Recall measurement harness (recall@K, MRR, intent accuracy) |
+| **V3.3** | 2026-04-03 | Baseline quality metrics (dual-run, per-intent breakdown) |
 
 ## Purpose
 
@@ -83,7 +86,7 @@ To clean, run `sh clean_docker.sh`.
 | `code-rag-engine` | Shared algorithms — intent, context, scoring (pure, no I/O) |
 | `code-rag-store` | Storage — embeddings, vector search (native) |
 | `code-rag-types` | Shared types — no logic |
-| `code-rag-chat` | Query API — retrieval, LLM, serves WASM UI |
+| `code-rag-chat` | Query API — retrieval, LLM, quality harness (2 binaries) |
 | `code-rag-ui` | Leptos WASM SPA — chat interface (backend or standalone mode) |
 
 ## Current State
@@ -95,15 +98,18 @@ To clean, run `sh clean_docker.sh`.
 - Intent classification: cosine similarity against prototype query embeddings
 - Query routing: declarative routing table maps intent → retrieval limits
 - Retrieval traces: all 4 chunk types surfaced with relevance scores, sorted by relevance
+- Quality harness: 43-query test dataset, recall@K, MRR, intent accuracy, latency — dual-run mode
+- Baseline: recall@5 = 0.65, overview 1.00, implementation 0.70, comparison 0.75, relationship 0.38
 - Incremental ingestion: SHA256 file hashing, skips unchanged files
 - Shared `code-rag-engine` crate: pure algorithms compile to native + wasm32
 - GitHub Pages demo: `standalone` feature runs full RAG pipeline in-browser (LLM generation optional)
-- 135 tests, 0 warnings
+- 192 tests, 0 warnings
 
 ## Known Limitations
 
 - **Granularity**: Cannot search within functions or at file/module level
-- **Relationships**: Call enrichment is probabilistic — no structured graph queries yet
+- **Relationships**: Call enrichment is probabilistic — no structured graph queries yet (relationship recall@5 = 0.38)
+- **Exact match**: No keyword/BM25 search — exact identifier queries rely on semantic similarity alone
 
 ## Planned Features
 
@@ -112,14 +118,14 @@ See [project-vision.md](project-vision.md) and [development_plan.md](development
 ---
 
 ### Keywords
-*Extracted by GitHub Copilot*
 
 - **Language:** `Rust`
-- **Architecture & Patterns:** `Layered Architecture (API/Store/Ingestion)` · `Trait-Based Abstraction (LanguageHandler)` · `Registry Pattern (OnceLock)` · `Three-Layer Pipeline (Parse→Reconcile→Orchestrate)` · `Router Pattern` · `Handler Pattern` · `Shared State (Arc)` · `Repository Pattern` · `DTO Pattern` · `Modular Design` · `Pipeline Pattern (Ingest→Embed→Store)` · `Visitor Pattern (WalkDir)` · `Error Propagation (thiserror)` · `Ephemeral Side-Channel Pattern` · `Declarative Routing Table` · `Scored Search API` · `ScoredChunk<T> (Generic Wrapper)` · `Retrieval Traces`
+- **Architecture & Patterns:** `Layered Architecture (API/Store/Ingestion)` · `Trait-Based Abstraction (LanguageHandler)` · `Registry Pattern (OnceLock)` · `Three-Layer Pipeline (Parse→Reconcile→Orchestrate)` · `Router Pattern` · `Handler Pattern` · `Shared State (Arc)` · `Repository Pattern` · `DTO Pattern` · `Modular Design` · `Pipeline Pattern (Ingest→Embed→Store)` · `Visitor Pattern (WalkDir)` · `Error Propagation (thiserror)` · `Ephemeral Side-Channel Pattern` · `Declarative Routing Table` · `Scored Search API` · `ScoredChunk<T> (Generic Wrapper)` · `Retrieval Traces` · `Multi-Binary Crate (lib.rs extraction)` · `FlatChunk Centralization`
 - **LLM & RAG:** `RAG (Retrieval-Augmented Generation)` · `LLM Integration` · `Google Gemini API` · `rig-core` · `Semantic Search` · `Chatbot` · `Intent Classification (Cosine Similarity)` · `Prototype Query Embeddings` · `Intent-Aware Retrieval` · `Cross-Type Source Ranking` · `Distance-to-Relevance Scoring` · `Retrieval Transparency`
+- **Quality & Evaluation:** `Recall@K` · `MRR (Mean Reciprocal Rank)` · `Intent Accuracy` · `Latency Percentiles (p50/p95)` · `Dual-Run Evaluation (Classifier vs Ground-Truth)` · `Per-Intent Breakdown` · `Declarative Test Dataset` · `Substring File Matching` · `Dataset Freeze Policy` · `Baseline Regression Tracking`
 - **Vector Database:** `LanceDB` · `FastEmbed` · `BGE Embeddings`
 - **Code Analysis:** `Tree-sitter` · `AST Parsing` · `Code Chunking` · `Docstring Extraction` · `JSDoc Parsing` · `Multi-Language (Rust, Python, TypeScript)` · `Incremental Ingestion (SHA256)` · `Call Graph Extraction (AST-based)` · `Function Call Detection (Direct + Method)`
 - **Web Framework:** `Axum` · `Leptos (WASM CSR)` · `Tower HTTP` · `CORS`
 - **Async & Runtime:** `Tokio Runtime` · `Async Programming`
-- **DevOps:** `Docker` · `Docker Compose`
-- **Rust Ecosystem:** `tracing` · `Error Handling (anyhow/thiserror)` · `Serde` · `Let-Chaining`
+- **DevOps:** `Docker` · `Docker Compose` · `GitHub Pages (WASM)` · `Google OAuth2 (GIS)`
+- **Rust Ecosystem:** `tracing` · `Error Handling (anyhow/thiserror)` · `Serde` · `clap (CLI)` · `chrono`

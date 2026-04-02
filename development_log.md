@@ -1,5 +1,207 @@
 # Development Log
 
+## 2026-04-03: V3.3 — Baseline Quality Metrics
+
+### Summary
+
+Ran the V3.2 harness against the V2 index in dual-run mode (full pipeline + ground-truth intent) and committed the first quantitative baseline. Added report metadata (`label`, `completed_tracks`) for tracking across parallel Tracks A/B/C. Changed ground-truth mode to skip cases without `expected_intent` instead of hard-erroring, making the dual-run workflow practical.
+
+### Motivation
+
+- **Quantitative "before":** Every future Track improvement needs a baseline to compare against. V3.3 establishes that baseline with concrete numbers.
+- **Classifier vs. retrieval isolation:** Dual-run reveals that ground-truth routing barely improves recall (+0.02), proving retrieval quality — not classification — is the bottleneck for Tracks A/B/C.
+- **Per-intent breakdown for Track prioritization:** Overview recall is perfect (1.00), implementation is solid (0.70), relationship is weak (0.38), comparison is good (0.75). This directly informs which Tracks to prioritize.
+
+### Baseline Results
+
+**Full Pipeline (real classifier):**
+
+| Metric | Value |
+|--------|-------|
+| recall@5 | 0.65 |
+| recall@10 | 0.65 |
+| MRR | 0.60 |
+| Intent accuracy | 62% |
+| Latency p50 | 115ms |
+| Latency p95 | 204ms |
+
+**Ground-Truth Intent (bypassed classifier):**
+
+| Metric | Value |
+|--------|-------|
+| recall@5 | 0.67 |
+| recall@10 | 0.67 |
+| MRR | 0.61 |
+| Intent accuracy | 100% |
+| Latency p50 | 57ms |
+| Latency p95 | 80ms |
+
+**Per-Intent Breakdown (full pipeline):**
+
+| Intent | Queries | recall@5 | Intent Acc |
+|--------|---------|----------|-----------|
+| overview | 8 | 1.00 | 62% |
+| implementation | 15 | 0.70 | 73% |
+| comparison | 4 | 0.75 | 50% |
+| relationship | 5 | 0.38 | 40% |
+
+### Key Observations
+
+- **Classifier doesn't hurt recall:** Ground-truth routing only improves recall@5 from 0.65 to 0.67 (+0.02). The classifier is wrong 38% of the time but retrieval still finds the right content. Focus on retrieval quality, not classification.
+- **Latency halves without classifier:** p50 drops from 115ms to 57ms. The classifier adds ~60ms overhead (embedding comparison against prototypes).
+- **Overview retrieval is solved:** recall@5 = 1.00 — README and crate chunks embed well with BGE-small.
+- **Relationship queries are weakest:** recall@5 = 0.38, exactly as predicted (0.2–0.5 range). Pure vector search cannot resolve call chains. This is the gap Track C addresses.
+- **recall@5 == recall@10:** No additional relevant results appear in positions 6–10. The system either finds it in top-5 or doesn't find it at all.
+- **4 never-found files:** `state.rs`, `export.rs`, `languages/mod.rs`, `rust.rs` — these exist in the codebase but never appear in any query's top-K results. Targets for Track B (hybrid search) improvement.
+
+### What Changed
+
+**New files:**
+- `data/reports/baseline_51e6de5.json` — Full pipeline baseline (JSON)
+- `data/reports/baseline_51e6de5.md` — Full pipeline baseline (Markdown)
+- `data/reports/baseline_gt_51e6de5.json` — Ground-truth intent baseline (JSON)
+- `data/reports/baseline_gt_51e6de5.md` — Ground-truth intent baseline (Markdown)
+
+**Modified files:**
+- `src/harness/report.rs` — Added `label: String` and `completed_tracks: Vec<String>` to `SystemConfig` for tracking across parallel Tracks; added label display in Markdown report header
+- `src/bin/harness.rs` — Added `--label` (default: `"baseline"`) and `--track` (repeatable) CLI args; filenames now use `{label}_{hash}` pattern
+- `src/harness/runner.rs` — Ground-truth mode now skips cases without `expected_intent` (with verbose warning) instead of hard-erroring; enables dual-run on full dataset
+- `v3.3.md` — Refined: added per-intent expectation table with Track mapping, Baseline→Track Handoff section, dual-run process, dataset freeze policy, metadata-based naming convention
+
+### Key Design Decisions
+
+- **Skip vs. hard-error in ground-truth mode:** Changed from hard error to skip-with-warning for cases without `expected_intent`. The original design prevented running ground-truth mode on the full 43-case dataset (11 smoke/edge cases lack intent). Skipping makes the dual-run workflow practical without requiring tag filtering.
+- **Metadata in JSON, not filenames:** `label` and `completed_tracks` stored in the report's `system` object. Handles parallel track completion (A1+B1) without combinatorial filename explosion.
+- **Baseline against pre-V3 index:** Intentionally did not re-ingest before baseline. V3 only added harness infrastructure — the baseline measures V2 retrieval quality, which is the correct "before" for Track comparisons.
+- **Dataset freeze policy:** The 43 test cases committed here are the baseline contract. Future Tracks add new cases but do not modify existing ones, preserving comparison validity.
+
+### Test Results
+
+192 tests pass (0 new tests in V3.3 — operational milestone), 0 failures, 5 ignored (require external resources). Clippy clean with `-D warnings`. Fmt clean.
+
+---
+
+## 2026-04-02: V3.2 — Recall Measurement Harness
+
+### Summary
+
+Built `code-rag-harness`, a second binary that measures retrieval quality by running test queries against the real engine pipeline (embed → classify → route → retrieve), stopping before LLM generation. Produces JSON + Markdown reports with recall@K, MRR, intent accuracy, and latency percentiles. Includes a structural refactor: extracted `src/lib.rs` and added `FlatChunk`/`flatten()` to centralize chunk flattening across harness and API.
+
+### Motivation
+
+- **Quantitative baseline for Tracks A/B/C:** Every future improvement (hierarchy, BM25, call graph) needs a "before" number. The harness produces this baseline.
+- **Two evaluation modes:** Full pipeline (real classifier) catches end-to-end regressions. Ground-truth mode (bypasses classifier) isolates pure retrieval quality for A/B comparisons.
+- **lib.rs extraction:** Rust requires shared library code for multi-binary crates. This structural correction unlocks all future binary extensions without modifying the library again.
+
+### What Changed
+
+**New files:**
+- `src/lib.rs` — Module declarations extracted from main.rs (structural correction for multi-binary crate)
+- `src/bin/harness.rs` — CLI entry point with clap (dataset, db-path, output, ground-truth-intent, strict, tag, verbose flags)
+- `src/harness/runner.rs` — `QueryResult`, `RetrievedItem` types; `run_all()` async execution against real pipeline; `to_retrieved_items()` flattening with 1-indexed ranks
+- `src/harness/matching.rs` — Pure hit detection functions (`matches_file`, `matches_identifier`, `matches_chunk_type`, `matches_project`, `matches_excluded_file`); `HitResult` struct; `evaluate_hits()` for all 7 TestCase expectation fields
+- `src/harness/metrics.rs` — `recall_at_k()`, `mrr()`, `percentile()`; `AggregateMetrics` and `IntentMetrics` structs; `compute_aggregate()` and `compute_by_intent()` aggregation
+- `src/harness/report.rs` — `HarnessReport`, `SystemConfig`, `QueryReport` structs; JSON + Markdown output; post-run warning generation; `git_short_hash()` helper
+
+**Modified files:**
+- `src/main.rs` — `mod` declarations replaced with `use code_rag_chat::*` imports
+- `src/engine/mod.rs` — Added re-exports for `RetrievalConfig` and `FlatChunk`
+- `src/harness/mod.rs` — Added submodule declarations (runner, matching, metrics, report)
+- `src/harness/dataset.rs` — Added `validate_strict()` method (promotes warnings to errors for CI)
+- `crates/code-rag-engine/src/retriever.rs` — Added `FlatChunk` struct and `RetrievalResult::flatten()` method (centralized flattening with relevance DESC, file_path ASC sort)
+- `crates/code-rag-engine/src/intent.rs` — Added `impl FromStr for QueryIntent` (parses "overview"/"implementation"/"relationship"/"comparison")
+- `src/api/dto.rs` — Simplified `build_sources()` to use `flatten()`, removed 4 `from_scored_*` helper methods
+- `Cargo.toml` — Added `[[bin]]` entries for both binaries, `clap` and `chrono` dependencies
+
+### Key Design Decisions
+
+- **`FlatChunk` + `flatten()` centralization:** Single source of truth for flattening typed chunk vectors. Used by both API (`build_sources()`) and harness evaluation. When Track A adds `FolderChunk`, only one `flatten()` arm needs updating.
+- **Pure matching/metrics modules:** All hit detection and metric computation are pure functions with no I/O — fully unit-testable without embedder, database, or async runtime.
+- **Coverage checks separate from recall:** `expected_projects`, `expected_chunk_types`, `min_relevant_results`, and `excluded_files` are boolean checks in `HitResult`, not part of the recall denominator. Recall stays focused on content retrieval (files + identifiers).
+- **Warmup embed before measurement:** Prevents embedder model load cost (~50MB) from skewing latency percentiles on small datasets.
+- **Ground-truth mode hard error:** Missing `expected_intent` in ground-truth mode fails the run immediately — prevents biased metrics from silent fallback.
+
+### Architecture
+
+```
+code-rag-harness binary
+  → harness module (dataset, runner, matching, metrics, report)
+  → engine module (classify, route, retrieve, FlatChunk, flatten)
+  → store module (Embedder, VectorStore)
+
+Does NOT depend on:
+  ✗ api module (no HTTP layer)
+  ✗ engine::generator (no LLM calls)
+```
+
+### Test Results
+
+96 tests pass (41 new + 55 existing), 0 failures, 1 ignored (requires GEMINI_API_KEY). Clippy clean. Fmt clean.
+
+| Module | New Tests |
+|--------|-----------|
+| `code-rag-engine/retriever.rs` | 5 (flatten sort, tiebreaker, line/no-line, empty) |
+| `code-rag-engine/intent.rs` | 2 (FromStr valid variants, invalid) |
+| `api/dto.rs` | 6 (refactored: build_sources per chunk type + sort + relevance_pct) |
+| `harness/dataset.rs` | 2 (validate_strict good/bad) |
+| `harness/runner.rs` | 2 (to_retrieved_items ranking, empty) |
+| `harness/matching.rs` | 25 (5 match functions + 20 evaluate_hits scenarios) |
+| `harness/metrics.rs` | 11 (recall, MRR, percentile, aggregate) |
+| `harness/report.rs` | 3 (JSON round-trip, Markdown render, git hash) |
+
+---
+
+## 2026-04-02: V3.1 — Retrieval Test Dataset
+
+### Summary
+
+Added `TestCase` and `TestDataset` types with a 43-query JSON test corpus (`data/test_queries.json`). This is the first step of the V3 quality harness — a declarative, forward-compatible test dataset that outlives any retrieval strategy change. Tests reference stable identifiers (file paths, function names), not implementation details (chunk IDs, embeddings).
+
+### Motivation
+
+- **Quantitative regression safety:** V1-V2 relied on manual hero queries. Tracks A/B/C will change retrieval behavior — need automated recall measurement to detect regressions.
+- **Forward compatibility:** Schema uses `#[serde(default)]` on all optional fields, so future Track fields (`expected_folder_paths`, `expected_bm25_hits`, `expected_callers`) can be added without breaking existing test cases.
+- **Three-tier strategy:** Hero queries (strict, all dimensions) anchor regressions. Directional queries (1-2 dimensions) track quality per intent. Smoke queries (`min_relevant_results`/`excluded_files` only) survive any pipeline change.
+
+### What Changed
+
+**New files:**
+- `src/harness/mod.rs` — Module root for quality harness infrastructure
+- `src/harness/dataset.rs` — `TestCase`, `TestDataset` types with serde derives; `load()`, `filter_by_tag()`, `validate()` methods; 15 unit tests covering serde round-trips, filtering, validation, and edge cases
+- `data/test_queries.json` — 43 test cases across 4 intent categories (overview, implementation, relationship, comparison) and 3 tiers (hero, directional, smoke)
+
+**Modified files:**
+- `src/main.rs` — Added `mod harness;` declaration
+- `crates/code-rag-ui/src/api.rs` — Fixed pre-existing clippy dead_code warning on `SourceInfo.relevance`
+- `crates/code-rag-ui/src/components/chat_view.rs` — Fixed pre-existing clippy collapsible_if warning
+- `crates/code-raptor/src/export.rs` — Fixed pre-existing clippy collapsible_if warning
+- `architecture.md` — Added V3 harness module to code-rag-chat component diagram, `FlatChunk`/`flatten()` + `FromStr` to code-rag-engine diagram, updated crate responsibilities table
+
+### Key Design Decisions
+
+- **Substring matching for files:** `"retriever.rs"` matches `"src/engine/retriever.rs"`. Survives directory restructuring. More specific substrings (`"engine/retriever.rs"`) mitigate false positives.
+- **Recall excludes coverage checks:** `expected_chunk_types`, `expected_projects`, `min_relevant_results`, and `excluded_files` are boolean checks reported alongside recall, not part of the recall numerator. This keeps the recall metric focused on "did we find the right content?"
+- **`mod harness` in `main.rs` (not `lib.rs`):** V3.2 will extract to `lib.rs` for the second binary target. No premature structural refactoring.
+- **`#[allow(dead_code)]` on harness module:** Types are only consumed by tests now; V3.2 binary will remove the need for this.
+
+### Test Results
+
+152 tests pass (15 new + 137 existing), 0 failures, 5 ignored (require external resources). Workspace-wide clippy clean with `-D warnings`.
+
+### Dataset Coverage
+
+| Category | Count | Primary assertions |
+|----------|-------|--------------------|
+| Hero | 5 | All dimensions — regression anchors (3 from V1, 2 from V2) |
+| Overview | 7 | `expected_chunk_types`, `expected_projects` |
+| Implementation | 11 | `expected_files`, `expected_identifiers` |
+| Relationship | 5 | `expected_files` (callers/callees) |
+| Comparison | 4 | `expected_files` (both subjects) |
+| Smoke | 7 | Only `min_relevant_results` and/or `excluded_files` |
+| Edge cases | 4 | Empty expectations, ambiguous, multi-project, very specific |
+
+---
+
 ## 2026-03-26: GitHub Pages Demo
 
 ### Summary

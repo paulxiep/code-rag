@@ -1,7 +1,5 @@
-mod api;
-mod engine;
-mod models;
-mod store;
+use code_rag_chat::api;
+use code_rag_chat::store;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

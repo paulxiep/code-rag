@@ -27,6 +27,7 @@ pub struct SourceInfo {
     pub path: String,
     pub label: String,
     pub project: String,
+    #[allow(dead_code)]
     pub relevance: f32,
     pub relevance_pct: u8,
     pub line: usize,

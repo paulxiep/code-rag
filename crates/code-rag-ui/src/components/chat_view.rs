@@ -1,5 +1,5 @@
-use leptos::prelude::*;
 use leptos::html::Textarea;
+use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 #[cfg(not(feature = "standalone"))]
@@ -32,8 +32,10 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
     let index_signal = use_context::<RwSignal<Option<std::sync::Arc<crate::data::ChunkIndex>>>>()
         .expect("ChunkIndex context missing");
     #[cfg(feature = "standalone")]
-    let classifier_signal = use_context::<RwSignal<Option<std::sync::Arc<code_rag_engine::intent::IntentClassifier>>>>()
-        .expect("IntentClassifier context missing");
+    let classifier_signal = use_context::<
+        RwSignal<Option<std::sync::Arc<code_rag_engine::intent::IntentClassifier>>>,
+    >()
+    .expect("IntentClassifier context missing");
     #[cfg(feature = "standalone")]
     let auth_signal = use_context::<RwSignal<Option<crate::auth::AuthMethod>>>()
         .expect("AuthMethod context missing");
@@ -236,9 +238,9 @@ fn md_to_html(md: &str) -> String {
 }
 
 fn scroll_to_bottom() {
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Some(el) = doc.query_selector(".chat-container").ok().flatten() {
-            el.set_scroll_top(el.scroll_height());
-        }
+    if let Some(doc) = web_sys::window().and_then(|w| w.document())
+        && let Some(el) = doc.query_selector(".chat-container").ok().flatten()
+    {
+        el.set_scroll_top(el.scroll_height());
     }
 }

@@ -18,6 +18,9 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **Intent classification**: Cosine similarity against prototype query embeddings — semantic, not keyword-based
 - **Query routing**: Declarative routing table maps intent (overview, implementation, relationship, comparison) to per-type retrieval limits
 - **Retrieval traces**: All 4 chunk types surfaced with relevance scores, sorted by relevance — the system shows its work
+- **Quality harness**: 43-query test dataset (3-tier: hero regression anchors, directional per-intent, pipeline-agnostic smoke tests) with automated recall@K, MRR, intent accuracy, and latency measurement — dual-run mode isolates classifier vs. retrieval quality
+- **Multi-binary crate**: `src/lib.rs` extraction enables `code-rag-harness` second binary alongside the main server — shared library, independent entry points
+- **Centralized chunk flattening**: `FlatChunk` + `flatten()` — single source of truth for both API responses and harness evaluation
 - **Incremental ingestion**: SHA256 file hashing skips unchanged files for fast re-indexing
 - **4 chunk types**: Code functions, README files, Crate metadata, Module docs
 - **Trait-based language abstraction**: Add new languages by implementing `LanguageHandler` trait
@@ -39,14 +42,26 @@ docker-compose up
 
 Open http://localhost:3000 for the chat interface.
 
+## Baseline Quality Metrics
+
+Measured against 43 test queries across 4 intent categories:
+
+| Metric | Full Pipeline | Ground-Truth Intent |
+|--------|--------------|-------------------|
+| recall@5 | 0.65 | 0.67 |
+| MRR | 0.60 | 0.61 |
+| Intent accuracy | 62% | 100% |
+
+Per-intent recall@5: overview 1.00, implementation 0.70, comparison 0.75, relationship 0.38. The +0.02 delta between runs proves retrieval quality — not classification — is the bottleneck.
+
 ## Current State
 
-135 tests, 0 warnings:
+192 tests, 0 warnings:
 - `code-raptor`: Ingestion CLI — trait-based language handlers, incremental ingestion, docstring + call extraction, data export
 - `code-rag-engine`: Shared algorithms — intent classification, context building, scoring (compiles to native + wasm32)
 - `code-rag-store`: Embedder + VectorStore — scored search API, distance-aware retrieval
 - `code-rag-types`: Shared types — UUID chunk IDs, content hashes, nullable docstrings
-- `code-rag-chat`: Query API — retrieval, LLM, serves WASM UI
+- `code-rag-chat`: Query API — retrieval, LLM, quality harness, serves WASM UI
 - `code-rag-ui`: Leptos WASM SPA — default mode calls backend API, standalone mode runs full RAG pipeline in-browser
 
 ## Technology

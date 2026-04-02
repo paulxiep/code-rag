@@ -14,11 +14,7 @@ fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Find top-k nearest chunks by L2 distance, return (chunk, distance) pairs.
-fn top_k<T: Clone>(
-    query: &[f32],
-    chunks: &[EmbeddedChunk<T>],
-    limit: usize,
-) -> Vec<(T, f32)> {
+fn top_k<T: Clone>(query: &[f32], chunks: &[EmbeddedChunk<T>], limit: usize) -> Vec<(T, f32)> {
     let mut scored: Vec<(T, f32)> = chunks
         .iter()
         .map(|ec| (ec.chunk.clone(), l2_distance(query, &ec.embedding)))
@@ -45,6 +41,10 @@ pub fn brute_force_search(
         top_k(query_embedding, &index.code_chunks, config.code_limit),
         top_k(query_embedding, &index.readme_chunks, config.readme_limit),
         top_k(query_embedding, &index.crate_chunks, config.crate_limit),
-        top_k(query_embedding, &index.module_doc_chunks, config.module_doc_limit),
+        top_k(
+            query_embedding,
+            &index.module_doc_chunks,
+            config.module_doc_limit,
+        ),
     )
 }

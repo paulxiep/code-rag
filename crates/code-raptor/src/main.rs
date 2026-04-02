@@ -3,12 +3,12 @@
 mod export;
 
 use clap::{Parser, Subcommand};
+use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use code_raptor::{
     DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
     IngestionStats, VectorStore, format_code_for_embedding, format_crate_for_embedding,
     format_module_doc_for_embedding, format_readme_for_embedding, reconcile, run_ingestion,
 };
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 

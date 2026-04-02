@@ -47,7 +47,7 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 |-----------|---------|-------------|
 | **Declarative** | Describe *what*, not *how*. Config over code. Data-driven behavior. | Configuration schemas for retrieval limits, intent routing, ignored directories. Rules are data, not if-else chains. |
 | **Modular** | Components are self-contained, swappable, and independently testable. | Trait-based interfaces. No cross-crate coupling except via shared types. Each crate has a single update frequency. |
-| **SoC** (Separation of Concerns) | Each module has ONE job. No god objects. Clear boundaries. | code-raptor = indexing. portfolio-rag-chat = querying. coderag-types = type definitions only (no logic). coderag-store = embedding + persistence. |
+| **SoC** (Separation of Concerns) | Each module has ONE job. No god objects. Clear boundaries. | code-raptor = indexing. code-rag-chat = querying. code-rag-engine = algorithms. code-rag-ui = frontend. code-rag-types = type definitions only (no logic). code-rag-store = embedding + persistence. |
 
 ### 2.2 Before Writing Code, Ask:
 
@@ -57,9 +57,10 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 
 ### 2.3 Design Constraints
 
-- **LanceDB as sole coupling point**: Producer (code-raptor) and consumer (portfolio-rag-chat) communicate via LanceDB schema only, not code imports
+- **LanceDB as sole coupling point**: Producer (code-raptor) and consumer (code-rag-chat) communicate via LanceDB schema only, not code imports
 - **No shared runtime state**: Each crate can run independently; no in-memory coupling
-- **Types-only shared crate**: `coderag-types` contains only struct definitions with serde, no business logic
+- **Types-only shared crate**: `code-rag-types` contains only struct definitions with serde, no business logic
+- **Pure algorithm crate**: `code-rag-engine` contains no I/O — compiles to both native and wasm32
 
 ---
 
@@ -72,62 +73,92 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
                     │    Developer    │
                     │  (queries code) │
                     └────────┬────────┘
-                             │ HTTP POST /api/chat
-                             ▼
-┌──────────────┐    ┌─────────────────────────┐    ┌──────────────┐
-│     Code     │───▶│      CodeRAG System     │───▶│  Gemini LLM  │
-│ Repositories │    │                         │    │   (Google)   │
-│   (input)    │    │  code-raptor + chat     │    │              │
-└──────────────┘    └─────────────────────────┘    └──────────────┘
                              │
-                             │ Answers with sources
-                             ▼
-                    ┌─────────────────┐
-                    │   Web Browser   │
-                    │   (htmx UI)     │
-                    └─────────────────┘
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+    ┌──────────────────┐          ┌──────────────────┐
+    │  Docker Mode     │          │  GitHub Pages    │
+    │  POST /api/chat  │          │  (standalone)    │
+    └────────┬─────────┘          └────────┬─────────┘
+             ▼                             ▼
+┌──────────────────────────┐   ┌──────────────────────────┐
+│   Axum Server            │   │   Leptos WASM SPA        │
+│   code-rag-chat          │   │   (in-browser RAG)       │
+│   + code-rag-engine      │   │   + code-rag-engine      │
+└────────────┬─────────────┘   └────────────┬─────────────┘
+             │                              │
+             ▼                              ▼
+┌──────────────────────────┐   ┌──────────────────────────┐
+│      Gemini LLM          │   │  Gemini LLM (optional)   │
+│      (Google)            │   │  (requires OAuth/API key) │
+└──────────────────────────┘   └──────────────────────────┘
+
+┌──────────────┐
+│     Code     │───▶ code-raptor (ingestion) ───▶ LanceDB
+│ Repositories │
+└──────────────┘
 ```
+
+**Two Deployment Modes:**
+- **Docker**: Axum serves the Leptos WASM frontend + JSON API. Server-side embedding, LanceDB queries, and LLM generation.
+- **GitHub Pages**: Fully static. The `standalone` feature flag runs the entire RAG pipeline in-browser via WASM (transformers.js embeddings, brute-force vector search, code-rag-engine algorithms). LLM generation is optional, unlocked via Google OAuth2 or API key.
 
 **External Actors:**
 - Developer: Submits natural language queries about code
-- CI/CD: Triggers ingestion on code changes (future)
+- CI/CD: Triggers ingestion, export, and GitHub Pages deployment
 
 **External Systems:**
-- Gemini LLM: Google's language model for response generation
+- Gemini LLM: Google's language model for response generation (required in Docker, optional in GitHub Pages)
 - Filesystem: Source code repositories to be indexed
 
 ### 3.2 Level 2: Container Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                       Cargo Workspace                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌─────────────────────┐       ┌─────────────────────┐          │
-│  │     code-raptor     │       │  portfolio-rag-chat │          │
-│  │    (CLI Binary)     │       │   (Web Server)      │          │
-│  │                     │       │                     │          │
-│  │  - tree-sitter      │       │  - Axum 0.8         │          │
-│  │  - walkdir          │       │  - rig-core (LLM)   │          │
-│  │  - clap             │       │  - htmx + Askama    │          │
-│  └──────────┬──────────┘       └──────────┬──────────┘          │
-│             │ writes                       │ reads               │
-│             ▼                              ▼                     │
-│  ┌───────────────────────────────────────────────────┐          │
-│  │                   coderag-store                    │          │
-│  │  - Embedder (FastEmbed BGE-small-en-v1.5)         │          │
-│  │  - VectorStore (LanceDB)                          │          │
-│  └───────────────────────┬───────────────────────────┘          │
-│                          │                                       │
-│                          ▼                                       │
-│  ┌───────────────────────────────────────────────────┐          │
-│  │                   coderag-types                    │          │
-│  │  - CodeChunk, ReadmeChunk                         │          │
-│  │  - CrateChunk, ModuleDocChunk                     │          │
-│  │  - (serde only, no logic)                         │          │
-│  └───────────────────────────────────────────────────┘          │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Cargo Workspace                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌─────────────────────┐       ┌─────────────────────┐              │
+│  │     code-raptor     │       │   code-rag-chat     │              │
+│  │    (CLI Binary)     │       │   (Web Server)      │              │
+│  │                     │       │   - root crate      │              │
+│  │  - tree-sitter      │       │   - Axum 0.8        │              │
+│  │  - walkdir          │       │   - rig-core (LLM)  │              │
+│  │  - clap             │       │   - serves UI       │              │
+│  └──────────┬──────────┘       └──────────┬──────────┘              │
+│             │ writes                       │ reads                   │
+│             ▼                              ▼                         │
+│  ┌───────────────────────────────────────────────────┐              │
+│  │                  code-rag-store                    │              │
+│  │  - Embedder (FastEmbed BGE-small-en-v1.5)         │              │
+│  │  - VectorStore (LanceDB)                          │              │
+│  └───────────────────────┬───────────────────────────┘              │
+│                          │                                           │
+│                          ▼                                           │
+│  ┌───────────────────────────────────────────────────┐              │
+│  │                  code-rag-types                    │              │
+│  │  - CodeChunk, ReadmeChunk                         │              │
+│  │  - CrateChunk, ModuleDocChunk                     │              │
+│  │  - (serde only, no logic)                         │              │
+│  └───────────────────────────────────────────────────┘              │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────┐              │
+│  │                 code-rag-engine                    │              │
+│  │  - IntentClassifier (cosine similarity)           │              │
+│  │  - Context building, routing, scoring             │              │
+│  │  - Pure Rust, no I/O — compiles to wasm32         │              │
+│  └───────────────────────────────────────────────────┘              │
+│       ▲ used by code-rag-chat (native)                               │
+│       ▲ used by code-rag-ui (WASM, standalone mode)                  │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────┐              │
+│  │                  code-rag-ui                       │              │
+│  │  - Leptos 0.8 WASM SPA (CSR)                     │              │
+│  │  [default] API client → code-rag-chat             │              │
+│  │  [standalone] In-browser RAG pipeline             │              │
+│  └───────────────────────────────────────────────────┘              │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
               ┌───────────────────────┐
@@ -145,10 +176,12 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 
 | Crate | Responsibility | Update Frequency |
 |-------|----------------|------------------|
-| `code-raptor` | Parse code, extract chunks, embed, store | On code changes |
-| `portfolio-rag-chat` | Query API, retrieval, LLM generation | On user queries |
-| `coderag-store` | Embedding model, vector database ops | Shared infrastructure |
-| `coderag-types` | Type definitions (data contracts) | On schema changes |
+| `code-raptor` | Parse code, extract chunks, embed, store, export | On code changes |
+| `code-rag-chat` | Query API (Axum), retrieval, LLM generation, serves UI, quality harness (second binary) | On user queries / quality measurement |
+| `code-rag-engine` | Pure algorithms: intent classification, context building, scoring | On algorithm changes |
+| `code-rag-ui` | Leptos WASM frontend (default: API client, standalone: in-browser RAG) | On UI changes |
+| `code-rag-store` | Embedding model, vector database ops | Shared infrastructure |
+| `code-rag-types` | Type definitions (data contracts) | On schema changes |
 
 ### 3.3 Level 3: Component Diagram
 
@@ -161,27 +194,30 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 │                                                              │
 │  ┌──────────────┐                                           │
 │  │   main.rs    │  CLI entry point + orchestration           │
+│  │              │  Subcommands:                              │
 │  │              │  - ingest <path> [--full] [--dry-run]      │
 │  │              │  - status                                  │
-│  │              │  - incremental/full ingestion modes        │
-│  │              │  - batch embedding (size: 25)              │
+│  │              │  - export --db-path --output               │
+│  │              │  Batch embedding (size: 25)                │
 │  └──────┬───────┘                                           │
 │         │                                                    │
-│         ▼                                                    │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │              ingestion/mod.rs                     │       │
-│  │  run_ingestion() - parse pipeline (sync, no DB)   │       │
-│  │  - walkdir traversal + file categorization        │       │
-│  │  - chunk extraction (code, readme, crate, docs)   │       │
-│  │  -> IngestionResult                               │       │
-│  └──────┬───────────────────────────────────────────┘       │
-│         │                                                    │
+│         ├──────────────────────────────────────────┐        │
+│         ▼                                          ▼        │
+│  ┌──────────────────────────────────────┐  ┌────────────┐  │
+│  │         ingestion/mod.rs             │  │ export.rs  │  │
+│  │  run_ingestion() - parse pipeline    │  │ run_export │  │
+│  │  - walkdir + file categorization     │  │ Reads all  │  │
+│  │  - chunk extraction (4 chunk types)  │  │ 4 tables + │  │
+│  │  -> (IngestionResult, CallMap)       │  │ embeddings │  │
+│  └──────┬───────────────────────────────┘  │ -> JSON    │  │
+│         │                                  └────────────┘  │
 │         ▼                                                    │
 │  ┌──────────────────────────────────────────────────┐       │
 │  │  ingestion/language.rs + languages/*.rs           │       │
 │  │  LanguageHandler trait:                           │       │
 │  │    name(), extensions(), grammar(),               │       │
-│  │    query_string(), extract_docstring()            │       │
+│  │    query_string(), extract_docstring(),           │       │
+│  │    extract_calls()  (V2.1)                        │       │
 │  │  Implementations: RustHandler, PythonHandler,     │       │
 │  │    TypeScriptHandler                              │       │
 │  │  handler_for_path() registry                      │       │
@@ -192,6 +228,7 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 │  │              ingestion/parser.rs                  │       │
 │  │  CodeAnalyzer - tree-sitter wrapper               │       │
 │  │  - analyze_with_handler(source, handler)          │       │
+│  │    -> Vec<(CodeChunk, Vec<String>)>               │       │
 │  │  - extract_module_docs(source) -> Option<String>  │       │
 │  │  parse_cargo_toml() - crate metadata              │       │
 │  └──────┬───────────────────────────────────────────┘       │
@@ -207,15 +244,62 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 └─────────────────────────────────────────────────────────────┘
 ```
 
-#### portfolio-rag-chat Components
+#### code-rag-engine Components (Pure Algorithms)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    portfolio-rag-chat                        │
+│                      code-rag-engine                         │
+│          (no I/O, compiles to native + wasm32)               │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │                 intent.rs                         │       │
+│  │  IntentClassifier — cosine similarity vs          │       │
+│  │    pre-computed prototype embeddings              │       │
+│  │  ::build(closure) — caller provides embed fn      │       │
+│  │  ::from_prototypes() — load pre-computed          │       │
+│  │  classify(query_embedding) -> ClassificationResult│       │
+│  │  route(intent, table) -> RetrievalConfig          │       │
+│  │  QueryIntent enum, RoutingTable                   │       │
+│  │  impl FromStr for QueryIntent                     │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │                 context.rs                        │       │
+│  │  build_context(result) -> String                  │       │
+│  │  build_prompt(query, context) -> String            │       │
+│  │  SYSTEM_PROMPT constant                           │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │                 config.rs                         │       │
+│  │  EngineConfig { routing: RoutingTable }           │       │
+│  │  RetrievalConfig { code/readme/crate/doc limits } │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │                 retriever.rs                      │       │
+│  │  ScoredChunk<T> — generic chunk + relevance score │       │
+│  │  RetrievalResult — 4 scored chunk vectors + intent│       │
+│  │  FlatChunk — type-erased chunk for evaluation     │       │
+│  │  ::flatten() — single sorted list across types    │       │
+│  │  distance_to_relevance(dist) -> f32               │       │
+│  │  to_retrieval_result() — build from raw tuples    │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### code-rag-chat Components (Root Crate — Web Server)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      code-rag-chat                           │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────────┐                                           │
-│  │   main.rs    │  Server startup, environment loading       │
+│  │   main.rs    │  Axum server setup, CORS, ServeDir        │
+│  │              │  + SPA fallback for Leptos WASM            │
 │  └──────┬───────┘                                           │
 │         │                                                    │
 │         ▼                                                    │
@@ -223,29 +307,99 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 │  │                    api/                            │      │
 │  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │      │
 │  │  │ handlers.rs│  │  state.rs  │  │   dto.rs   │  │      │
-│  │  │ POST /chat │  │ AppState   │  │ ChatRequest│  │      │
-│  │  │ GET /proj  │  │ Mutex<Emb> │  │ ChatResp   │  │      │
-│  │  └────────────┘  └────────────┘  └────────────┘  │      │
-│  │  ┌────────────┐  ┌────────────┐                   │      │
-│  │  │  error.rs  │  │   web.rs   │                   │      │
-│  │  │  ApiError  │  │ Askama tpl │                   │      │
-│  │  └────────────┘  └────────────┘                   │      │
+│  │  │ POST /chat │  │ AppState { │  │ ChatRequest│  │      │
+│  │  │ GET /proj  │  │  embedder  │  │ ChatResp   │  │      │
+│  │  │ GET /health│  │  classifier│  │ SourceInfo │  │      │
+│  │  └────────────┘  │  store,llm │  └────────────┘  │      │
+│  │  ┌────────────┐  │  config    │                   │      │
+│  │  │  error.rs  │  │ }          │                   │      │
+│  │  │  ApiError  │  └────────────┘                   │      │
+│  │  └────────────┘                                   │      │
 │  └───────────────────────────────────────────────────┘      │
 │         │                                                    │
 │         ▼                                                    │
 │  ┌───────────────────────────────────────────────────┐      │
-│  │                   engine/                          │      │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │      │
-│  │  │retriever.rs│  │ context.rs │  │generator.rs│  │      │
-│  │  │ retrieve() │  │build_ctx() │  │ generate() │  │      │
-│  │  │ embed+srch │  │format chunks│  │ Gemini API │  │      │
-│  │  └────────────┘  └────────────┘  └────────────┘  │      │
+│  │          engine/ (re-exports from code-rag-engine) │      │
 │  │  ┌────────────┐  ┌────────────┐                   │      │
-│  │  │  config.rs │  │ intent.rs  │  (V2)            │      │
-│  │  │  Engine    │  │ classify() │                   │      │
-│  │  │  Config    │  │ route()    │                   │      │
+│  │  │retriever.rs│  │generator.rs│                   │      │
+│  │  │ retrieve() │  │ LlmClient  │                   │      │
+│  │  │ scored srch│  │ Gemini API │                   │      │
 │  │  └────────────┘  └────────────┘                   │      │
+│  │  Re-exports: context, intent, EngineConfig,        │      │
+│  │    RetrievalConfig, FlatChunk                      │      │
+│  │  Local: EngineError (wraps embed/store/gen errors) │      │
 │  └───────────────────────────────────────────────────┘      │
+│                                                              │
+│  ┌──────────────┐                                           │
+│  │bin/harness.rs│  Quality measurement CLI                  │
+│  │              │  code-rag-harness binary                  │
+│  └──────┬───────┘                                           │
+│         │                                                    │
+│         ▼                                                    │
+│  ┌───────────────────────────────────────────────────┐      │
+│  │                    harness/                        │      │
+│  │  dataset.rs    TestCase, TestDataset (JSON loader) │      │
+│  │  runner.rs     Query execution (embed→classify→    │      │
+│  │                route→retrieve, no LLM)            │      │
+│  │  matching.rs   Hit detection (pure functions)      │      │
+│  │  metrics.rs    recall@K, MRR, latency percentiles  │      │
+│  │  report.rs     JSON + Markdown output              │      │
+│  └───────────────────────────────────────────────────┘      │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### code-rag-ui Components (Leptos WASM Frontend)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       code-rag-ui                            │
+│              Leptos 0.8 CSR — trunk build                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────┐                                           │
+│  │   main.rs    │  Feature-gated entry point:                │
+│  │              │  [default]    → backend_app()              │
+│  │              │  [standalone] → standalone_app()           │
+│  └──────┬───────┘                                           │
+│         │                                                    │
+│         ▼                                                    │
+│  ┌───────────────────────────────────────────────────┐      │
+│  │                 components/                        │      │
+│  │  ┌────────────┐  ┌──────────────┐                 │      │
+│  │  │ ChatView   │  │ SourcesPanel │  Shared UI      │      │
+│  │  │ (messages, │  │ (relevance   │  components     │      │
+│  │  │  input)    │  │  scores)     │                 │      │
+│  │  └────────────┘  └──────────────┘                 │      │
+│  │  ┌────────────┐  ┌──────────────┐                 │      │
+│  │  │IntentBadge │  │  AuthPanel   │  (standalone    │      │
+│  │  │            │  │  OAuth2+key  │   feature only) │      │
+│  │  └────────────┘  └──────────────┘                 │      │
+│  └───────────────────────────────────────────────────┘      │
+│         │                                                    │
+│  ┌──────┴──────────────────────────────────────┐            │
+│  │             Data Layer (feature-gated)       │            │
+│  │                                              │            │
+│  │  [default]          │  [standalone]           │            │
+│  │  ┌──────────┐       │  ┌──────────────────┐  │            │
+│  │  │  api.rs  │       │  │standalone_api.rs │  │            │
+│  │  │ fetch()  │       │  │ full + rag-only  │  │            │
+│  │  │ → /chat  │       │  │ pipeline variants│  │            │
+│  │  └──────────┘       │  ├──────────────────┤  │            │
+│  │                     │  │ embedder.rs      │  │            │
+│  │                     │  │ → transformers.js│  │            │
+│  │                     │  ├──────────────────┤  │            │
+│  │                     │  │ data.rs + search │  │            │
+│  │                     │  │ ChunkIndex, L2   │  │            │
+│  │                     │  ├──────────────────┤  │            │
+│  │                     │  │ gemini.rs        │  │            │
+│  │                     │  │ REST API client  │  │            │
+│  │                     │  ├──────────────────┤  │            │
+│  │                     │  │ auth.rs          │  │            │
+│  │                     │  │ OAuth2 PKCE +    │  │            │
+│  │                     │  │ API key          │  │            │
+│  │                     │  └──────────────────┘  │            │
+│  └──────────────────────────────────────────────┘            │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -254,13 +408,13 @@ Rich, structured retrieval amplifies *any* model—cheap or frontier. By offload
 
 ## 4. Interface Contracts
 
-### 4.1 coderag-types — Domain Types
+### 4.1 code-rag-types — Domain Types
 
-**Location:** [crates/coderag-types/src/lib.rs](../crates/coderag-types/src/lib.rs)
+**Location:** [crates/code-rag-types/src/lib.rs](../crates/code-rag-types/src/lib.rs)
 
-These types define the contract between producer (code-raptor) and consumer (portfolio-rag-chat). They contain **no business logic**, only serde serialization.
+These types define the contract between producer (code-raptor) and consumer (code-rag-chat). They contain **no business logic**, only serde serialization.
 
-**Helper functions** (also in `coderag-types`):
+**Helper functions** (also in `code-rag-types`):
 
 ```rust
 /// Generate SHA256 hash of content.
@@ -335,11 +489,11 @@ pub struct ModuleDocChunk {
 - All chunk types carry `chunk_id`, `content_hash`, and `embedding_model_version` (V1.1)
 - `chunk_id` uses `deterministic_chunk_id()` — stable across re-indexing for unchanged code
 - `content_hash` enables incremental ingestion (V1.3): skip files whose hash hasn't changed
-- `coderag-types` also exports helper functions (`content_hash`, `new_chunk_id`, `deterministic_chunk_id`) but contains **no business logic**
+- `code-rag-types` also exports helper functions (`content_hash`, `new_chunk_id`, `deterministic_chunk_id`) but contains **no business logic**
 
-### 4.2 coderag-store — Embedding & Storage
+### 4.2 code-rag-store — Embedding & Storage
 
-**Location:** [crates/coderag-store/src/](../crates/coderag-store/src/)
+**Location:** [crates/code-rag-store/src/](../crates/code-rag-store/src/)
 
 #### Embedder (embedder.rs)
 
@@ -566,7 +720,7 @@ impl VectorStore {
     ) -> Result<usize, StoreError>;
 
     // ═══════════════════════════════════════════════════════════════
-    // Read Operations (used by portfolio-rag-chat)
+    // Read Operations (used by code-rag-chat)
     // ═══════════════════════════════════════════════════════════════
 
     /// Search code chunks by vector similarity.
@@ -627,7 +781,7 @@ impl VectorStore {
 
 ### 4.3 LanceDB Schema Contract
 
-The LanceDB schema is the **sole coupling point** between code-raptor and portfolio-rag-chat.
+The LanceDB schema is the **sole coupling point** between code-raptor and code-rag-chat.
 
 #### code_chunks Table
 
@@ -719,6 +873,13 @@ pub trait LanguageHandler {
     fn extract_docstring(
         &self, _source: &str, _node: &Node, _source_bytes: &[u8],
     ) -> Option<String> { None }
+
+    /// Extract function/method call identifiers from a code element (V2.1).
+    /// Default returns empty vec. Per-language implementations walk AST for
+    /// call_expression / call nodes.
+    fn extract_calls(
+        &self, _source: &str, _node: &Node, _source_bytes: &[u8],
+    ) -> Vec<String> { Vec::new() }
 }
 
 /// Registry: returns the appropriate handler for a file path based on extension.
@@ -741,14 +902,14 @@ impl CodeAnalyzer {
     /// Analyze source code using a LanguageHandler.
     ///
     /// # Returns
-    /// Vector of CodeChunk with `file_path` set to "<set_by_caller>".
-    /// Caller must set `file_path` and `project_name` after extraction.
+    /// Vector of (CodeChunk, calls) tuples. Calls are ephemeral — used to
+    /// enrich embedding text, then discarded. No schema change.
     ///
     /// # Deduplication
     /// Results are deduplicated by (identifier, start_line).
     pub fn analyze_with_handler(
         &mut self, source: &str, handler: &dyn LanguageHandler,
-    ) -> Vec<CodeChunk>;
+    ) -> Vec<(CodeChunk, Vec<String>)>;
 
     /// Extract module-level //! documentation from Rust source.
     pub fn extract_module_docs(&mut self, source: &str) -> Option<String>;
@@ -774,110 +935,201 @@ pub fn reconcile(
 ) -> ReconcileResult;
 ```
 
-### 4.5 portfolio-rag-chat — Query Interface
+#### Export Subcommand (export.rs)
+
+```rust
+/// Export all chunks with embeddings from LanceDB to a single JSON file.
+///
+/// Produces a `ChunkIndex` JSON containing:
+/// - All 4 chunk types with their embedding vectors
+/// - Pre-computed intent prototype embeddings
+///
+/// Used by GitHub Pages CI to generate static data for the standalone WASM demo.
+///
+/// # Usage
+/// `code-raptor export --db-path data/portfolio.lance --output static/index.json`
+pub async fn run_export(db_path: &str, output: &str) -> Result<()>;
+```
+
+### 4.5 code-rag-engine — Pure Algorithms
+
+**Location:** [crates/code-rag-engine/src/](../crates/code-rag-engine/src/)
+
+This crate contains all platform-agnostic RAG algorithms. It has **no I/O**, **no HTTP**, and compiles to both native and `wasm32-unknown-unknown`. Both Docker (code-rag-chat) and GitHub Pages (code-rag-ui standalone) use the same algorithms.
+
+**Modules:** `intent`, `context`, `config`, `retriever`
+
+#### IntentClassifier (intent.rs)
+
+```rust
+/// Query intent categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum QueryIntent { Overview, Implementation, Relationship, Comparison }
+
+/// Pre-computed prototype embeddings for intent classification.
+/// Classification uses cosine similarity against prototypes — no keywords.
+pub struct IntentClassifier { /* prototype embeddings per intent */ }
+
+impl IntentClassifier {
+    /// Build classifier by embedding prototype queries.
+    /// Caller provides their own embed function via closure.
+    /// Native: passes fastembed. WASM: passes transformers.js.
+    /// Export tool: pre-computes and serializes prototypes.
+    pub fn build<E>(
+        embed_batch: impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, E>,
+    ) -> Result<Self, E>;
+
+    /// Load from pre-computed prototype embeddings (WASM standalone mode).
+    pub fn from_prototypes(
+        prototypes: HashMap<QueryIntent, Vec<Vec<f32>>>,
+    ) -> Self;
+}
+
+pub struct ClassificationResult {
+    pub intent: QueryIntent,
+    pub confidence: f32,  // Cosine similarity score
+}
+
+/// Classify using pre-computed query embedding (not raw text).
+/// Embedding is reused for both classification and vector search.
+pub fn classify(
+    query_embedding: &[f32],
+    classifier: &IntentClassifier,
+) -> ClassificationResult;
+
+/// Declarative routing table: maps each intent to retrieval limits.
+pub struct RoutingTable {
+    pub routes: HashMap<QueryIntent, RetrievalConfig>,
+    pub default: RetrievalConfig,
+}
+
+pub fn route(intent: QueryIntent, table: &RoutingTable) -> RetrievalConfig;
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32;
+```
+
+#### Context Building (context.rs)
+
+```rust
+pub const SYSTEM_PROMPT: &str;
+pub fn build_context(result: &RetrievalResult) -> String;
+pub fn build_prompt(query: &str, context: &str) -> String;
+```
+
+#### Scored Retrieval (retriever.rs)
+
+```rust
+/// Generic wrapper pairing any chunk type with a relevance score.
+pub struct ScoredChunk<T> { pub chunk: T, pub relevance: f32 }
+
+/// All 4 chunk type results with scores and classified intent.
+pub struct RetrievalResult {
+    pub code_chunks: Vec<ScoredChunk<CodeChunk>>,
+    pub readme_chunks: Vec<ScoredChunk<ReadmeChunk>>,
+    pub crate_chunks: Vec<ScoredChunk<CrateChunk>>,
+    pub module_doc_chunks: Vec<ScoredChunk<ModuleDocChunk>>,
+    pub intent: QueryIntent,
+}
+
+pub fn distance_to_relevance(dist: f32) -> f32;  // 1.0 / (1.0 + dist)
+pub fn to_retrieval_result(...) -> RetrievalResult;
+```
+
+#### Configuration (config.rs)
+
+```rust
+pub struct EngineConfig { pub routing: RoutingTable }
+pub struct RetrievalConfig {
+    pub code_limit: usize,
+    pub readme_limit: usize,
+    pub crate_limit: usize,
+    pub module_doc_limit: usize,
+}
+```
+
+### 4.6 code-rag-chat — Query Interface (Root Crate)
 
 **Location:** [src/](../src/)
+
+The root crate's `engine/` module re-exports from `code-rag-engine` and adds I/O-bound components (scored LanceDB search, Gemini API client). Only `retriever.rs` and `generator.rs` are local; everything else comes from `code-rag-engine`.
 
 #### HTTP API Contract
 
 | Endpoint | Method | Request | Response |
 |----------|--------|---------|----------|
-| `/api/chat` | POST | `{"query": string}` | `{"answer": string, "sources": [...]}` |
-| `/chat` | POST | Form: `query=...` | HTML fragment (htmx) |
+| `/api/chat` | POST | `{"query": string}` | `{"answer": string, "sources": [...], "intent": "..."}` |
 | `/api/projects` | GET | - | `{"projects": [string], "count": number}` |
 | `/health` | GET | - | `{"status": "ok"}` |
 
-#### Engine Components
+#### Engine Components (re-exports + local)
+
+```rust
+// Re-exports from code-rag-engine
+pub use code_rag_engine::context;
+pub use code_rag_engine::intent;
+pub use code_rag_engine::config::EngineConfig;
+
+// Local: I/O-bound components
+pub mod retriever;   // Scored search from LanceDB
+pub mod generator;   // LlmClient (Gemini API via rig-core)
+
+/// Pipeline error type (wraps embed, store, and generation errors)
+pub enum EngineError { ... }
+```
 
 ```rust
 /// RAG pipeline configuration.
+/// EngineConfig now lives in code-rag-engine::config.
+/// Contains only RoutingTable (intent classification moved to IntentClassifier).
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
-    pub retrieval: RetrievalConfig,  // Base/default retrieval limits
-    pub intent: IntentConfig,         // V2.2: intent classification rules
-    pub routing: RoutingTable,        // V2.3: intent → retrieval config mapping
+    pub routing: RoutingTable,        // intent → retrieval config mapping
 }
 
-/// Retrieval limits per chunk type.
+// RetrievalConfig, RetrievalResult, SYSTEM_PROMPT, build_context(),
+// build_prompt() — see Section 4.5 (code-rag-engine)
+
+/// Execute scored retrieval pipeline (local to code-rag-chat).
 ///
-/// Default values are tuned for typical queries.
-/// Future: Load from config file for declarative control.
-#[derive(Clone, Debug)]
-pub struct RetrievalConfig {
-    /// Code chunks to retrieve (default: 5)
-    pub code_limit: usize,
-
-    /// README chunks to retrieve (default: 2)
-    pub readme_limit: usize,
-
-    /// Crate chunks to retrieve (default: 3)
-    pub crate_limit: usize,
-
-    /// Module doc chunks to retrieve (default: 3)
-    pub module_doc_limit: usize,
-}
-
-/// Retrieved context from vector search.
-#[derive(Debug)]
-pub struct RetrievalResult {
-    pub code_chunks: Vec<CodeChunk>,
-    pub readme_chunks: Vec<ReadmeChunk>,
-    pub crate_chunks: Vec<CrateChunk>,
-    pub module_doc_chunks: Vec<ModuleDocChunk>,
-}
-
-/// Execute retrieval pipeline.
+/// 1. Search all 4 LanceDB tables with pre-computed query embedding
+/// 2. Convert distances to relevance scores
+/// 3. Return RetrievalResult with ScoredChunk<T> wrappers
 ///
-/// 1. Embed the query text
-/// 2. Search all 4 LanceDB tables
-/// 3. Return structured results
-///
-/// # Thread Safety
-/// Requires mutable reference to Embedder (held in Mutex<Embedder>).
+/// Query embedding is computed once in the handler and reused
+/// for both intent classification and retrieval.
 pub async fn retrieve(
-    query: &str,
-    embedder: &mut Embedder,
+    query_embedding: &[f32],
     store: &VectorStore,
     config: &RetrievalConfig,
+    intent: QueryIntent,
 ) -> Result<RetrievalResult, EngineError>;
-
-/// System prompt for LLM.
-///
-/// Instructs the model to:
-/// - Use provided code snippets for accurate answers
-/// - Reference project names and file paths
-/// - Admit when context is insufficient
-/// - Be concise but thorough
-pub const SYSTEM_PROMPT: &str;
-
-/// Format retrieved chunks into LLM context.
-///
-/// # Section Order
-/// 1. Crate Structure (architectural overview)
-/// 2. Module Documentation (high-level design)
-/// 3. Relevant Code (implementation details)
-/// 4. Project Documentation (README content)
-///
-/// # Truncation
-/// README content truncated to 800 chars, module docs to 600 chars.
-pub fn build_context(result: &RetrievalResult) -> String;
-
-/// Build complete prompt for LLM.
-///
-/// # Format
-/// ```text
-/// {SYSTEM_PROMPT}
-///
-/// ---
-///
-/// {context}
-///
-/// ---
-///
-/// **Question:** {query}
-/// ```
-pub fn build_prompt(query: &str, context: &str) -> String;
 ```
+
+### 4.7 code-rag-ui — Frontend
+
+**Location:** [crates/code-rag-ui/](../crates/code-rag-ui/)
+
+Leptos 0.8 CSR app built with `trunk`. Feature-gated for two deployment modes:
+
+| Mode | Feature Flag | Data Source | Embedding | LLM |
+|------|-------------|-------------|-----------|-----|
+| **Default** | (none) | HTTP API → code-rag-chat | Server-side (FastEmbed) | Server-side (Gemini) |
+| **Standalone** | `--features standalone` | Static `index.json` | In-browser (transformers.js) | Optional (Gemini REST, requires auth) |
+
+**Shared components** (both modes): `ChatView`, `SourcesPanel`, `IntentBadge`, `ProjectTags`, `ThemeToggle`
+
+**Standalone-only modules:**
+- `embedder.rs` — `#[wasm_bindgen]` bridge to `window.__codeRagEmbedQuery()` (transformers.js)
+- `data.rs` — `ChunkIndex` type, `load_index()` fetches pre-computed JSON from static assets
+- `search.rs` — Brute-force L2 vector search over `EmbeddedChunk<T>` vectors
+- `gemini.rs` — Direct Gemini REST API client (supports `AuthMethod::ApiKey` and `AuthMethod::OAuth2`)
+- `auth.rs` — OAuth2 PKCE flow (code verifier, SHA-256 challenge, token exchange), localStorage persistence
+- `standalone_api.rs` — Two pipeline variants:
+  - `send_chat_standalone()` — Full pipeline with Gemini LLM
+  - `send_chat_rag_only()` — Retrieval without LLM (works unauthenticated)
+
+**Static assets:**
+- `static/embedder.js` — Thin transformers.js v3.8.1 wrapper (CDN-loaded, model cached in IndexedDB ~33MB)
+- `index.html` — Trunk build entry point
 
 ---
 
@@ -885,7 +1137,7 @@ pub fn build_prompt(query: &str, context: &str) -> String;
 
 ### 5.1 Current State (Hardcoded)
 
-Currently, configuration values are hardcoded in [src/engine/config.rs](../src/engine/config.rs):
+Currently, configuration values are hardcoded in [crates/code-rag-engine/src/config.rs](../crates/code-rag-engine/src/config.rs):
 
 ```rust
 impl Default for RetrievalConfig {
@@ -901,7 +1153,7 @@ impl Default for RetrievalConfig {
 ```
 
 Other hardcoded values:
-- Embedding model: `BGESmallENV15` in `coderag-store/src/embedder.rs`
+- Embedding model: `BGESmallENV15` in `code-rag-store/src/embedder.rs`
 - Batch size: `25` in `code-raptor/src/main.rs`
 - Ignored directories: `target`, `.git`, `node_modules` in ingestion
 - LLM model: `gemini-2.0-flash` in environment variable
@@ -965,9 +1217,11 @@ Current environment configuration (`.env`):
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
-| `GEMINI_API_KEY` | Google Gemini API authentication | Yes |
+| `GEMINI_API_KEY` | Google Gemini API authentication | Yes (Docker) |
 | `DATABASE_PATH` | LanceDB storage location | No (default: `data/portfolio.lance`) |
 | `PORT` | HTTP server port | No (default: `3000`) |
+| `UI_DIST` | Path to trunk build output for Leptos WASM | No (default: `crates/code-rag-ui/dist`) |
+| `GOOGLE_OAUTH_CLIENT_ID` | OAuth2 client ID for GitHub Pages standalone auth | No (standalone only, injected at build time) |
 
 ---
 
@@ -1027,7 +1281,7 @@ pub fn handler_for_path(path: &Path) -> Option<Box<dyn LanguageHandler>> {
 
 **Pattern for adding FolderChunk, FileChunk:**
 
-1. **Define type** in `coderag-types/src/lib.rs`:
+1. **Define type** in `code-rag-types/src/lib.rs`:
    ```rust
    pub struct FolderChunk {
        pub folder_path: String,
@@ -1037,14 +1291,14 @@ pub fn handler_for_path(path: &Path) -> Option<Box<dyn LanguageHandler>> {
    }
    ```
 
-2. **Add formatting** in `coderag-store/src/embedder.rs`:
+2. **Add formatting** in `code-rag-store/src/embedder.rs`:
    ```rust
    pub fn format_folder_for_embedding(path: &str, summary: &str) -> String {
        format!("Folder: {}\n{}", path, summary)
    }
    ```
 
-3. **Add schema** in `coderag-store/src/vector_store.rs`:
+3. **Add schema** in `code-rag-store/src/vector_store.rs`:
    - Add `FOLDER_TABLE` constant
    - Implement `folder_chunks_to_batch()`
    - Implement `extract_folder_chunks_from_batch()`
@@ -1054,16 +1308,19 @@ pub fn handler_for_path(path: &Path) -> Option<Box<dyn LanguageHandler>> {
    - Add folder summarization logic
    - Update `run_ingestion()` to process folders
 
-5. **Update retrieval** in `portfolio-rag-chat/src/engine/`:
-   - Add to `RetrievalResult`
-   - Add to `search_all()` call
+5. **Update algorithms** in `code-rag-engine/src/`:
+   - Add to `RetrievalResult` in `retriever.rs`
    - Add `format_folder_section()` in `context.rs`
+
+6. **Update retrieval** in `src/engine/retriever.rs` (code-rag-chat):
+   - Add to `search_all()` call
+   - Wire scored results into `to_retrieval_result()`
 
 ### 6.3 Intent Classification & Routing (V2.2 + V2.3)
 
-**Location:** `src/engine/intent.rs`
+**Location:** `crates/code-rag-engine/src/intent.rs`
 
-Classification and routing share one module — routing is parametric on classification output.
+Classification uses **cosine similarity** against pre-computed prototype query embeddings — no keyword rules. Routing maps the classified intent to retrieval limits via a declarative `RoutingTable`.
 
 ```rust
 /// Query intent categories. Derives Hash + Eq for use as RoutingTable key.
@@ -1076,20 +1333,17 @@ pub enum QueryIntent {
     Comparison,      // "Compare A and B", "Differences between X and Y"
 }
 
-/// Declarative classification: keyword rules evaluated in specificity order.
-/// First match wins. No match → default (Implementation).
-pub struct IntentConfig {
-    pub rules: Vec<IntentRule>,   // Comparison > Relationship > Overview > Implementation
-    pub default: QueryIntent,
-}
+/// Pre-computed prototype embeddings per intent.
+/// Built at startup via closure (native: fastembed, WASM: pre-computed).
+pub struct IntentClassifier { /* HashMap<QueryIntent, Vec<Vec<f32>>> */ }
 
 pub struct ClassificationResult {
     pub intent: QueryIntent,
-    pub match_count: usize,  // 0 = fell through to default
+    pub confidence: f32,  // Cosine similarity score
 }
 
-/// Classify query intent using keyword heuristics.
-pub fn classify(query: &str, config: &IntentConfig) -> ClassificationResult;
+/// Classify using pre-computed query embedding (reused for vector search).
+pub fn classify(query_embedding: &[f32], classifier: &IntentClassifier) -> ClassificationResult;
 
 /// Declarative routing table: maps each intent to retrieval limits.
 /// Data, not code. New intents = new entries.
@@ -1104,14 +1358,14 @@ pub fn route(intent: QueryIntent, table: &RoutingTable) -> RetrievalConfig;
 
 **Adding a new intent** requires:
 1. New `QueryIntent` variant (one line)
-2. New `IntentRule` in default config (one block of keywords)
+2. New prototype queries in `IntentClassifier::build()` (one block of example queries)
 3. New entry in `RoutingTable::default()` (one `routes.insert()` call)
 
 No existing code changes needed — fully additive.
 
 ### 6.4 Hybrid Search (B1)
 
-**Extension point:** `coderag-store/src/vector_store.rs`
+**Extension point:** `code-rag-store/src/vector_store.rs`
 
 ```rust
 /// Search with combined BM25 + vector similarity.
@@ -1161,30 +1415,34 @@ pub async fn trace_call_path(
 
 ## 7. Architectural Decision Records (ADRs)
 
-### ADR-001: Workspace Structure with 4 Crates
+### ADR-001: Workspace Structure with 6 Crates
 
-**Status:** Accepted
+**Status:** Accepted (updated from original 4-crate design)
 
 **Context:**
-The system has two distinct use cases with different execution patterns:
+The system has three distinct execution contexts with different constraints:
 - Ingestion: Batch processing on code changes
 - Query serving: Real-time HTTP requests
+- Browser demo: Fully static, runs in WASM
 
-These need to share type definitions and storage infrastructure without coupling their runtimes.
+These need to share algorithms and type definitions without coupling their runtimes or I/O.
 
 **Decision:**
-Organize as a Cargo workspace with 4 crates:
+Organize as a Cargo workspace with 6 crates:
 - `code-raptor` - Ingestion CLI (independent binary)
-- `portfolio-rag-chat` - Query API (independent binary)
-- `coderag-store` - Shared embedding + storage
-- `coderag-types` - Shared type definitions (no logic)
+- `code-rag-chat` - Query API server (root crate, independent binary)
+- `code-rag-engine` - Pure algorithms (no I/O, compiles to native + wasm32)
+- `code-rag-ui` - Leptos WASM frontend (feature-gated: default API client or standalone in-browser RAG)
+- `code-rag-store` - Shared embedding + storage
+- `code-rag-types` - Shared type definitions (no logic)
 
 **Consequences:**
 - (+) Clear SoC: each crate has one responsibility
 - (+) Independent update frequencies
 - (+) Can compile and test crates independently
-- (+) `code-raptor` can be published to crates.io separately
-- (-) More boilerplate (4 Cargo.toml files)
+- (+) `code-rag-engine` ensures algorithm consistency across Docker and WASM
+- (+) Feature-gated UI avoids separate crate for standalone mode
+- (-) More boilerplate (6 Cargo.toml files)
 - (-) Must be careful not to leak implementation details through types crate
 
 ---
@@ -1194,7 +1452,7 @@ Organize as a Cargo workspace with 4 crates:
 **Status:** Accepted
 
 **Context:**
-Producer (code-raptor) and consumer (portfolio-rag-chat) need to exchange data without code-level coupling.
+Producer (code-raptor) and consumer (code-rag-chat) need to exchange data without code-level coupling.
 
 **Decision:**
 All data exchange happens via LanceDB schema. The schema (4 tables with defined columns) is the contract. Neither crate imports the other.
@@ -1268,19 +1526,21 @@ Concurrent HTTP requests need shared access to resources:
 - LlmClient (API client)
 
 **Decision:**
-Only `Embedder` requires `Mutex`. VectorStore's `Connection` is internally reference-counted. LlmClient is stateless.
+Only `Embedder` requires `Mutex`. VectorStore's `Connection` is internally reference-counted. LlmClient is stateless. IntentClassifier is immutable (pre-computed embeddings).
 
 ```rust
 pub struct AppState {
-    pub embedder: Mutex<Embedder>,  // Requires locking
-    pub store: VectorStore,          // Internally Arc'd
-    pub llm: LlmClient,              // Stateless
-    pub config: EngineConfig,        // Immutable
+    pub embedder: Mutex<Embedder>,    // Requires locking
+    pub classifier: IntentClassifier, // Immutable, pre-computed at startup
+    pub store: VectorStore,            // Internally Arc'd
+    pub llm: LlmClient,                // Stateless
+    pub config: EngineConfig,          // Immutable
 }
 ```
 
 **Consequences:**
 - (+) Minimal lock contention
+- (+) IntentClassifier built before Mutex wrap — no lock needed for classification
 - (+) Most operations don't require locking
 - (-) Embedder becomes bottleneck under high concurrency
 - (Future) Could pool multiple Embedder instances
@@ -1309,6 +1569,54 @@ Use tree-sitter with per-language grammars:
 - (+) Large ecosystem of grammars
 - (-) Dependency on external grammar crates
 - (-) S-expression syntax has learning curve
+
+---
+
+### ADR-007: Leptos WASM Frontend
+
+**Status:** Accepted
+
+**Context:**
+Needed a frontend that:
+- Compiles to WASM for GitHub Pages static demo
+- Produces small bundles (~100-300KB gzipped)
+- Maintains architectural coherence (Rust end-to-end)
+- Replaced htmx/Askama server-rendered approach
+
+Options: Leptos, Yew, Dioxus, or JS framework (React/Svelte).
+
+**Decision:**
+Leptos 0.8 with CSR-only (no SSR). Feature flag `standalone` switches the data layer from HTTP API to in-browser pipeline. All UI components are shared between modes.
+
+**Consequences:**
+- (+) Smallest WASM bundles (fine-grained reactivity, no virtual DOM)
+- (+) One language (Rust) for entire stack
+- (+) Feature flag avoids separate crate for standalone mode
+- (+) Visual theme consistent with paulxie Astro portfolio
+- (-) Leptos ecosystem smaller than React
+- (-) CSR-only means no SEO (acceptable for demo)
+
+---
+
+### ADR-008: Shared Engine Crate (code-rag-engine)
+
+**Status:** Accepted
+
+**Context:**
+Intent classification, context building, and scoring logic was in `src/engine/` (server-only). GitHub Pages demo needed the same algorithms in WASM. Options:
+- Duplicate logic in UI crate
+- Extract shared crate with trait abstractions
+- Extract shared crate with pure functions + closures
+
+**Decision:**
+Extract `code-rag-engine` as a pure Rust crate with no I/O. `IntentClassifier::build()` takes a closure (`impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, E>`) instead of a concrete `Embedder` type. `from_prototypes()` allows loading pre-computed embeddings in WASM.
+
+**Consequences:**
+- (+) Algorithms compile to both native and wasm32 unchanged
+- (+) No trait overhead — closures are simpler than trait objects for one call site
+- (+) Improvements to classification/context/scoring automatically apply to both deployments
+- (+) Export tool pre-computes prototypes for WASM, avoiding runtime embedding cost
+- (-) `src/engine/` becomes a thin re-export layer (acceptable trade-off)
 
 ---
 
@@ -1393,29 +1701,32 @@ Use tree-sitter with per-language grammars:
                  │
                  ▼
 ┌──────────────────────────────────┐
-│  intent::classify(query, config) │  (V2.2)
+│  Acquire Mutex<Embedder>         │
+│  embedder.embed_one(query)       │
+│  -> query_embedding [384]        │
+│  (embedding reused for BOTH      │
+│   classification and retrieval)  │
+└────────────────┬─────────────────┘
+                 │
+                 ▼
+┌──────────────────────────────────┐
+│  classify(query_embedding,       │  (V2.2 — cosine similarity)
+│           &classifier)           │
 │  -> ClassificationResult {       │
 │       intent: Implementation,    │
-│       match_count: 2             │
+│       confidence: 0.82           │
 │     }                            │
 └────────────────┬─────────────────┘
                  │
                  ▼
 ┌──────────────────────────────────┐
-│  intent::route(intent, table)    │  (V2.3)
+│  route(intent, &routing_table)   │  (V2.3)
 │  -> RetrievalConfig {            │
 │       code_limit: 7,             │
 │       readme_limit: 1,           │
 │       crate_limit: 1,            │
 │       module_doc_limit: 2        │
 │     }                            │
-└────────────────┬─────────────────┘
-                 │
-                 ▼
-┌──────────────────────────────────┐
-│  Acquire Mutex<Embedder>         │
-│  embedder.embed_one(query)       │
-│  -> query_embedding [384]        │
 └────────────────┬─────────────────┘
                  │
                  ▼
@@ -1429,10 +1740,11 @@ Use tree-sitter with per-language grammars:
                  ▼
 ┌──────────────────────────────────┐
 │  RetrievalResult {               │
-│    code_chunks: [...],           │
-│    readme_chunks: [...],         │
-│    crate_chunks: [...],          │
-│    module_doc_chunks: [...]      │
+│    code_chunks: [ScoredChunk],   │
+│    readme_chunks: [ScoredChunk], │
+│    crate_chunks: [ScoredChunk],  │
+│    module_doc_chunks: [Scored],  │
+│    intent: Implementation        │
 │  }                               │
 └────────────────┬─────────────────┘
                  │
@@ -1472,7 +1784,7 @@ Use tree-sitter with per-language grammars:
 │  ChatResponse {                  │
 │    answer: "The retriever...",   │
 │    sources: [...],               │
-│    intent: "implementation"      │  (V2.4)
+│    intent: "implementation"      │
 │  }                               │
 └──────────────────────────────────┘
 ```
@@ -1553,7 +1865,7 @@ Use tree-sitter with per-language grammars:
 
 - [development_plan.md](../development_plan.md) - V1-V3 roadmap + Tracks A/B/C
 - [project-vision.md](../project-vision.md) - Full improvement ideas and differentiation
-- [development_log.md](../development_log.md) - Version history (V0.1-V0.3)
+- [development_log.md](../development_log.md) - Version history (V0.1 through GitHub Pages demo)
 - [LanceDB Documentation](https://lancedb.github.io/lancedb/)
 - [FastEmbed](https://github.com/qdrant/fastembed)
 - [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
@@ -1564,3 +1876,4 @@ Use tree-sitter with per-language grammars:
 |---------|------|---------|
 | 0.1 | 2026-02-01 | Initial architecture document |
 | 0.2 | 2026-02-07 | V1 completion: updated coderag-types with V1.1 fields (chunk_id, content_hash, embedding_model_version), fixed project_name to String, updated LanceDB schema (List\<UTF8\> dependencies, V1.1 columns), replaced SupportedLanguage enum with LanguageHandler trait (V1.2), added reconcile.rs for incremental ingestion (V1.3), added TypeScript support (V1.4), updated docstring extraction (V1.5). V2 design: added intent classification + routing to engine components (V2.2/V2.3), updated query pipeline with classify → route steps, updated format_code_for_embedding with calls parameter (V2.1), updated EngineConfig with intent + routing fields. |
+| 0.3 | 2026-03-29 | Major restructuring: updated from 4-crate to 6-crate workspace. Added `code-rag-engine` (pure algorithms, wasm32-compatible) and `code-rag-ui` (Leptos WASM frontend). Replaced htmx/Askama with Leptos SPA. Updated all crate names (`portfolio-rag-chat` → `code-rag-chat`, `coderag-store` → `code-rag-store`, `coderag-types` → `code-rag-types`). Updated intent classification from keyword-based to embedding-based (cosine similarity). Added GitHub Pages standalone deployment mode. Added ADR-007 (Leptos), ADR-008 (shared engine crate). Updated all diagrams, component layouts, AppState, query pipeline, and extension points. |
