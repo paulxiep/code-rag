@@ -1,5 +1,7 @@
 mod api;
 mod engine;
+#[allow(dead_code)]
+mod harness;
 mod models;
 mod store;
 

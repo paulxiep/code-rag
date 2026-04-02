@@ -345,9 +345,8 @@ mod tests {
 
     #[test]
     fn test_classifier_build_propagates_error() {
-        let result = IntentClassifier::build(|_texts: &[&str]| {
-            Err::<Vec<Vec<f32>>, _>("mock embed error")
-        });
+        let result =
+            IntentClassifier::build(|_texts: &[&str]| Err::<Vec<Vec<f32>>, _>("mock embed error"));
         assert!(result.is_err());
     }
 

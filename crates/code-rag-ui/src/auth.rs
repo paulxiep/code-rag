@@ -22,7 +22,10 @@ impl AuthMethod {
     pub fn is_valid(&self) -> bool {
         match self {
             AuthMethod::ApiKey(key) => !key.is_empty(),
-            AuthMethod::OAuth2 { access_token, expires_at } => {
+            AuthMethod::OAuth2 {
+                access_token,
+                expires_at,
+            } => {
                 if access_token.is_empty() {
                     return false;
                 }
@@ -39,7 +42,9 @@ impl AuthMethod {
 
 /// Load saved auth from localStorage.
 pub fn load_auth() -> Option<AuthMethod> {
-    LocalStorage::get::<AuthMethod>(STORAGE_KEY).ok().filter(|a| a.is_valid())
+    LocalStorage::get::<AuthMethod>(STORAGE_KEY)
+        .ok()
+        .filter(|a| a.is_valid())
 }
 
 /// Save auth to localStorage.

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use code_rag_engine::intent::QueryIntent;
 use code_rag_engine::retriever::{RetrievalResult, ScoredChunk};
-use crate::models::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 
 /// POST /chat request
 #[derive(Debug, Deserialize)]

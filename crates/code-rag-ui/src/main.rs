@@ -14,8 +14,8 @@ mod search;
 #[cfg(feature = "standalone")]
 mod standalone_api;
 
-use leptos::prelude::*;
 use leptos::mount::mount_to_body;
+use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use components::ChatView;
@@ -75,9 +75,9 @@ fn backend_app() -> impl IntoView {
 
 #[cfg(feature = "standalone")]
 fn standalone_app() -> impl IntoView {
-    use std::sync::Arc;
     use code_rag_engine::intent::IntentClassifier;
     use components::AuthPanel;
+    use std::sync::Arc;
 
     // Auth state (loaded from localStorage)
     let auth_signal: RwSignal<Option<auth::AuthMethod>> = RwSignal::new(auth::load_auth());
@@ -108,9 +108,7 @@ fn standalone_app() -> impl IntoView {
                     Ok(()) => set_embedder_status.set("Ready"),
                     Err(e) => {
                         // Non-fatal: embedder will retry on first query
-                        web_sys::console::warn_1(
-                            &format!("Embedder pre-warm failed: {e}").into(),
-                        );
+                        web_sys::console::warn_1(&format!("Embedder pre-warm failed: {e}").into());
                         set_embedder_status.set("Ready");
                     }
                 }

@@ -1,5 +1,56 @@
 # Development Log
 
+## 2026-04-02: V3.1 — Retrieval Test Dataset
+
+### Summary
+
+Added `TestCase` and `TestDataset` types with a 43-query JSON test corpus (`data/test_queries.json`). This is the first step of the V3 quality harness — a declarative, forward-compatible test dataset that outlives any retrieval strategy change. Tests reference stable identifiers (file paths, function names), not implementation details (chunk IDs, embeddings).
+
+### Motivation
+
+- **Quantitative regression safety:** V1-V2 relied on manual hero queries. Tracks A/B/C will change retrieval behavior — need automated recall measurement to detect regressions.
+- **Forward compatibility:** Schema uses `#[serde(default)]` on all optional fields, so future Track fields (`expected_folder_paths`, `expected_bm25_hits`, `expected_callers`) can be added without breaking existing test cases.
+- **Three-tier strategy:** Hero queries (strict, all dimensions) anchor regressions. Directional queries (1-2 dimensions) track quality per intent. Smoke queries (`min_relevant_results`/`excluded_files` only) survive any pipeline change.
+
+### What Changed
+
+**New files:**
+- `src/harness/mod.rs` — Module root for quality harness infrastructure
+- `src/harness/dataset.rs` — `TestCase`, `TestDataset` types with serde derives; `load()`, `filter_by_tag()`, `validate()` methods; 15 unit tests covering serde round-trips, filtering, validation, and edge cases
+- `data/test_queries.json` — 43 test cases across 4 intent categories (overview, implementation, relationship, comparison) and 3 tiers (hero, directional, smoke)
+
+**Modified files:**
+- `src/main.rs` — Added `mod harness;` declaration
+- `crates/code-rag-ui/src/api.rs` — Fixed pre-existing clippy dead_code warning on `SourceInfo.relevance`
+- `crates/code-rag-ui/src/components/chat_view.rs` — Fixed pre-existing clippy collapsible_if warning
+- `crates/code-raptor/src/export.rs` — Fixed pre-existing clippy collapsible_if warning
+- `architecture.md` — Added V3 harness module to code-rag-chat component diagram, `FlatChunk`/`flatten()` + `FromStr` to code-rag-engine diagram, updated crate responsibilities table
+
+### Key Design Decisions
+
+- **Substring matching for files:** `"retriever.rs"` matches `"src/engine/retriever.rs"`. Survives directory restructuring. More specific substrings (`"engine/retriever.rs"`) mitigate false positives.
+- **Recall excludes coverage checks:** `expected_chunk_types`, `expected_projects`, `min_relevant_results`, and `excluded_files` are boolean checks reported alongside recall, not part of the recall numerator. This keeps the recall metric focused on "did we find the right content?"
+- **`mod harness` in `main.rs` (not `lib.rs`):** V3.2 will extract to `lib.rs` for the second binary target. No premature structural refactoring.
+- **`#[allow(dead_code)]` on harness module:** Types are only consumed by tests now; V3.2 binary will remove the need for this.
+
+### Test Results
+
+152 tests pass (15 new + 137 existing), 0 failures, 5 ignored (require external resources). Workspace-wide clippy clean with `-D warnings`.
+
+### Dataset Coverage
+
+| Category | Count | Primary assertions |
+|----------|-------|--------------------|
+| Hero | 5 | All dimensions — regression anchors (3 from V1, 2 from V2) |
+| Overview | 7 | `expected_chunk_types`, `expected_projects` |
+| Implementation | 11 | `expected_files`, `expected_identifiers` |
+| Relationship | 5 | `expected_files` (callers/callees) |
+| Comparison | 4 | `expected_files` (both subjects) |
+| Smoke | 7 | Only `min_relevant_results` and/or `excluded_files` |
+| Edge cases | 4 | Empty expectations, ambiguous, multi-project, very specific |
+
+---
+
 ## 2026-03-26: GitHub Pages Demo
 
 ### Summary

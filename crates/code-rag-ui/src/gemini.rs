@@ -53,8 +53,8 @@ pub async fn generate(prompt: &str, auth: &AuthMethod) -> Result<String, String>
         }],
     };
 
-    let json_body = serde_json::to_string(&body)
-        .map_err(|e| format!("Failed to serialize request: {e}"))?;
+    let json_body =
+        serde_json::to_string(&body).map_err(|e| format!("Failed to serialize request: {e}"))?;
 
     let request = match auth {
         AuthMethod::ApiKey(key) => {

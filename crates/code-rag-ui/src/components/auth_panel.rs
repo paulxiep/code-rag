@@ -51,7 +51,10 @@ pub fn AuthPanel() -> impl IntoView {
     };
 
     let on_sign_out = move |_| {
-        if let Some(AuthMethod::OAuth2 { ref access_token, .. }) = auth_signal.get() {
+        if let Some(AuthMethod::OAuth2 {
+            ref access_token, ..
+        }) = auth_signal.get()
+        {
             auth::revoke_token(access_token);
         }
         auth::clear_auth();

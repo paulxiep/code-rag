@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use code_rag_engine::context;
-use code_rag_engine::intent::{self, ClassificationResult, IntentClassifier, QueryIntent, RoutingTable};
+use code_rag_engine::intent::{
+    self, ClassificationResult, IntentClassifier, QueryIntent, RoutingTable,
+};
 use code_rag_engine::retriever::{self, RetrievalResult};
 
 use crate::api::{ChatResponse, SourceInfo};

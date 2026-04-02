@@ -53,7 +53,10 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
 
     // Build intent prototype embeddings
     let intent_prototypes = build_intent_prototypes()?;
-    info!("Built intent prototypes for {} categories", intent_prototypes.len());
+    info!(
+        "Built intent prototypes for {} categories",
+        intent_prototypes.len()
+    );
 
     let index = ExportIndex {
         code_chunks,
@@ -80,26 +83,48 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
     let mut embedder = Embedder::new()?;
 
     let intent_texts: &[(&str, &[&str])] = &[
-        ("overview", &[
-            "What is this project?", "Tell me about this codebase",
-            "Give me an overview", "What does this do?",
-            "Describe the purpose", "What is the architecture?",
-        ]),
-        ("implementation", &[
-            "How does this function work?", "Show me the implementation",
-            "How is this implemented?", "What does this code do?",
-            "Walk me through the logic",
-        ]),
-        ("relationship", &[
-            "What calls this function?", "How does A relate to B?",
-            "What depends on this?", "Show me the call chain",
-            "What uses this module?",
-        ]),
-        ("comparison", &[
-            "Compare A and B", "What are the differences between X and Y?",
-            "How does A differ from B?", "A versus B",
-            "Contrast these approaches", "What are the pros and cons?",
-        ]),
+        (
+            "overview",
+            &[
+                "What is this project?",
+                "Tell me about this codebase",
+                "Give me an overview",
+                "What does this do?",
+                "Describe the purpose",
+                "What is the architecture?",
+            ],
+        ),
+        (
+            "implementation",
+            &[
+                "How does this function work?",
+                "Show me the implementation",
+                "How is this implemented?",
+                "What does this code do?",
+                "Walk me through the logic",
+            ],
+        ),
+        (
+            "relationship",
+            &[
+                "What calls this function?",
+                "How does A relate to B?",
+                "What depends on this?",
+                "Show me the call chain",
+                "What uses this module?",
+            ],
+        ),
+        (
+            "comparison",
+            &[
+                "Compare A and B",
+                "What are the differences between X and Y?",
+                "How does A differ from B?",
+                "A versus B",
+                "Contrast these approaches",
+                "What are the pros and cons?",
+            ],
+        ),
     ];
 
     let mut prototypes = HashMap::new();
@@ -134,12 +159,14 @@ fn u64_col<'a>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a UInt64A
 }
 
 fn get_embedding(batch: &RecordBatch, row: usize) -> Vec<f32> {
-    if let Some(col) = batch.column_by_name("vector") {
-        if let Some(list) = col.as_any().downcast_ref::<arrow_array::FixedSizeListArray>() {
-            let value: Arc<dyn Array> = list.value(row);
-            if let Some(values) = value.as_any().downcast_ref::<Float32Array>() {
-                return values.values().to_vec();
-            }
+    if let Some(col) = batch.column_by_name("vector")
+        && let Some(list) = col
+            .as_any()
+            .downcast_ref::<arrow_array::FixedSizeListArray>()
+    {
+        let value: Arc<dyn Array> = list.value(row);
+        if let Some(values) = value.as_any().downcast_ref::<Float32Array>() {
+            return values.values().to_vec();
         }
     }
     Vec::new()
@@ -150,14 +177,12 @@ fn opt_str(arr: Option<&StringArray>, i: usize) -> Option<String> {
         .map(|a: &StringArray| a.value(i).to_string())
 }
 
-async fn query_all(conn: &lancedb::Connection, table_name: &str) -> anyhow::Result<Vec<RecordBatch>> {
+async fn query_all(
+    conn: &lancedb::Connection,
+    table_name: &str,
+) -> anyhow::Result<Vec<RecordBatch>> {
     let table: lancedb::Table = conn.open_table(table_name).execute().await?;
-    let batches: Vec<RecordBatch> = table
-        .query()
-        .execute()
-        .await?
-        .try_collect()
-        .await?;
+    let batches: Vec<RecordBatch> = table.query().execute().await?.try_collect().await?;
     Ok(batches)
 }
 
@@ -194,7 +219,10 @@ async fn export_code_chunks(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            result.push(EmbeddedChunk { chunk, embedding: get_embedding(batch, i) });
+            result.push(EmbeddedChunk {
+                chunk,
+                embedding: get_embedding(batch, i),
+            });
         }
     }
     Ok(result)
@@ -223,7 +251,10 @@ async fn export_readme_chunks(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            result.push(EmbeddedChunk { chunk, embedding: get_embedding(batch, i) });
+            result.push(EmbeddedChunk {
+                chunk,
+                embedding: get_embedding(batch, i),
+            });
         }
     }
     Ok(result)
@@ -251,9 +282,8 @@ async fn export_crate_chunks(
         for i in 0..batch.num_rows() {
             let deps = opt_str(deps_col, i)
                 .map(|s| {
-                    serde_json::from_str::<Vec<String>>(&s).unwrap_or_else(|_| {
-                        s.split(',').map(|d| d.trim().to_string()).collect()
-                    })
+                    serde_json::from_str::<Vec<String>>(&s)
+                        .unwrap_or_else(|_| s.split(',').map(|d| d.trim().to_string()).collect())
                 })
                 .unwrap_or_default();
 
@@ -267,7 +297,10 @@ async fn export_crate_chunks(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            result.push(EmbeddedChunk { chunk, embedding: get_embedding(batch, i) });
+            result.push(EmbeddedChunk {
+                chunk,
+                embedding: get_embedding(batch, i),
+            });
         }
     }
     Ok(result)
@@ -301,7 +334,10 @@ async fn export_module_doc_chunks(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            result.push(EmbeddedChunk { chunk, embedding: get_embedding(batch, i) });
+            result.push(EmbeddedChunk {
+                chunk,
+                embedding: get_embedding(batch, i),
+            });
         }
     }
     Ok(result)

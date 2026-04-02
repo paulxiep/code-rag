@@ -10,7 +10,7 @@ Refer to [project vision](project-vision.md) for full improvement ideas and [arc
 
 **Build vertically, not horizontally.**
 
-Each iteration delivers a thin slice through both crates (code-raptor + portfolio-rag-chat). Every version produces something *runnable* and *demonstrable*.
+Each iteration delivers a thin slice through the workspace crates (code-raptor, code-rag-chat, code-rag-engine, code-rag-ui). Every version produces something *runnable* and *demonstrable*.
 
 **Value proposition: Decouple knowledge from reasoning.**
 
@@ -27,8 +27,8 @@ Every implementation decision should be evaluated against these three principles
 | Principle | Meaning | Example |
 |-----------|---------|---------|
 | **Declarative** | Describe *what*, not *how*. Config over code. Data-driven behavior. | Chunk types declare their schema; retrieval strategies defined by config, not hardcoded. Intent routing rules are data, not if-else chains. |
-| **Modular** | Components are self-contained, swappable, and independently testable. | code-raptor and portfolio-rag-chat share no code, only LanceDB schema. Swap HDBSCAN for hierarchical clustering without touching summarization. |
-| **SoC** (Separation of Concerns) | Each module has ONE job. No god objects. Clear boundaries. | code-raptor = indexing. portfolio-rag-chat = querying. Types live in coderag-types. No crate does two things. |
+| **Modular** | Components are self-contained, swappable, and independently testable. | code-raptor and code-rag-chat share no code, only LanceDB schema. code-rag-engine compiles to both native and wasm32. Swap HDBSCAN for hierarchical clustering without touching summarization. |
+| **SoC** (Separation of Concerns) | Each module has ONE job. No god objects. Clear boundaries. | code-raptor = indexing. code-rag-chat = querying. code-rag-engine = algorithms. code-rag-ui = frontend. Types live in code-rag-types. No crate does two things. |
 
 **Before writing code, ask:**
 1. Am I describing behavior or implementing mechanics? (Declarative)
@@ -49,16 +49,25 @@ Every implementation decision should be evaluated against these three principles
 ## Architecture Overview
 
 ```
-code-raptor (producer)          portfolio-rag-chat (consumer)
+code-raptor (producer)          code-rag-chat (consumer)
     │                                   │
     │ writes chunks                     │ reads chunks
     ▼                                   ▼
               [LanceDB Schema]
               - CodeChunk (function-level)
-              - FolderChunk (A1)
-              - FileChunk (A1)
-              - ClusterChunk (A3)
-              - CallEdge (C1)
+              - ReadmeChunk, CrateChunk, ModuleDocChunk
+              - FolderChunk (A1, future)
+              - FileChunk (A1, future)
+              - ClusterChunk (A3, future)
+              - CallEdge (C1, future)
+
+code-rag-engine (shared pure algorithms, no I/O)
+    ▲ used by code-rag-chat (native)
+    ▲ used by code-rag-ui (WASM, standalone mode)
+
+code-rag-ui (Leptos WASM frontend)
+    [default]    → HTTP API → code-rag-chat
+    [standalone] → in-browser RAG (transformers.js + code-rag-engine)
 ```
 
 ---
@@ -91,7 +100,7 @@ RAPTOR clustering ─────────────── needs A2 enrichm
     └──► Architecture comparison [requires A1 hierarchy]
 ```
 
-### portfolio-rag-chat (Query) Dependencies
+### code-rag-chat + code-rag-engine (Query) Dependencies
 
 ```
 Intent classification + query routing
@@ -108,7 +117,7 @@ Graph query interface ─────────── requires call graph data
 |---------------------|-----------|
 | Track A + Track B + Track C | Independent after V3 |
 | A1 + B1 + C1 | All can start after V3 completes |
-| V2.2 + V2.3 | All portfolio-rag-chat, no dependencies |
+| V2.2 + V2.3 | All code-rag-chat, no dependencies |
 | Folder/File embeddings + Hybrid search | Indexing vs query |
 
 ---
@@ -116,10 +125,13 @@ Graph query interface ─────────── requires call graph data
 ## Iteration Structure
 
 ```
-V1 (Indexing Foundation) ─── incremental ingestion + docstrings
+V1 (Indexing Foundation) ─── incremental ingestion + docstrings     [COMPLETE]
  │
  ▼
-V2 (Query Intelligence) ─── intent routing + retrieval traces
+V2 (Query Intelligence) ─── intent routing + retrieval traces       [COMPLETE]
+ │  V2.1-V2.3: Backend intelligence
+ │  V2.4: Leptos WASM frontend
+ │  V2.5: GitHub Pages demo + code-rag-engine extraction
  │
  ▼
 V3 (Quality Harness) ─── quantitative testing infrastructure
@@ -167,7 +179,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 ## V1: Indexing Foundation [COMPLETE]
 
-**Goal:** Enable fast iteration, clean language abstraction, and fix docstring extraction. All code-raptor + coderag-store work.
+**Goal:** Enable fast iteration, clean language abstraction, and fix docstring extraction. All code-raptor + code-rag-store work.
 
 | Item | Status | Notes |
 |------|--------|-------|
@@ -181,17 +193,17 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 **Why:** Current schema lacks fields needed for incremental operations and has design debt that compounds in later phases.
 
-**Changes to coderag-types:**
+**Changes to code-rag-types:**
 - Add `chunk_id: String` (UUID) - stable foreign key for Track C call graph edges
 - Add `content_hash: String` - SHA256 of code_content for change detection
 - Add `embedding_model_version: String` - prevents silent embedding inconsistency
 
-**Changes to coderag-store:**
+**Changes to code-rag-store:**
 - Add delete API: `delete_chunks_by_file()`, `delete_chunks_by_project()`
 - Change `crate_chunks.dependencies` from CSV string to `List<Utf8>` - enables "what depends on X?" queries
 - Update Arrow schemas for all 4 tables
 
-**Crates:** coderag-types, coderag-store
+**Crates:** code-rag-types, code-rag-store
 
 ### V1.2: LanguageHandler Refactor
 
@@ -231,7 +243,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - `--full` flag for complete re-index, `--dry-run` for preview
 - Insert-before-delete ordering (safer on crash)
 - **Essential:** Enables fast iteration for all subsequent work
-- **Crates:** coderag-types, coderag-store, code-raptor
+- **Crates:** code-rag-types, code-rag-store, code-raptor
 
 ### V1.4: TypeScript Support
 
@@ -262,7 +274,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 **Testing:** 97 tests pass (0 failures, 0 warnings). Unit tests per handler, cross-language pipeline tests in parser.rs, context display test.
 
-**Crate:** code-raptor, portfolio-rag-chat
+**Crate:** code-raptor, code-rag-chat
 
 **Deliverable:** Fast re-ingestion. Clean language abstraction. Docstrings in search results. TypeScript support with docstrings from day one. V1 milestone complete.
 
@@ -272,18 +284,17 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 ---
 
-## V2: Query Intelligence
+## V2: Query Intelligence + Frontend [COMPLETE]
 
-**Goal:** Make queries smarter with intent routing and visible retrieval sources.
+**Goal:** Make queries smarter with intent routing and visible retrieval sources. Deploy Leptos WASM frontend and GitHub Pages static demo.
 
-**Estimated effort:** ~1 week total
-
-
-| Item | Effort | Notes |
+| Item | Status | Notes |
 |------|--------|-------|
-| V2.1 Inline Call Context | 1 day | Ephemeral call extraction via tree-sitter, enriches embedding text (code-raptor) |
-| V2.2 Intent Classification + Query Routing | 1-2 days | Declarative keyword rules, `QueryIntent` enum, `RoutingTable` HashMap (portfolio-rag-chat) |
-| V2.3 Retrieval Traces | 1-2 days | `ScoredChunk<T>`, all chunk types as sources, relevance scores (both crates) |
+| V2.1 Inline Call Context | Done | Ephemeral call extraction via tree-sitter, enriches embedding text (code-raptor) |
+| V2.2 Intent Classification + Query Routing | Done | Cosine similarity classification, `QueryIntent` enum, `RoutingTable` HashMap (code-rag-engine) |
+| V2.3 Retrieval Traces | Done | `ScoredChunk<T>`, all chunk types as sources, relevance scores (code-rag-engine, code-rag-store) |
+| V2.4 Leptos Migration | Done | Leptos WASM SPA replaces htmx/Askama (code-rag-ui) |
+| V2.5 GitHub Pages Demo | Done | code-rag-engine extraction, standalone feature, export subcommand |
 
 ### V2 Architecture Decisions
 
@@ -308,7 +319,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 | Fold extension | 4-tuple → 5-tuple | 5-tuple → 6-tuple |
 | Downstream | Stored on `CodeChunk.docstring` | **Ephemeral side-channel** (diverges here) |
 
-**SoC rationale for ephemeral design:** `coderag-types` is the cross-crate data contract defining the LanceDB schema. Adding an ephemeral `calls` field would pollute the contract with embedding-pipeline-specific data. `CodeChunk` is used by reconcile, by the query-side retriever, and by context formatting — none need calls. Track C will store persistent call edges in a separate `call_edges` table.
+**SoC rationale for ephemeral design:** `code-rag-types` is the cross-crate data contract defining the LanceDB schema. Adding an ephemeral `calls` field would pollute the contract with embedding-pipeline-specific data. `CodeChunk` is used by reconcile, by the query-side retriever, and by context formatting — none need calls. Track C will store persistent call edges in a separate `call_edges` table.
 
 **Per-language extraction:**
 - **Rust:** `call_expression` → `identifier` (direct) or `field_expression > field_identifier` (method)
@@ -322,7 +333,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 **Deployment:** Requires `code-raptor ingest <repo> --full` after deployment. `content_hash` is SHA256 of source file, not embedding text — incremental mode won't re-embed unchanged files.
 
-**Crates affected:** code-raptor (`language.rs`, `languages/*.rs`, `parser.rs`, `mod.rs`, `main.rs`), coderag-store (`embedder.rs`)
+**Crates affected:** code-raptor (`language.rs`, `languages/*.rs`, `parser.rs`, `mod.rs`, `main.rs`), code-rag-store (`embedder.rs`)
 
 ### V2.2: Intent Classification + Query Routing [COMPLETE]
 - Embedding-based classification: cosine similarity against pre-computed prototype query embeddings
@@ -335,7 +346,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - `RoutingTable`: `HashMap<QueryIntent, RetrievalConfig>` with default fallback
 - code_limit fixed at 5 across all intents; differentiation in supplementary context only
 - `EngineConfig.intent` removed; classifier lives in `AppState` as peer of `EngineConfig`
-- **Crate:** portfolio-rag-chat
+- **Crate:** code-rag-engine (classification + routing logic), code-rag-chat (AppState integration)
 
 ### V2.3: Retrieval Traces
 - Extract `_distance` from LanceDB, convert to relevance: `1.0 / (1.0 + distance)`
@@ -344,7 +355,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - All 4 chunk types surfaced as sources, sorted by relevance descending
 - `ChatResponse` gains `intent` field
 - **Demo value:** Makes retrieval quality visible; differentiator from black-box tools
-- **Crate:** portfolio-rag-chat, coderag-store
+- **Crate:** code-rag-chat, code-rag-store
 
 **Deliverable:** Intent-based routing. Visible retrieval sources. Embeddings include call context.
 
@@ -352,6 +363,48 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - "How does the chat endpoint work?" → intent: implementation, sources include handlers.rs with relevance %
 - "What is code-raptor?" → intent: overview, sources show README + CrateChunks ranking higher
 - Overview vs implementation queries produce visibly different source distributions
+
+### V2.4: Leptos Migration [COMPLETE]
+
+**Goal:** Replace server-rendered htmx/Askama frontend with Leptos WASM SPA. Foundation for GitHub Pages static demo.
+
+- New crate: `code-rag-ui` (Leptos 0.8 CSR, trunk build)
+- Components: `ChatView`, `SourcesPanel`, `IntentBadge`, `ProjectTags`, `ThemeToggle`
+- API client: `gloo-net` fetch to Axum JSON endpoints
+- Removed: `src/api/web.rs` (Askama), `templates/`, old `static/` (htmx.min.js)
+- Axum serves WASM via `ServeDir` + SPA fallback (`UI_DIST` env var)
+- Portfolio theme: Atkinson font, `#2337ff` accent, paulxie design tokens
+- **Crate:** code-rag-ui, code-rag-chat (routing changes)
+
+### V2.5: GitHub Pages Demo + Engine Extraction [COMPLETE]
+
+**Goal:** Deploy fully static demo to GitHub Pages. Run entire RAG pipeline in-browser via WASM.
+
+**New crate: `code-rag-engine`**
+- Extracted pure, platform-agnostic algorithms from `src/engine/`: intent classification, context building, config, scored retrieval
+- No I/O, no HTTP — compiles to both native and `wasm32-unknown-unknown`
+- `IntentClassifier::build(closure)` — caller provides embed function; decoupled from concrete `Embedder`
+- `IntentClassifier::from_prototypes()` — load pre-computed embeddings (WASM standalone)
+- `src/engine/` now re-exports from `code-rag-engine`, keeps only I/O-bound `retrieve()` and `LlmClient`
+- 25 tests (includes 3 closure-based classifier tests)
+
+**New feature: `code-rag-ui --features standalone`**
+- In-browser RAG: transformers.js embeddings, brute-force L2 search, code-rag-engine classification + context
+- `standalone_api.rs`: full pipeline (with Gemini) + rag-only (without LLM, works unauthenticated)
+- `auth.rs`: OAuth2 PKCE flow, API key input, localStorage persistence
+- `embedder.rs`: wasm-bindgen bridge to transformers.js via `window.__codeRagEmbedQuery()`
+
+**New subcommand: `code-raptor export`**
+- Reads all 4 chunk types + embeddings from LanceDB
+- Pre-computes intent prototype embeddings
+- Outputs `ChunkIndex` JSON for standalone WASM demo
+
+**CI/CD: `.github/workflows/gh-pages.yml`**
+- Config-driven ingestion targets (`config/targets.json`)
+- Builds with `--features standalone`, deploys to GitHub Pages
+
+**Test Results:** 135 tests pass (up from 132)
+- **Crates:** code-rag-engine (new), code-rag-ui (standalone feature), code-raptor (export), code-rag-chat (re-exports)
 
 ---
 
@@ -372,13 +425,13 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - 20-50 queries covering: overview, implementation, relationship intents
 - Format: `{"query": "...", "expected_files": ["..."], "intent": "..."}`
 - Include hero queries from V1 and V2
-- **Crate:** portfolio-rag-chat (test fixtures)
+- **Crate:** code-rag-chat (test fixtures)
 
 ### V3.2: Recall Measurement Script
 - Script that measures recall@5, recall@10 for each query
 - Outputs: per-query results + aggregate metrics
 - Run after each milestone to detect regressions
-- **Crate:** portfolio-rag-chat
+- **Crate:** code-rag-chat
 
 ### V3.3: Baseline Documentation
 - Run V3.2 against V2 index
@@ -417,7 +470,7 @@ Sequential: A1 → A2 → A3
 - New `FolderChunk` type
 - Auto-summarize folder contents (file list + inferred purpose)
 - Embed folder summaries
-- **Crate:** code-raptor (types in coderag-types)
+- **Crate:** code-raptor (types in code-rag-types)
 
 ### A1.2: File-Level Embeddings
 - New `FileChunk` type
@@ -437,13 +490,13 @@ Sequential: A1 → A2 → A3
 - `overview` queries → FolderChunk, repo summaries
 - `module` queries → FileChunk
 - `implementation` queries → CodeChunk
-- **Crate:** portfolio-rag-chat
+- **Crate:** code-rag-chat
 
 **Deliverable:** "What does the engine/ folder do?" returns meaningful answer.
 
 ### A1 Hero Queries
 - "What does the engine/ folder do?" → Returns folder-level summary
-- "How is portfolio-rag-chat organized?" → Returns architecture overview
+- "How is code-rag-chat organized?" → Returns architecture overview
 - "What are the main components?" → Lists crates and their purposes
 
 **Maps to Vision:** Improvement #4 (Hierarchical Embedding) + #5 (Repo Summaries)
@@ -526,7 +579,7 @@ Sequential: A1 → A2 → A3
 - LLM-summarize each cluster
 - "These N functions handle authentication..."
 - New `ClusterChunk` type
-- **Crate:** code-raptor (types in coderag-types)
+- **Crate:** code-raptor (types in code-rag-types)
 
 ### A3.4: Recursive Abstraction (If Phase 1 Succeeds)
 - Embed cluster summaries
@@ -539,7 +592,7 @@ Sequential: A1 → A2 → A3
 - Query routing to both views
 - "What's the architecture?" → top-down (A1) + bottom-up (A3)
 - Highlight discrepancies (architectural drift detection)
-- **Crate:** portfolio-rag-chat
+- **Crate:** code-rag-chat
 
 ### Research Questions
 - Best clustering algorithm for code semantics?
@@ -572,7 +625,7 @@ Independent track. Can run in parallel with Track A and C.
 - Combine lexical (BM25) with vector similarity
 - Boost exact identifier matches
 - LanceDB supports both natively
-- **Crate:** portfolio-rag-chat
+- **Crate:** code-rag-chat
 
 ### Fusion Approach
 - Use Reciprocal Rank Fusion (RRF) to combine BM25 and semantic scores
@@ -648,7 +701,7 @@ Independent track. Can run in parallel with Track A and B.
 - New query type: `relationship`
 - "What calls X?" → traverse CallEdge
 - "Show the auth flow" → path finding
-- **Crate:** portfolio-rag-chat
+- **Crate:** code-rag-chat
 
 **Deliverable:** "What calls this function?" returns accurate callers.
 
@@ -664,23 +717,25 @@ Independent track. Can run in parallel with Track A and B.
 
 | Improvement | Crate |
 |-------------|-------|
-| Schema foundation (V1.1) | coderag-types, coderag-store |
+| Schema foundation (V1.1) | code-rag-types, code-rag-store |
 | LanguageHandler refactor (V1.2) | code-raptor |
-| Incremental ingestion (V1.3) | coderag-types, coderag-store, code-raptor |
+| Incremental ingestion (V1.3) | code-rag-types, code-rag-store, code-raptor |
 | TypeScript support (V1.4) | code-raptor |
 | Docstring extraction (V1.5) | code-raptor |
 | Inline call context (V2.1) | code-raptor |
-| Intent classification + query routing (V2.2) | portfolio-rag-chat |
-| Retrieval traces (V2.3) | portfolio-rag-chat |
-| Quality harness (V3) | portfolio-rag-chat |
+| Intent classification + query routing (V2.2) | code-rag-engine, code-rag-chat |
+| Retrieval traces (V2.3) | code-rag-engine, code-rag-chat, code-rag-store |
+| Leptos migration (V2.4) | code-rag-ui, code-rag-chat |
+| GitHub Pages demo + engine extraction (V2.5) | code-rag-engine, code-rag-ui, code-raptor |
+| Quality harness (V3) | code-rag-chat |
 | Docstring generation | code-raptor |
 | Hierarchical embeddings | code-raptor |
 | Call graph extraction | code-raptor |
 | Type generation | code-raptor |
 | RAPTOR clustering | code-raptor |
 | Repo summaries | code-raptor |
-| Hybrid search | portfolio-rag-chat |
-| Graph query interface | portfolio-rag-chat |
+| Hybrid search | code-rag-chat |
+| Graph query interface | code-rag-chat |
 
 ---
 
@@ -689,7 +744,7 @@ Independent track. Can run in parallel with Track A and B.
 | Milestone | Metric |
 |-----------|--------|
 | V1 [DONE] | Docstrings appear in results (Rust, Python, TypeScript); TypeScript files indexed with docstrings; re-ingestion <30s for unchanged code; incremental ingestion skips unchanged files; `--full`/`--dry-run`/`--project-name` CLI flags work; 97 tests pass |
-| V2 | Queries route by type; retrieval sources shown; call context in embeddings |
+| V2 [DONE] | Queries route by intent (cosine similarity); retrieval sources with relevance scores shown; call context in embeddings; Leptos WASM frontend; GitHub Pages standalone demo; code-rag-engine shared algorithms; 135 tests pass |
 | V3 | Test dataset with 20+ queries; baseline recall@5 documented; regression script runs <60s |
 | A1 | "What does engine/ do?" returns coherent answer |
 | A2 | Undocumented code has generated descriptions in search |
@@ -738,4 +793,4 @@ Independent track. Can run in parallel with Track A and B.
 
 ### Self-Reference Verification
 
-Ensure portfolio-rag-chat is always in the ingested codebase. The hero query "How does the retriever work?" should return `retriever.rs` from portfolio-rag-chat itself. This meta-demonstration is a strong portfolio signal.
+Ensure code-rag is always in the ingested codebase. The hero query "How does the retriever work?" should return `retriever.rs` from code-rag-chat itself. This meta-demonstration is a strong portfolio signal.
