@@ -6,7 +6,7 @@ pub use code_rag_engine::context;
 pub use code_rag_engine::intent;
 
 pub use code_rag_engine::config::RetrievalConfig;
-pub use code_rag_engine::config::{EngineConfig, RerankConfig};
+pub use code_rag_engine::config::{EngineConfig, HybridConfig, RerankConfig};
 pub use code_rag_engine::retriever::FlatChunk;
 pub use generator::LlmClient;
 

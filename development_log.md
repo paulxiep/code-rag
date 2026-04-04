@@ -1,5 +1,104 @@
 # Development Log
 
+## 2026-04-04: B2 — Hybrid Search (BM25 + Semantic)
+
+### Summary
+
+Implemented hybrid BM25+semantic search with RRF fusion via LanceDB's native FTS support. Full pipeline: FTS index creation during ingestion, `hybrid_search_*()` methods with catch-all fallback, score-aware `retrieve()` that branches on hybrid mode (relevance scores vs L2 distances), `--hybrid` harness flag, browser-side BM25 with pre-computed IDF tables, and 6 new test cases. **Result: hybrid search regresses recall when BM25 operates on full code bodies. Disabled by default; to be re-enabled after B3 provides a high-signal `searchable_text` column.**
+
+### Motivation
+
+- BM25 directly addresses exact identifier matching — the primary failure mode of pure semantic search for code (e.g., "Show me Retriever" should find `retrieve` function via lexical match).
+- Hybrid BM25+dense with RRF is the standard approach in modern RAG systems.
+- LanceDB v0.23 natively supports FTS indices and hybrid query execution with built-in RRF.
+
+### Architecture
+
+- **`code-rag-store/vector_store.rs`** — `code_fts_config()` (simple tokenizer, no stemming, stop words removed), `create_fts_indices()`, `hybrid_search_*()` methods with catch-all fallback to vector-only, `batches_to_*_hybrid()` reading `_relevance_score` column, `hybrid_search_all()` using `tokio::join!` for parallelism.
+- **`code-rag-engine/config.rs`** — `HybridConfig` struct (`enabled: bool`, `rrf_k: f32`), added to `EngineConfig`.
+- **`code-rag-engine/retriever.rs`** — `to_scored_relevance()` for hybrid scores (higher=better, bypasses `distance_to_relevance()`).
+- **`src/engine/retriever.rs`** — Score-aware `retrieve()` branches on `hybrid_config.enabled` for correct score semantics. Hybrid path uses `to_scored_relevance()`, vector-only uses `to_scored()`.
+- **`code-raptor/main.rs`** — `create_fts_indices()` called after both full and incremental ingestion.
+- **`code-raptor/export.rs`** — `IdfTable` struct with `build()` method, exported per chunk type in JSON bundle.
+- **`code-rag-ui/text_search.rs`** — Browser-side `IdfTable`, `tokenize()`, `bm25_search()`, `rrf_fuse()`.
+- **`code-rag-ui/search.rs`** — `hybrid_search()` combining vector + BM25 + RRF, falls back to vector-only if IDF data absent.
+- **`code-rag-ui/standalone_api.rs`** — Wired hybrid search with score-aware conversion.
+- **Harness** — `--hybrid` CLI flag, `hybrid_enabled` in `SystemConfig`.
+
+### Key Design Decisions
+
+1. **Score semantics (critical):** Hybrid returns `_relevance_score` (higher=better), vector-only returns `_distance` (lower=better). `retrieve()` branches to avoid inverting rankings via `distance_to_relevance()`. Fallback in `hybrid_search_*()` converts distances to relevance (`1/(1+d)`) so the caller always gets higher=better.
+2. **Catch-all error fallback:** LanceDB has no specific error variant for missing FTS index. Any hybrid error falls back to vector-only with `tracing::warn!`. Acceptable because harness catches quality regressions.
+3. **`remove_stop_words: true`:** Originally planned as `false` to preserve Rust keywords (`self`, `for`, `return`). Changed to `true` after testing showed stop words in natural language queries add BM25 noise. Rust keywords are implementation details, not user search terms.
+4. **No `FtsWeights`/per-intent weighting:** LanceDB's `.limit(N)` controls fused output, not per-arm limits. Deferred — reranker handles relevance sorting.
+5. **`tokio::join!` parallelism in `hybrid_search_all()`:** 4 table queries run in parallel.
+6. **Browser full BM25 (not TF-only):** Pre-computed IDF from export pipeline, proper BM25 scoring with length normalization.
+
+### Empirical Results
+
+Measured on re-ingested codebase (post-B2 code, 49 test cases including 6 new B2 cases).
+
+**Aggregate:**
+
+| Config | recall@5 | recall@10 | MRR |
+|--------|----------|-----------|-----|
+| Pre-B2 (rerank only) | 0.70 | 0.73 | 0.64 |
+| Post-B2 (rerank + hybrid, no stop removal) | 0.61 | 0.64 | 0.49 |
+| Post-B2 (rerank + hybrid, stop removal) | 0.62 | 0.67 | 0.54 |
+
+**Per-intent (rerank + hybrid, stop removal):**
+
+| Intent | Pre-B2 | Post-B2 | Delta |
+|--------|--------|---------|-------|
+| implementation | 0.81 | 0.72 | **-0.09** |
+| overview | 1.00 | 1.00 | 0 |
+| comparison | 0.80 | 0.70 | **-0.10** |
+| relationship | 0.33 | 0.33 | 0 |
+
+**Finding:** Hybrid search regresses implementation and comparison recall. Root cause: BM25 on full code bodies (the `code_content` column) matches common code terms across many chunks, introducing noise that dilutes the vector search signal in RRF fusion. This is the "FTS on large code chunks" pitfall identified in the B2 plan. Stop word removal helps comparison (+0.10) but doesn't fix implementation.
+
+**Resolution:** Hybrid disabled by default (`HybridConfig.enabled = false`). All infrastructure is in place for re-enabling after B3 (function signature extraction) provides a `searchable_text` column concatenating `identifier + signature + docstring` — a high-signal BM25 target with much less noise than full code bodies.
+
+### LanceDB API Notes
+
+- `FtsIndexBuilder` methods use bare names (`base_tokenizer()`, not `with_base_tokenizer()`). B2 plan had wrong names.
+- `RRFReranker::new()` takes `f32`, not `u32`. Default k=60.0.
+- `FullTextSearchQuery` re-exported from `lancedb::index::scalar`, not `lancedb::query`.
+- `.execute().await` on a `VectorQuery` with `full_text_search` set automatically routes to `execute_hybrid` internally.
+- `.replace(true)` on index builder is the default — explicit call is redundant but harmless.
+- `_relevance_score` column confirmed present in hybrid results (Float32Array, RRF-fused scores ~0.016-0.031).
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `crates/code-rag-engine/src/config.rs` | `HybridConfig` struct, added to `EngineConfig` |
+| `crates/code-rag-engine/src/retriever.rs` | `to_scored_relevance()` |
+| `src/engine/mod.rs` | Re-export `HybridConfig` |
+| `crates/code-rag-store/Cargo.toml` | Added `tracing` dependency |
+| `crates/code-rag-store/src/vector_store.rs` | FTS config, `create_fts_indices()`, `hybrid_search_*()`, `batches_to_*_hybrid()`, parameterized `extract_*_with_score()` |
+| `crates/code-raptor/src/main.rs` | `create_fts_indices()` after ingestion |
+| `crates/code-raptor/src/export.rs` | `IdfTable`, `tokenize()`, IDF fields in `ExportIndex` |
+| `src/engine/retriever.rs` | `hybrid_config` param, score-aware branching |
+| `src/api/handlers.rs` | Pass `hybrid_config` to `retrieve()` |
+| `src/harness/runner.rs` | Pass `hybrid_config` to `retrieve()` |
+| `src/harness/report.rs` | `hybrid_enabled` in `SystemConfig` |
+| `src/bin/harness.rs` | `--hybrid` CLI flag |
+| `crates/code-rag-ui/src/text_search.rs` | NEW: `IdfTable`, `tokenize()`, `bm25_search()`, `rrf_fuse()` |
+| `crates/code-rag-ui/src/data.rs` | IDF fields in `ChunkIndex` |
+| `crates/code-rag-ui/src/search.rs` | `hybrid_search()` |
+| `crates/code-rag-ui/src/standalone_api.rs` | Wired hybrid + score-aware paths |
+| `crates/code-rag-ui/src/main.rs` | `mod text_search` |
+| `data/test_queries.json` | 6 new B2 test cases |
+
+### Next Steps
+
+- **B3 (Function Signature Extraction):** Provides structured metadata that enables a `searchable_text` column for high-signal BM25. Re-enable hybrid search after B3 and re-measure.
+- **Post-B3 `searchable_text` column:** `identifier + signature + docstring` (excluding code body) as a separate FTS-indexed column. BM25 on this concentrated text should match identifiers and types without code body noise.
+- **camelCase query expansion (post-B3):** `VectorStore` → `"VectorStore" OR "vector" OR "store"` — only if harness shows camelCase queries underperforming.
+
+---
+
 ## 2026-04-04: B1 — Cross-Encoder Reranking
 
 ### Summary

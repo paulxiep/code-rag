@@ -38,6 +38,7 @@ pub async fn chat(
         &state.store,
         &retrieval_config,
         &state.config.rerank,
+        &state.config.hybrid,
         reranker_guard.as_deref_mut(),
         classification.intent,
     )

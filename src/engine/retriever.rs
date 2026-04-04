@@ -2,9 +2,11 @@
 pub use code_rag_engine::retriever::{RetrievalResult, to_retrieval_result};
 
 use crate::store::{Reranker, VectorStore};
-use code_rag_engine::config::{RerankConfig, RetrievalConfig, fetch_limits};
+use code_rag_engine::config::{HybridConfig, RerankConfig, RetrievalConfig, fetch_limits};
 use code_rag_engine::intent::QueryIntent;
-use code_rag_engine::retriever::{RerankText, ScoredChunk, sigmoid, to_scored};
+use code_rag_engine::retriever::{
+    RerankText, ScoredChunk, sigmoid, to_scored, to_scored_relevance,
+};
 
 use super::EngineError;
 
@@ -63,26 +65,19 @@ fn rerank_all(
 
 /// Search vector store for similar chunks using a pre-computed query embedding.
 /// When reranking is enabled, over-retrieves then re-scores with the cross-encoder.
+/// When hybrid is enabled, uses BM25+semantic via RRF fusion (scores are higher=better).
+#[allow(clippy::too_many_arguments)]
 pub async fn retrieve(
     query: &str,
     query_embedding: &[f32],
     store: &VectorStore,
     config: &RetrievalConfig,
     rerank_config: &RerankConfig,
+    hybrid_config: &HybridConfig,
     reranker: Option<&mut Reranker>,
     intent: QueryIntent,
 ) -> Result<RetrievalResult, EngineError> {
     let fetch_config = fetch_limits(config, rerank_config);
-
-    let (code_raw, readme_raw, crate_raw, module_doc_raw) = store
-        .search_all(
-            query_embedding,
-            fetch_config.code_limit,
-            fetch_config.readme_limit,
-            fetch_config.crate_limit,
-            fetch_config.module_doc_limit,
-        )
-        .await?;
 
     // Only rerank intents where the cross-encoder improves results.
     // ms-marco-MiniLM-L-6-v2 hurts relationship (-0.26) and comparison (-0.06) queries
@@ -90,15 +85,48 @@ pub async fn retrieve(
     let should_rerank = rerank_config.enabled
         && matches!(intent, QueryIntent::Implementation | QueryIntent::Overview);
 
+    // Fetch raw results — hybrid returns relevance scores (higher=better),
+    // vector-only returns L2 distances (lower=better).
+    let (code_scored, readme_scored, crate_scored, module_doc_scored) = if hybrid_config.enabled {
+        let (code_raw, readme_raw, crate_raw, module_doc_raw) = store
+            .hybrid_search_all(
+                query,
+                query_embedding,
+                fetch_config.code_limit,
+                fetch_config.readme_limit,
+                fetch_config.crate_limit,
+                fetch_config.module_doc_limit,
+            )
+            .await?;
+        // Hybrid scores are already higher=better — use directly
+        (
+            to_scored_relevance(code_raw),
+            to_scored_relevance(readme_raw),
+            to_scored_relevance(crate_raw),
+            to_scored_relevance(module_doc_raw),
+        )
+    } else {
+        let (code_raw, readme_raw, crate_raw, module_doc_raw) = store
+            .search_all(
+                query_embedding,
+                fetch_config.code_limit,
+                fetch_config.readme_limit,
+                fetch_config.crate_limit,
+                fetch_config.module_doc_limit,
+            )
+            .await?;
+        // Distance scores need conversion to higher=better
+        (
+            to_scored(code_raw),
+            to_scored(readme_raw),
+            to_scored(crate_raw),
+            to_scored(module_doc_raw),
+        )
+    };
+
     let result = if should_rerank {
         if let Some(reranker) = reranker {
-            let code_scored = to_scored(code_raw);
-            let readme_scored = to_scored(readme_raw);
-            let crate_scored = to_scored(crate_raw);
-            let module_doc_scored = to_scored(module_doc_raw);
-
-            // Attempt reranking; on failure, fall back to distance-based scores
-            // (already converted via to_scored, just truncate to final limits)
+            // Attempt reranking; on failure, fall back to current scores
             match rerank_all(
                 query,
                 code_scored,
@@ -111,26 +139,58 @@ pub async fn retrieve(
             ) {
                 Ok(result) => result,
                 Err(e) => {
-                    tracing::warn!("reranking failed, falling back to distance scores: {e}");
+                    tracing::warn!("reranking failed, falling back to search scores: {e}");
                     // Re-fetch without over-retrieval for fallback
-                    let (c, r, cr, m) = store
-                        .search_all(
-                            query_embedding,
-                            config.code_limit,
-                            config.readme_limit,
-                            config.crate_limit,
-                            config.module_doc_limit,
-                        )
-                        .await?;
-                    to_retrieval_result(c, r, cr, m, intent)
+                    if hybrid_config.enabled {
+                        let (c, r, cr, m) = store
+                            .hybrid_search_all(
+                                query,
+                                query_embedding,
+                                config.code_limit,
+                                config.readme_limit,
+                                config.crate_limit,
+                                config.module_doc_limit,
+                            )
+                            .await?;
+                        RetrievalResult {
+                            code_chunks: to_scored_relevance(c),
+                            readme_chunks: to_scored_relevance(r),
+                            crate_chunks: to_scored_relevance(cr),
+                            module_doc_chunks: to_scored_relevance(m),
+                            intent,
+                        }
+                    } else {
+                        let (c, r, cr, m) = store
+                            .search_all(
+                                query_embedding,
+                                config.code_limit,
+                                config.readme_limit,
+                                config.crate_limit,
+                                config.module_doc_limit,
+                            )
+                            .await?;
+                        to_retrieval_result(c, r, cr, m, intent)
+                    }
                 }
             }
         } else {
-            tracing::warn!("reranking enabled but no reranker available, using distance scores");
-            to_retrieval_result(code_raw, readme_raw, crate_raw, module_doc_raw, intent)
+            tracing::warn!("reranking enabled but no reranker available, using search scores");
+            RetrievalResult {
+                code_chunks: code_scored,
+                readme_chunks: readme_scored,
+                crate_chunks: crate_scored,
+                module_doc_chunks: module_doc_scored,
+                intent,
+            }
         }
     } else {
-        to_retrieval_result(code_raw, readme_raw, crate_raw, module_doc_raw, intent)
+        RetrievalResult {
+            code_chunks: code_scored,
+            readme_chunks: readme_scored,
+            crate_chunks: crate_scored,
+            module_doc_chunks: module_doc_scored,
+            intent,
+        }
     };
 
     let total = result.code_chunks.len()

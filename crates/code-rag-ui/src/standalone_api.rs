@@ -110,14 +110,33 @@ async fn run_retrieval(
         final_config.clone()
     };
 
-    let (code_raw, readme_raw, crate_raw, module_doc_raw) =
-        search::brute_force_search(query_embedding, index, &search_config);
+    // Use hybrid search (BM25 + vector via RRF) when IDF data is available.
+    // Hybrid results are relevance-scored (higher=better), vector-only returns distances (lower=better).
+    let has_idf = index.code_idf.is_some();
+    let (code_raw, readme_raw, crate_raw, module_doc_raw) = if has_idf {
+        search::hybrid_search(query, query_embedding, index, &search_config)
+    } else {
+        search::brute_force_search(query_embedding, index, &search_config)
+    };
 
     let result = if should_rerank {
-        let code_scored = retriever::to_scored(code_raw);
-        let readme_scored = retriever::to_scored(readme_raw);
-        let crate_scored = retriever::to_scored(crate_raw);
-        let module_doc_scored = retriever::to_scored(module_doc_raw);
+        // Convert to scored chunks — hybrid scores are already relevance (higher=better),
+        // vector distances need conversion.
+        let (code_scored, readme_scored, crate_scored, module_doc_scored) = if has_idf {
+            (
+                retriever::to_scored_relevance(code_raw),
+                retriever::to_scored_relevance(readme_raw),
+                retriever::to_scored_relevance(crate_raw),
+                retriever::to_scored_relevance(module_doc_raw),
+            )
+        } else {
+            (
+                retriever::to_scored(code_raw),
+                retriever::to_scored(readme_raw),
+                retriever::to_scored(crate_raw),
+                retriever::to_scored(module_doc_raw),
+            )
+        };
 
         match rerank_all(
             query,
@@ -133,12 +152,33 @@ async fn run_retrieval(
             Ok(result) => result,
             Err(e) => {
                 web_sys::console::warn_1(
-                    &format!("Reranking failed, using distance scores: {e}").into(),
+                    &format!("Reranking failed, using search scores: {e}").into(),
                 );
-                let (c, r, cr, m) =
-                    search::brute_force_search(query_embedding, index, &final_config);
-                retriever::to_retrieval_result(c, r, cr, m, classification.intent)
+                let (c, r, cr, m) = if has_idf {
+                    search::hybrid_search(query, query_embedding, index, &final_config)
+                } else {
+                    search::brute_force_search(query_embedding, index, &final_config)
+                };
+                if has_idf {
+                    RetrievalResult {
+                        code_chunks: retriever::to_scored_relevance(c),
+                        readme_chunks: retriever::to_scored_relevance(r),
+                        crate_chunks: retriever::to_scored_relevance(cr),
+                        module_doc_chunks: retriever::to_scored_relevance(m),
+                        intent: classification.intent,
+                    }
+                } else {
+                    retriever::to_retrieval_result(c, r, cr, m, classification.intent)
+                }
             }
+        }
+    } else if has_idf {
+        RetrievalResult {
+            code_chunks: retriever::to_scored_relevance(code_raw),
+            readme_chunks: retriever::to_scored_relevance(readme_raw),
+            crate_chunks: retriever::to_scored_relevance(crate_raw),
+            module_doc_chunks: retriever::to_scored_relevance(module_doc_raw),
+            intent: classification.intent,
         }
     } else {
         retriever::to_retrieval_result(

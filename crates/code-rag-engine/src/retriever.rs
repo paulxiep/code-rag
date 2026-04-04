@@ -104,6 +104,15 @@ pub fn to_scored<T>(pairs: Vec<(T, f32)>) -> Vec<ScoredChunk<T>> {
         .collect()
 }
 
+/// Convert (chunk, relevance_score) pairs into scored chunks.
+/// Used when scores are already higher=better (e.g., hybrid search results).
+pub fn to_scored_relevance<T>(pairs: Vec<(T, f32)>) -> Vec<ScoredChunk<T>> {
+    pairs
+        .into_iter()
+        .map(|(chunk, score)| ScoredChunk { score, chunk })
+        .collect()
+}
+
 /// Build a RetrievalResult from raw search results (chunk + distance tuples).
 pub fn to_retrieval_result(
     code_raw: Vec<(CodeChunk, f32)>,

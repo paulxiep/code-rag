@@ -158,6 +158,11 @@ async fn run_full_ingestion(
     // Embed and store all chunks
     embed_and_store_all(result, store, embedder, calls_map).await?;
 
+    // Create FTS indices for hybrid search (B2)
+    info!("Creating FTS indices...");
+    store.create_fts_indices().await?;
+    info!("FTS indices created");
+
     info!(
         "Full ingestion complete: {} code, {} readme, {} crate, {} module_doc chunks",
         result.code_chunks.len(),
@@ -209,6 +214,11 @@ async fn run_incremental_ingestion(
 
     // Then delete old chunks
     apply_deletions(store, &diff.to_delete).await?;
+
+    // Rebuild FTS indices for hybrid search (B2)
+    info!("Rebuilding FTS indices...");
+    store.create_fts_indices().await?;
+    info!("FTS indices rebuilt");
 
     info!("Incremental ingestion complete");
     Ok(())

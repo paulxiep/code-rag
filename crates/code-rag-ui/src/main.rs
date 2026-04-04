@@ -15,6 +15,8 @@ mod reranker;
 mod search;
 #[cfg(feature = "standalone")]
 mod standalone_api;
+#[cfg(feature = "standalone")]
+mod text_search;
 
 use leptos::mount::mount_to_body;
 use leptos::prelude::*;

@@ -4,6 +4,8 @@ use arrow_array::{
 use futures::TryStreamExt;
 use lancedb::{
     Connection, DistanceType, Table, connect,
+    index::Index,
+    index::scalar::{FtsIndexBuilder, FullTextSearchQuery},
     query::{ExecutableQuery, QueryBase},
 };
 use std::sync::Arc;
@@ -231,6 +233,215 @@ impl VectorStore {
             .await
             .unwrap_or_default();
         Ok((code, readme, crates, module_docs))
+    }
+
+    // ========================================================================
+    // Hybrid search operations (B2: BM25 + semantic)
+    // ========================================================================
+
+    /// Code-appropriate FTS tokenizer config.
+    /// `simple` tokenizer splits on non-alphanumeric (good for snake_case).
+    /// Stemming and stop-word removal disabled (code identifiers aren't English words,
+    /// and Rust keywords like `self`, `for`, `return` overlap with English stop words).
+    fn code_fts_config() -> FtsIndexBuilder {
+        FtsIndexBuilder::default()
+            .base_tokenizer("simple".to_owned())
+            .lower_case(true)
+            .stem(false)
+            .remove_stop_words(true)
+    }
+
+    /// Create FTS indices on all tables. Call after ingestion.
+    pub async fn create_fts_indices(&self) -> Result<(), StoreError> {
+        let tables_and_columns = [
+            (CODE_TABLE, "code_content"),
+            (README_TABLE, "content"),
+            (CRATE_TABLE, "description"),
+            (MODULE_DOC_TABLE, "doc_content"),
+        ];
+
+        for (table_name, column) in &tables_and_columns {
+            match self.conn.open_table(*table_name).execute().await {
+                Ok(table) => {
+                    table
+                        .create_index(&[*column], Index::FTS(Self::code_fts_config()))
+                        .replace(true)
+                        .execute()
+                        .await?;
+                    tracing::info!("FTS index created on {}.{}", table_name, column);
+                }
+                Err(_) => {
+                    tracing::debug!("Table {} not found, skipping FTS index", table_name);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Hybrid search code chunks: vector + FTS combined via RRF.
+    /// Returns (chunk, relevance_score) pairs where score is higher=better.
+    pub async fn hybrid_search_code(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        let table = self.get_table(CODE_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_code_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    CODE_TABLE,
+                    e
+                );
+                let results = self.search_code(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search readme chunks: vector + FTS combined via RRF.
+    pub async fn hybrid_search_readme(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+        let table = self.get_table(README_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_readme_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    README_TABLE,
+                    e
+                );
+                let results = self.search_readme(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search crate chunks: vector + FTS combined via RRF.
+    pub async fn hybrid_search_crates(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+        let table = self.get_table(CRATE_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_crate_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    CRATE_TABLE,
+                    e
+                );
+                let results = self.search_crates(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search module doc chunks: vector + FTS combined via RRF.
+    pub async fn hybrid_search_module_docs(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+        let table = self.get_table(MODULE_DOC_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_module_doc_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    MODULE_DOC_TABLE,
+                    e
+                );
+                let results = self.search_module_docs(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search all chunk types in parallel. Returns (chunk, relevance_score) tuples.
+    pub async fn hybrid_search_all(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        code_limit: usize,
+        readme_limit: usize,
+        crate_limit: usize,
+        module_doc_limit: usize,
+    ) -> Result<
+        (
+            Vec<(CodeChunk, f32)>,
+            Vec<(ReadmeChunk, f32)>,
+            Vec<(CrateChunk, f32)>,
+            Vec<(ModuleDocChunk, f32)>,
+        ),
+        StoreError,
+    > {
+        let (code, readme, crates, module_docs) = tokio::join!(
+            self.hybrid_search_code(query_text, query_embedding, code_limit),
+            self.hybrid_search_readme(query_text, query_embedding, readme_limit),
+            self.hybrid_search_crates(query_text, query_embedding, crate_limit),
+            self.hybrid_search_module_docs(query_text, query_embedding, module_doc_limit),
+        );
+        Ok((
+            code?,
+            readme?,
+            crates.unwrap_or_default(),
+            module_docs.unwrap_or_default(),
+        ))
     }
 
     // ========================================================================
@@ -914,8 +1125,32 @@ async fn batches_to_code_chunks(
         .await
 }
 
+async fn batches_to_code_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_code_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_code_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+    extract_code_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_code_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
     let col = |name: &str| -> Result<&StringArray, StoreError> {
         batch
@@ -945,8 +1180,8 @@ fn extract_code_chunks_from_batch(
         .column_by_name("docstring")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let nullable_string = |arr: Option<&StringArray>, i: usize| -> Option<String> {
@@ -969,8 +1204,8 @@ fn extract_code_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
@@ -991,8 +1226,32 @@ async fn batches_to_readme_chunks(
         .await
 }
 
+async fn batches_to_readme_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_readme_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_readme_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+    extract_readme_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_readme_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
     let col = |name: &str| -> Result<&StringArray, StoreError> {
         batch
@@ -1008,8 +1267,8 @@ fn extract_readme_chunks_from_batch(
     let content_hashes = col("content_hash")?;
     let model_versions = col("embedding_model_version")?;
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let chunks = (0..batch.num_rows())
@@ -1022,8 +1281,8 @@ fn extract_readme_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
@@ -1044,8 +1303,32 @@ async fn batches_to_crate_chunks(
         .await
 }
 
+async fn batches_to_crate_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_crate_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_crate_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+    extract_crate_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_crate_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
     use arrow_array::ListArray;
 
@@ -1072,8 +1355,8 @@ fn extract_crate_chunks_from_batch(
         .column_by_name("dependencies")
         .and_then(|c| c.as_any().downcast_ref::<ListArray>());
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let nullable_string = |arr: Option<&StringArray>, i: usize| -> Option<String> {
@@ -1115,8 +1398,8 @@ fn extract_crate_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
@@ -1137,8 +1420,32 @@ async fn batches_to_module_doc_chunks(
         .await
 }
 
+async fn batches_to_module_doc_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_module_doc_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_module_doc_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+    extract_module_doc_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_module_doc_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
     let col = |name: &str| -> Result<&StringArray, StoreError> {
         batch
@@ -1155,8 +1462,8 @@ fn extract_module_doc_chunks_from_batch(
     let content_hashes = col("content_hash")?;
     let model_versions = col("embedding_model_version")?;
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let chunks = (0..batch.num_rows())
@@ -1170,8 +1477,8 @@ fn extract_module_doc_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 

@@ -1,6 +1,7 @@
 /target
 /data/*
 !/data/reports/
+/data/reports/*.json
 /cache
 .env
 /.fastembed_cache

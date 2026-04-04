@@ -119,6 +119,7 @@ pub async fn run_all(
             store,
             &retrieval_config,
             &config.rerank,
+            &config.hybrid,
             reranker_ref,
             classified_intent,
         )

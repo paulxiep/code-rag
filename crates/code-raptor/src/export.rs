@@ -5,9 +5,51 @@ use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::info;
+
+/// Pre-computed IDF table for browser-side BM25.
+#[derive(Serialize)]
+pub struct IdfTable {
+    pub num_docs: usize,
+    pub doc_frequencies: HashMap<String, usize>,
+}
+
+impl IdfTable {
+    /// Build from an iterator of text content.
+    /// Tokenizes identically to server-side `simple` tokenizer:
+    /// split on non-alphanumeric boundaries, lowercase.
+    #[allow(dead_code)]
+    pub fn build(texts: impl Iterator<Item = impl AsRef<str>>) -> Self {
+        let mut doc_frequencies: HashMap<String, usize> = HashMap::new();
+        let mut num_docs = 0;
+        for text in texts {
+            num_docs += 1;
+            let mut seen = HashSet::new();
+            for token in tokenize(text.as_ref()) {
+                if seen.insert(token.clone()) {
+                    *doc_frequencies.entry(token).or_default() += 1;
+                }
+            }
+        }
+        Self {
+            num_docs,
+            doc_frequencies,
+        }
+    }
+}
+
+/// Tokenize identically to server-side `simple` tokenizer: split on non-alphanumeric, lowercase.
+#[allow(dead_code)]
+fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
 
 /// Matches the ChunkIndex format expected by code-rag-ui standalone mode.
 #[derive(Serialize)]
@@ -18,6 +60,16 @@ pub struct ExportIndex {
     pub module_doc_chunks: Vec<EmbeddedChunk<ModuleDocChunk>>,
     pub intent_prototypes: HashMap<String, Vec<Vec<f32>>>,
     pub projects: Vec<String>,
+    /// IDF tables for browser-side BM25 (B2).
+    /// None until hybrid search is enabled (post-B3 searchable_text column).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_idf: Option<IdfTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readme_idf: Option<IdfTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_idf: Option<IdfTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_doc_idf: Option<IdfTable>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +110,10 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         intent_prototypes.len()
     );
 
+    // IDF tables for browser-side BM25 (B2).
+    // Disabled until hybrid search is enabled (post-B3 searchable_text column).
+    // To enable: uncomment and set to Some(IdfTable::build(...)).
+
     let index = ExportIndex {
         code_chunks,
         readme_chunks,
@@ -65,6 +121,10 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         module_doc_chunks,
         intent_prototypes,
         projects,
+        code_idf: None,
+        readme_idf: None,
+        crate_idf: None,
+        module_doc_idf: None,
     };
 
     if let Some(parent) = std::path::Path::new(output_path).parent() {

@@ -24,6 +24,15 @@ pub struct ChunkIndex {
     /// Keys: "overview", "implementation", "relationship", "comparison"
     pub intent_prototypes: std::collections::HashMap<String, Vec<Vec<f32>>>,
     pub projects: Vec<String>,
+    /// Pre-computed IDF tables for browser-side BM25 (B2).
+    #[serde(default)]
+    pub code_idf: Option<super::text_search::IdfTable>,
+    #[serde(default)]
+    pub readme_idf: Option<super::text_search::IdfTable>,
+    #[serde(default)]
+    pub crate_idf: Option<super::text_search::IdfTable>,
+    #[serde(default)]
+    pub module_doc_idf: Option<super::text_search::IdfTable>,
 }
 
 /// Fetch and deserialize the pre-computed index from a static asset URL.

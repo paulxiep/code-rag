@@ -5,6 +5,27 @@ use super::intent::RoutingTable;
 pub struct EngineConfig {
     pub routing: RoutingTable,
     pub rerank: RerankConfig,
+    pub hybrid: HybridConfig,
+}
+
+/// Hybrid search (BM25 + semantic) configuration.
+#[derive(Clone, Debug)]
+pub struct HybridConfig {
+    /// Whether hybrid search is enabled.
+    /// When false, only vector search is used (pre-B2 behavior).
+    pub enabled: bool,
+    /// RRF k parameter. Higher k = more equal weighting between sources.
+    /// Standard value: 60.0. Lower values favor top-ranked results more.
+    pub rrf_k: f32,
+}
+
+impl Default for HybridConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rrf_k: 60.0,
+        }
+    }
 }
 
 /// How many chunks to retrieve
@@ -115,5 +136,12 @@ mod tests {
         assert!(!rc.enabled);
         assert_eq!(rc.code_fetch_multiplier, 4);
         assert_eq!(rc.crate_fetch_multiplier, 1);
+    }
+
+    #[test]
+    fn test_hybrid_config_default() {
+        let hc = HybridConfig::default();
+        assert!(!hc.enabled);
+        assert!((hc.rrf_k - 60.0).abs() < f32::EPSILON);
     }
 }

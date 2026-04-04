@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use code_rag_chat::engine::intent::IntentClassifier;
-use code_rag_chat::engine::{EngineConfig, RerankConfig};
+use code_rag_chat::engine::{EngineConfig, HybridConfig, RerankConfig};
 use code_rag_chat::harness::dataset::TestDataset;
 use code_rag_chat::harness::metrics;
 use code_rag_chat::harness::report::{self, HarnessReport, SystemConfig};
@@ -53,6 +53,10 @@ struct Cli {
     /// Enable cross-encoder reranking (auto-downloads ms-marco-MiniLM-L-6-v2)
     #[arg(long)]
     rerank: bool,
+
+    /// Enable hybrid (BM25 + semantic) search
+    #[arg(long)]
+    hybrid: bool,
 
     /// Over-retrieval multiplier for code chunks
     #[arg(long, default_value = "4")]
@@ -119,6 +123,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    if cli.hybrid {
+        config.hybrid = HybridConfig {
+            enabled: true,
+            ..Default::default()
+        };
+    }
+
     // Warmup: force model load before measurement loop
     let _ = embedder.embed_one("warmup");
 
@@ -178,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             },
+            hybrid_enabled: cli.hybrid,
         },
         aggregate,
         generation_cost: None,
