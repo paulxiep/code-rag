@@ -106,9 +106,13 @@ RAPTOR clustering ─────────────── needs A2 enrichm
 Intent classification + query routing
     └──► Hierarchical query routing [requires folder/file chunks]
 
+Cross-encoder reranking ────────── independent (Track B, query-side)
+
 Hybrid search ─────────────────── independent (query-side)
 
 Graph query interface ─────────── requires call graph data
+
+Graph embeddings research ──────── requires C2 (call graph data)
 ```
 
 ### Parallelization Opportunities
@@ -143,7 +147,7 @@ V3 (Quality Harness) ─── quantitative testing infrastructure
  │       B1 → B2 → B3
  │
  └──► Track C: Relationship Graph (independent)
-         C1 → C2 → C3
+         C1 → C2 → C3 → C4
 ```
 
 V1 → V2 → V3 are sequential. Tracks A, B, C can run in parallel after V3. Prioritize based on user needs.
@@ -157,11 +161,11 @@ V1 → V2 → V3 are sequential. Tracks A, B, C can run in parallel after V3. Pr
 | **V3** (Testing) | 1 week | 3.5-4 weeks |
 | **Track A** (A1→A2→A3) | 4-5 weeks | — |
 | **Track B** (B1→B2→B3) | 2-3 weeks | — |
-| **Track C** (C1→C2→C3) | 2-4 weeks | — |
+| **Track C** (C1→C2→C3→C4) | 3-5 weeks | — |
 
-**If running Tracks in parallel:** V1+V2+V3 (~4 weeks) + longest Track (~5 weeks) = **~9 weeks to full feature set**
+**If running Tracks in parallel:** V1+V2+V3 (~4 weeks) + longest Track (~5 weeks) = **~9-10 weeks to full feature set**
 
-**If running Tracks sequentially:** ~13-16 weeks total
+**If running Tracks sequentially:** ~15-18 weeks total
 
 ### Track Priority (Portfolio Demo Context)
 
@@ -170,7 +174,8 @@ For portfolio demonstrations, hirers ask architecture questions first:
 | Track | Priority | Rationale |
 |-------|----------|-----------|
 | **A1 (Hierarchy)** | High | "What does this folder do?" is a likely first question |
-| **B1 (Hybrid search)** | High | Precision for exact identifier queries |
+| **B1 (Reranking)** | High | Single highest-ROI change; 20-35% recall improvement |
+| **B2 (Hybrid search)** | High | Precision for exact identifier queries |
 | **A2 (Enrichment)** | Medium | Helps with undocumented code |
 | **C1 (Same-file edges)** | Medium | Basic relationship queries |
 | **A3 (RAPTOR)** | Research | Impressive if successful, time-boxed |
@@ -419,6 +424,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 | V3.1 Test Dataset | 2-3 days | Writing 20-50 queries with expected results |
 | V3.2 Recall Script | 1-2 days | Query runner + metrics calculation |
 | V3.3 Baseline Docs | 1 day | Run script, document results |
+| V3.4 Embedding Eval | 2-3 days | Code-specific model benchmark |
 
 ### V3.1: Retrieval Test Dataset
 - JSON file: `test_queries.json`
@@ -438,12 +444,11 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - Document: recall, p95 latency, tokens/query
 - Establishes comparison point for Track improvements
 
-**Deliverable:** Quantitative baseline; regression safety net for Track development.
-
 ### V3 Success Criteria
 - Test dataset covers all intent categories
 - Baseline recall@5 documented
 - Script runs in <60s for full test suite
+- Code embedding model evaluated; decision documented
 
 ---
 
@@ -521,6 +526,13 @@ Sequential: A1 → A2 → A3
 - Tiered models: Haiku for bulk, better model for central functions
 - Store separately (never modify source)
 - **Crate:** code-raptor
+
+**Contextual Preamble (Anthropic's Contextual Retrieval technique):**
+- For each CodeChunk, generate a 50-100 token preamble situating it in the codebase: "This function is part of the ingestion pipeline in code-raptor. It handles..."
+- Preamble prepended to embedding text in `format_code_for_embedding()`, NOT stored on the chunk struct (ephemeral, like V2.1 calls)
+- Same LLM call pattern as docstring generation (Haiku for bulk, batch together)
+- Reduces failed retrievals by up to 49% (67% combined with B1 reranking)
+- Requires `--full` re-index (same as docstring generation)
 
 ### A2.2: Type Inference for Python
 - LLM-infer types for untyped Python functions
@@ -615,11 +627,37 @@ Sequential: A1 → A2 → A3
 
 Independent track. Can run in parallel with Track A and C.
 
-**Track total:** ~2-3 weeks
+**Track total:** ~3-4 weeks
 
 ---
 
-## B1: Hybrid Search (BM25 + Semantic)
+## B1: Cross-Encoder Reranking
+
+**Estimated effort:** 2-3 days
+
+**Goal:** Add second-stage reranking to improve precision without changing indexing. Industry-standard technique yielding 20-35% recall improvement.
+
+**Architecture:**
+- Retrieve top-20 results from LanceDB (current single-stage vector search)
+- Score each (query, chunk_text) pair with a cross-encoder model
+- Re-sort by cross-encoder score, take top-K per intent config
+- Cross-encoder runs locally via ONNX Runtime
+
+**Model options:**
+- `ms-marco-MiniLM-L-6-v2` (fast, ~200ms for 20 pairs, well-tested)
+- `BGE-reranker-base` (better accuracy, ~400ms)
+- Start with MiniLM, benchmark via harness
+
+**Integration point:** Between `retrieve()` and `build_context()` in the query pipeline. New `rerank()` function in code-rag-engine (pure, no I/O — takes query + scored chunks, returns re-scored chunks).
+
+**Crate:** code-rag-engine (reranking logic), code-rag-chat (ONNX model loading)
+
+### B1 Hero Query
+- Queries where the correct file is retrieved at rank 6-20 but not top-5 → reranking promotes it
+
+---
+
+## B2: Hybrid Search (BM25 + Semantic)
 
 **Estimated effort:** 3-5 days
 - Combine lexical (BM25) with vector similarity
@@ -634,14 +672,21 @@ Independent track. Can run in parallel with Track A and C.
   - Conceptual queries ("how does X work") → boost semantic weight
 - Configurable weights per intent category
 
+**Intent-specific weight guidance (informed by baseline metrics):**
+- `Relationship` queries (0.38 recall): BM25 weight near zero — conceptual, not lexical
+- `Implementation` queries with identifiers: BM25 weight dominant — exact match matters
+- `Overview` queries: balanced weights
+- Low-confidence classifications (below threshold): equal weights as safe default
+- Consider using classifier confidence score to modulate fusion dynamically
+
 **Deliverable:** "Show me UserService" finds exact match.
 
-### B1 Hero Query
+### B2 Hero Query
 - "Show me Retriever" → Exact match (not semantically similar alternatives)
 
 ---
 
-## B2: Function Signature Extraction
+## B3: Function Signature Extraction
 
 **Estimated effort:** 3-4 days
 
@@ -652,23 +697,11 @@ Independent track. Can run in parallel with Track A and C.
 
 ---
 
-## B3: Large Function Chunking
-
-**Estimated effort:** 3-5 days
-- Detect oversized functions (>N lines threshold)
-- Chunk by logical blocks (loop, match arms, etc.)
-- Maintain parent-child relationship
-- **Crate:** code-raptor
-
-**Maps to Vision:** Improvement #6 (Hybrid Search) + #8 (Signatures) + #10 (Chunking)
-
----
-
 # Track C: Relationship Graph
 
 Independent track. Can run in parallel with Track A and B.
 
-**Track total:** ~2-4 weeks (C2 has high variance due to cross-file resolution complexity)
+**Track total:** ~3-5 weeks (C2 has high variance due to cross-file resolution complexity)
 
 ---
 
@@ -678,6 +711,9 @@ Independent track. Can run in parallel with Track A and B.
 - Extract function→function edges within same file
 - No import resolution needed
 - Store as `CallEdge` in LanceDB
+- Store edges bidirectionally: `(caller → callee)` AND `(callee → caller)`
+- Enables both "what calls X?" and "what does X call?" without reverse lookups
+- Minimal storage overhead (double the edges, but edges are small)
 - **Crate:** code-raptor
 
 ---
@@ -713,6 +749,28 @@ Independent track. Can run in parallel with Track A and B.
 
 ---
 
+## C4: Graph Embeddings Research (Time-Boxed)
+
+**Prerequisite:** C2 (Cross-File Call Graph) — need a mature graph first
+
+**Estimated effort:** 3-5 days (TIME-BOXED)
+
+**Goal:** Evaluate whether structural graph embeddings (Node2Vec or similar) improve relationship query recall beyond what graph traversal (C3) achieves alone.
+
+**Research questions:**
+- Do graph embeddings capture useful structural signals (hub functions, leaf functions, bridge functions)?
+- How to fuse graph embeddings with code semantic embeddings? Options:
+  - Separate search channel + RRF fusion with semantic results
+  - Concatenated vectors (changes dimensionality)
+  - Graph position as metadata features (simpler)
+- Does the added pipeline complexity justify the recall improvement?
+
+**Success criteria:** Relationship recall improves by >0.05 over C3-only baseline, OR documented findings on why graph embeddings don't add value for code.
+
+**Crate:** code-rag-engine (fusion logic), code-raptor (graph embedding generation)
+
+---
+
 ## Crate Mapping
 
 | Improvement | Crate |
@@ -734,8 +792,12 @@ Independent track. Can run in parallel with Track A and B.
 | Type generation | code-raptor |
 | RAPTOR clustering | code-raptor |
 | Repo summaries | code-raptor |
+| Cross-encoder reranking (B1) | code-rag-engine, code-rag-chat |
 | Hybrid search | code-rag-chat |
 | Graph query interface | code-rag-chat |
+| Code embedding evaluation (V3.4) | code-rag-store |
+| Graph embeddings research (C4) | code-rag-engine, code-raptor |
+| HyDE query transformation (hypothetical) | code-rag-engine, code-rag-chat |
 
 ---
 
@@ -746,11 +808,14 @@ Independent track. Can run in parallel with Track A and B.
 | V1 [DONE] | Docstrings appear in results (Rust, Python, TypeScript); TypeScript files indexed with docstrings; re-ingestion <30s for unchanged code; incremental ingestion skips unchanged files; `--full`/`--dry-run`/`--project-name` CLI flags work; 97 tests pass |
 | V2 [DONE] | Queries route by intent (cosine similarity); retrieval sources with relevance scores shown; call context in embeddings; Leptos WASM frontend; GitHub Pages standalone demo; code-rag-engine shared algorithms; 135 tests pass |
 | V3 | Test dataset with 20+ queries; baseline recall@5 documented; regression script runs <60s |
+| V3.4 | Code embedding model evaluated; decision documented |
 | A1 | "What does engine/ do?" returns coherent answer |
 | A2 | Undocumented code has generated descriptions in search |
 | A3 | Clustering produces meaningful emergent structure (or documented why not) |
-| B1-B3 | "Show me UserService" finds exact match |
+| B1 | Reranking improves recall@5 by >10% over baseline |
+| B2-B3 | "Show me UserService" finds exact match |
 | C1-C3 | "What calls X?" returns accurate results |
+| C4 | Graph embeddings evaluated; decision documented |
 
 ---
 
@@ -794,3 +859,40 @@ Independent track. Can run in parallel with Track A and B.
 ### Self-Reference Verification
 
 Ensure code-rag is always in the ingested codebase. The hero query "How does the retriever work?" should return `retriever.rs` from code-rag-chat itself. This meta-demonstration is a strong portfolio signal.
+
+---
+
+# Research Ideas
+
+Ideas informed by 2025-2026 RAG advancements. Not scheduled — evaluate after Tracks complete.
+
+---
+
+## Hypothetical: HyDE Query Transformation
+
+**Status:** Idea — not scheduled, no track number assigned. Depends on B1 (reranking) and B2 (hybrid search) being in place first.
+
+**Prerequisite:** B1 (Cross-Encoder Reranking) + B2 (Hybrid Search) — HyDE benefits from reranking as a safety net against hallucination, and from hybrid search for exact-match fallback.
+
+**The problem:** Embedding a *question* ("How does the retriever build context?") and embedding a *code snippet* (`fn build_context(...)`) produce vectors in different regions of embedding space. Raw queries live in "question space" while indexed chunks live in "code/document space". This gap is larger for code than for text-to-text RAG.
+
+**HyDE (Hypothetical Document Embeddings):**
+1. User asks: "How does the retriever build context?"
+2. Before embedding, send to a fast LLM (Haiku/Gemini Flash): "Write a short code snippet or description that would answer this question about a Rust codebase"
+3. LLM generates: "The build_context function in context.rs assembles markdown sections from scored chunks — crate structure first, then module docs, relevant code snippets, and README excerpts, each formatted with headers and truncated to fit the context window."
+4. Embed the *hypothetical answer* instead of (or alongside) the raw query
+5. This pseudo-document is now in "document space", much closer to the actual code embedding
+
+**Why it helps code RAG specifically:**
+- For relationship queries ("what calls X?"), HyDE generates a hypothetical call chain closer to actual call-site code than the abstract question
+- For overview queries ("what does engine/ do?"), HyDE generates a summary close to actual README/module doc embeddings
+- Largest benefit for intent categories where query↔document embedding gap is widest
+
+**Risks and mitigations:**
+- **Hallucination**: LLM might generate code patterns that don't exist → retrieves irrelevant chunks. **Mitigation**: B1 reranking scores hallucinated matches low
+- **Latency**: One LLM call (~200ms with Haiku). Can run in parallel with intent classification
+- **Dual embedding strategy**: Embed both raw query AND HyDE output, search with both, merge via RRF — hedges against hallucination
+
+**When NOT to use HyDE:**
+- Exact identifier queries ("show me Retriever") — B2 hybrid search handles these better
+- Gate on intent: only apply for `Overview` and `Relationship` intents, skip for `Implementation` with exact identifiers

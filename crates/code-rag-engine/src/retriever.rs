@@ -2,6 +2,74 @@ use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 
 use super::intent::QueryIntent;
 
+/// Max chars of code_content to include in rerank text.
+/// 1200 chars ≈ 300-400 code tokens, fits in 490-token budget with query overhead.
+const RERANK_CODE_CHAR_LIMIT: usize = 1200;
+
+/// Max chars of readme content to include in rerank text.
+/// 1500 chars ≈ 300-375 prose tokens, fits in 490-token budget with query overhead.
+const RERANK_README_CHAR_LIMIT: usize = 1500;
+
+/// Extract text content from a chunk for cross-encoder reranking.
+pub trait RerankText {
+    fn rerank_text(&self) -> String;
+}
+
+impl RerankText for CodeChunk {
+    fn rerank_text(&self) -> String {
+        let mut parts = vec![format!("{} ({})", self.identifier, self.language)];
+        if let Some(ref doc) = self.docstring
+            && !doc.is_empty()
+        {
+            parts.push(doc.clone());
+        }
+        if self.code_content.len() > RERANK_CODE_CHAR_LIMIT {
+            parts.push(format!(
+                "{}...",
+                &self.code_content[..RERANK_CODE_CHAR_LIMIT]
+            ));
+        } else {
+            parts.push(self.code_content.clone());
+        }
+        parts.join("\n")
+    }
+}
+
+impl RerankText for ReadmeChunk {
+    fn rerank_text(&self) -> String {
+        let content = if self.content.len() > RERANK_README_CHAR_LIMIT {
+            format!("{}...", &self.content[..RERANK_README_CHAR_LIMIT])
+        } else {
+            self.content.clone()
+        };
+        format!("Project: {}\n{}", self.project_name, content)
+    }
+}
+
+impl RerankText for CrateChunk {
+    fn rerank_text(&self) -> String {
+        let mut parts = vec![format!("Crate: {}", self.crate_name)];
+        if let Some(ref desc) = self.description {
+            parts.push(desc.clone());
+        }
+        if !self.dependencies.is_empty() {
+            parts.push(format!("Dependencies: {}", self.dependencies.join(", ")));
+        }
+        parts.join("\n")
+    }
+}
+
+impl RerankText for ModuleDocChunk {
+    fn rerank_text(&self) -> String {
+        format!("Module: {}\n{}", self.module_name, self.doc_content)
+    }
+}
+
+/// Convert cross-encoder logit to 0-1 relevance score.
+pub fn sigmoid(logit: f32) -> f32 {
+    1.0 / (1.0 + (-logit).exp())
+}
+
 /// A chunk paired with its relevance score (0.0–1.0, higher = more relevant).
 #[derive(Debug, Clone)]
 pub struct ScoredChunk<T> {
@@ -289,6 +357,141 @@ mod tests {
         for item in &flat {
             assert_eq!(item.line, None);
         }
+    }
+
+    #[test]
+    fn test_sigmoid_zero() {
+        let s = sigmoid(0.0);
+        assert!((s - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sigmoid_large_positive() {
+        let s = sigmoid(100.0);
+        assert!((s - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_sigmoid_large_negative() {
+        let s = sigmoid(-100.0);
+        assert!(s < 1e-4);
+    }
+
+    #[test]
+    fn test_sigmoid_monotonic() {
+        assert!(sigmoid(-2.0) < sigmoid(0.0));
+        assert!(sigmoid(0.0) < sigmoid(2.0));
+    }
+
+    #[test]
+    fn test_rerank_text_code_chunk() {
+        let chunk = CodeChunk {
+            file_path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            identifier: "retrieve".to_string(),
+            node_type: "function_definition".to_string(),
+            code_content: "pub fn retrieve() {}".to_string(),
+            start_line: 1,
+            project_name: "proj".to_string(),
+            docstring: Some("Search vector store".to_string()),
+            chunk_id: "id".to_string(),
+            content_hash: "hash".to_string(),
+            embedding_model_version: "test".to_string(),
+        };
+        let text = chunk.rerank_text();
+        assert!(text.contains("retrieve (rust)"));
+        assert!(text.contains("Search vector store"));
+        assert!(text.contains("pub fn retrieve()"));
+    }
+
+    #[test]
+    fn test_rerank_text_code_chunk_no_docstring() {
+        let chunk = make_code_chunk("src/a.rs", "foo", "proj", 1);
+        let text = chunk.rerank_text();
+        assert!(text.contains("foo (rust)"));
+        assert!(text.contains("fn test() {}"));
+        // No docstring line
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_rerank_text_code_chunk_truncation() {
+        let long_code = "x".repeat(2000);
+        let chunk = CodeChunk {
+            file_path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            identifier: "big_fn".to_string(),
+            node_type: "function_definition".to_string(),
+            code_content: long_code,
+            start_line: 1,
+            project_name: "proj".to_string(),
+            docstring: None,
+            chunk_id: "id".to_string(),
+            content_hash: "hash".to_string(),
+            embedding_model_version: "test".to_string(),
+        };
+        let text = chunk.rerank_text();
+        // Should be truncated: "big_fn (rust)\n" + 1200 chars + "..."
+        assert!(text.len() < 1300);
+        assert!(text.ends_with("..."));
+    }
+
+    #[test]
+    fn test_rerank_text_readme_chunk() {
+        let chunk = make_readme_chunk("README.md", "proj");
+        let text = chunk.rerank_text();
+        assert!(text.contains("Project: proj"));
+        assert!(text.contains("# README"));
+    }
+
+    #[test]
+    fn test_rerank_text_readme_chunk_truncation() {
+        let long_content = "y".repeat(3000);
+        let chunk = ReadmeChunk {
+            file_path: "README.md".to_string(),
+            project_name: "proj".to_string(),
+            content: long_content,
+            chunk_id: "id".to_string(),
+            content_hash: "hash".to_string(),
+            embedding_model_version: "test".to_string(),
+        };
+        let text = chunk.rerank_text();
+        assert!(text.len() < 1600);
+        assert!(text.ends_with("..."));
+    }
+
+    #[test]
+    fn test_rerank_text_crate_chunk() {
+        let chunk = CrateChunk {
+            crate_name: "engine".to_string(),
+            crate_path: "crates/engine".to_string(),
+            description: Some("RAG pipeline".to_string()),
+            dependencies: vec!["types".to_string(), "store".to_string()],
+            project_name: "proj".to_string(),
+            chunk_id: "id".to_string(),
+            content_hash: "hash".to_string(),
+            embedding_model_version: "test".to_string(),
+        };
+        let text = chunk.rerank_text();
+        assert!(text.contains("Crate: engine"));
+        assert!(text.contains("RAG pipeline"));
+        assert!(text.contains("Dependencies: types, store"));
+    }
+
+    #[test]
+    fn test_rerank_text_crate_chunk_no_desc() {
+        let chunk = make_crate_chunk("c", "crates/c", "proj");
+        let text = chunk.rerank_text();
+        assert!(text.contains("Crate: c"));
+        assert_eq!(text.lines().count(), 1); // No description, no deps
+    }
+
+    #[test]
+    fn test_rerank_text_module_doc_chunk() {
+        let chunk = make_module_doc_chunk("src/lib.rs", "my_crate", "proj");
+        let text = chunk.rerank_text();
+        assert!(text.contains("Module: my_crate"));
+        assert!(text.contains("//! Module doc"));
     }
 
     #[test]

@@ -1,0 +1,1175 @@
+{
+  "timestamp": "2026-04-02T17:17:15.653423300+00:00",
+  "git_commit": "51e6de5",
+  "system": {
+    "embedding_model": "BGESmallENV15_384",
+    "db_path": "./data/portfolio.lance",
+    "dataset_path": "data/test_queries.json",
+    "total_cases": 43,
+    "use_classifier": false,
+    "label": "baseline_gt",
+    "completed_tracks": []
+  },
+  "aggregate": {
+    "total_queries": 32,
+    "recall_scored_queries": 24,
+    "no_expectation_queries": 8,
+    "recall_at_5": 0.6666667,
+    "recall_at_10": 0.6666667,
+    "mrr": 0.6125,
+    "intent_accuracy": 1.0,
+    "latency_p50_ms": 57,
+    "latency_p95_ms": 80
+  },
+  "by_intent": [
+    {
+      "intent": "comparison",
+      "query_count": 4,
+      "recall_at_5": 0.75,
+      "recall_at_10": 0.75,
+      "intent_accuracy": 1.0
+    },
+    {
+      "intent": "implementation",
+      "query_count": 15,
+      "recall_at_5": 0.7,
+      "recall_at_10": 0.7,
+      "intent_accuracy": 1.0
+    },
+    {
+      "intent": "overview",
+      "query_count": 8,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "intent_accuracy": 1.0
+    },
+    {
+      "intent": "relationship",
+      "query_count": 5,
+      "recall_at_5": 0.375,
+      "recall_at_10": 0.375,
+      "intent_accuracy": 1.0
+    }
+  ],
+  "per_query": [
+    {
+      "case_id": "hero-retriever",
+      "query": "How does the retriever work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.5,
+      "latency_ms": 80,
+      "top_results": [
+        "code:test_record_and_retrieve (60%)",
+        "code:retrieve (59%)",
+        "code:from (59%)",
+        "code:get (59%)",
+        "code:test_classify_implementation (58%)",
+        "crate:storage (56%)",
+        "module_doc:src (55%)",
+        "module_doc:src (55%)",
+        "readme:invoice-parse/README.md (54%)"
+      ],
+      "file_hits": [
+        "retriever.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "retrieve"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [
+        "code-rag-chat"
+      ],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "hero-chat-endpoint",
+      "query": "How does the chat endpoint work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.2,
+      "latency_ms": 63,
+      "top_results": [
+        "code:chat_html (67%)",
+        "code:ChatPage (66%)",
+        "code:ChatForm (66%)",
+        "code:ChatRequest (66%)",
+        "code:chat (65%)",
+        "crate:server (57%)",
+        "module_doc:src (56%)",
+        "readme:quant-trading-gym/frontend/README.md (56%)",
+        "module_doc:src (55%)"
+      ],
+      "file_hits": [
+        "handlers.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "chat"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "hero-intent-classifier",
+      "query": "How does intent classification work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 59,
+      "top_results": [
+        "code:IntentClassifier (69%)",
+        "code:IntentClassifier (69%)",
+        "code:classify (66%)",
+        "code:ClassificationResult (64%)",
+        "code:test_classify_implementation (64%)",
+        "module_doc:src (57%)",
+        "crate:quant-trading-gym (55%)",
+        "readme:invoice-parse/README.md (55%)",
+        "module_doc:src (54%)"
+      ],
+      "file_hits": [
+        "intent.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "classify"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [
+        "code-rag-chat"
+      ],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "hero-ingestion",
+      "query": "How does the ingestion pipeline work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 1.0,
+      "latency_ms": 66,
+      "top_results": [
+        "code:test_run_ingestion_full_pipeline (65%)",
+        "code:IngestionResult (64%)",
+        "code:ingest_file (64%)",
+        "code:run_full_ingestion (63%)",
+        "code:main (63%)",
+        "crate:ingestion (62%)",
+        "readme:invoice-parse/README.md (59%)",
+        "module_doc:src (55%)",
+        "module_doc:src (55%)"
+      ],
+      "file_hits": [
+        "ingestion/mod.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "run_ingestion"
+      ],
+      "project_hits": [],
+      "project_misses": [
+        "code-raptor"
+      ],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "hero-overview-project",
+      "query": "What is code-rag-chat?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.5,
+      "latency_ms": 68,
+      "top_results": [
+        "crate:code-rag-chat (72%)",
+        "readme:code-rag/README.md (71%)",
+        "crate:code-rag-types (69%)",
+        "module_doc:src (65%)",
+        "crate:code-rag-store (63%)",
+        "code:chat_html (63%)",
+        "code:ChatForm (62%)",
+        "code:chat (61%)",
+        "code:ChatPage (60%)",
+        "code:ChatRequest (60%)"
+      ],
+      "file_hits": [
+        "README.md"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [
+        "code-rag-chat"
+      ],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-architecture",
+      "query": "Describe the architecture of this system",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 59,
+      "top_results": [
+        "readme:invoice-parse/README.md (59%)",
+        "crate:parallel (59%)",
+        "code:test_build_prompt_structure (58%)",
+        "code:Cash (57%)",
+        "crate:shared-rs (57%)",
+        "code:CodeAnalyzer (57%)",
+        "code:AgentId (56%)",
+        "readme:quant-trading-gym/frontend/README.md (56%)",
+        "crate:storage (56%)",
+        "code:Price (56%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-crate-raptor",
+      "query": "What is code-raptor?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 59,
+      "top_results": [
+        "module_doc:src (71%)",
+        "crate:code-raptor (66%)",
+        "module_doc:src (63%)",
+        "crate:code-rag-types (59%)",
+        "code:CodeAnalyzer (58%)",
+        "code:test_classify_and_route_overview (57%)",
+        "crate:code-rag-chat (56%)",
+        "readme:code-rag/README.md (56%)",
+        "code:CodeAnalyzer (55%)",
+        "code:OpenAIExtractor (55%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [
+        "code-raptor"
+      ],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-crate-engine",
+      "query": "What does code-rag-engine do?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 74,
+      "top_results": [
+        "readme:code-rag/README.md (71%)",
+        "crate:code-rag-types (71%)",
+        "crate:code-rag-store (68%)",
+        "crate:code-rag-chat (67%)",
+        "module_doc:src (67%)",
+        "code:EngineConfig (63%)",
+        "code:CodeAnalyzer (62%)",
+        "code:chunks_only (62%)",
+        "code:chunks_only (62%)",
+        "code:AuctionEngine (61%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-crate-store",
+      "query": "What is the purpose of code-rag-store?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 56,
+      "top_results": [
+        "crate:code-rag-store (71%)",
+        "module_doc:src (70%)",
+        "crate:code-rag-chat (69%)",
+        "crate:code-rag-types (69%)",
+        "readme:code-rag/README.md (67%)",
+        "code:embed_and_store_code (63%)",
+        "module_doc:src (61%)",
+        "code:ApiError (61%)",
+        "code:embed_and_store_all (61%)",
+        "code:chunks_only (60%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-crate-types",
+      "query": "What types does code-rag-types define?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 52,
+      "top_results": [
+        "crate:code-rag-types (76%)",
+        "crate:code-rag-store (71%)",
+        "readme:code-rag/README.md (69%)",
+        "code:chunks_only (68%)",
+        "code:chunks_only (68%)",
+        "crate:code-rag-chat (67%)",
+        "module_doc:src (65%)",
+        "code:format_code_for_embedding (63%)",
+        "code:code_chunks_to_batch (63%)",
+        "code:chunks_only (63%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-main-components",
+      "query": "What are the main components of this project?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 58,
+      "top_results": [
+        "readme:quant-trading-gym/frontend/README.md (60%)",
+        "code:test_build_prompt_structure (58%)",
+        "code:ProjectsResponse (58%)",
+        "readme:code-rag/README.md (58%)",
+        "code:main (57%)",
+        "code:ProjectsListFragment (57%)",
+        "code:main (57%)",
+        "readme:invoice-parse/README.md (56%)",
+        "module_doc:src (54%)",
+        "module_doc:src (54%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": true,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "overview-tech-stack",
+      "query": "What technologies does this project use?",
+      "expected_intent": "overview",
+      "classified_intent": "overview",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 55,
+      "top_results": [
+        "readme:quant-trading-gym/frontend/README.md (58%)",
+        "readme:code-rag/README.md (57%)",
+        "crate:shared-rs (56%)",
+        "code:ProjectsListFragment (56%)",
+        "readme:invoice-parse/README.md (56%)",
+        "code:__init__ (56%)",
+        "code:ProjectsResponse (56%)",
+        "code:process_cargo_toml (56%)",
+        "code:OpenAIExtractor (56%)",
+        "module_doc:src (55%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": true,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "impl-incremental-ingestion",
+      "query": "How does incremental ingestion detect changes?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 0.5,
+      "latency_ms": 57,
+      "top_results": [
+        "code:run_incremental_ingestion (65%)",
+        "code:IngestionStats (63%)",
+        "code:IngestionResult (60%)",
+        "code:main (59%)",
+        "crate:ingestion (59%)",
+        "code:reduce_quantity (59%)",
+        "module_doc:src (57%)",
+        "module_doc:src (56%)",
+        "readme:invoice-parse/README.md (55%)"
+      ],
+      "file_hits": [
+        "reconcile.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "reconcile"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-embedding",
+      "query": "How does the embedding model generate vectors?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 1.0,
+      "latency_ms": 53,
+      "top_results": [
+        "code:Embedder (67%)",
+        "code:Embedder (66%)",
+        "code:with_model (64%)",
+        "code:from_config (63%)",
+        "code:embed_and_store_crates (63%)",
+        "module_doc:src (58%)",
+        "crate:quant-trading-gym (58%)",
+        "module_doc:src (58%)",
+        "readme:invoice-parse/README.md (57%)"
+      ],
+      "file_hits": [
+        "embedder.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "embed_one"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-vector-search",
+      "query": "How does vector search work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 0.5,
+      "latency_ms": 56,
+      "top_results": [
+        "code:retrieve (67%)",
+        "code:search_code (66%)",
+        "code:search_crates (65%)",
+        "code:search_readme (64%)",
+        "code:search_module_docs (64%)",
+        "module_doc:src (56%)",
+        "crate:quant-trading-gym (56%)",
+        "module_doc:src (55%)",
+        "readme:invoice-parse/README.md (55%)"
+      ],
+      "file_hits": [
+        "vector_store.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "search_all"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-context-building",
+      "query": "How is context built for the LLM prompt?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 55,
+      "top_results": [
+        "code:build_prompt (70%)",
+        "code:to_prompt_text (69%)",
+        "code:LlmClient (65%)",
+        "code:test_build_context_with_readme (63%)",
+        "code:build_context (63%)",
+        "readme:invoice-parse/README.md (59%)",
+        "crate:code-rag-types (58%)",
+        "module_doc:src (56%)",
+        "module_doc:src (55%)"
+      ],
+      "file_hits": [
+        "context.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "build_context"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-llm-generation",
+      "query": "How does the LLM generate responses?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 56,
+      "top_results": [
+        "code:generate (66%)",
+        "code:OrderDistributionResponse (60%)",
+        "code:to_prompt_text (60%)",
+        "code:LlmClient (59%)",
+        "code:build_prompt (59%)",
+        "readme:invoice-parse/README.md (55%)",
+        "crate:code-rag-types (55%)",
+        "module_doc:src (55%)",
+        "module_doc:src (54%)"
+      ],
+      "file_hits": [
+        "generator.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "generate"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-query-routing",
+      "query": "How does query routing decide retrieval limits?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 96,
+      "top_results": [
+        "code:route (69%)",
+        "code:RoutingTable (68%)",
+        "code:RoutingTable (65%)",
+        "code:RetrievalConfig (63%)",
+        "code:test_route_comparison (63%)",
+        "module_doc:src (57%)",
+        "crate:quant-trading-gym (57%)",
+        "module_doc:src (56%)",
+        "readme:invoice-parse/README.md (56%)"
+      ],
+      "file_hits": [
+        "intent.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "route"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-tree-sitter-parsing",
+      "query": "How does tree-sitter parse code?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 0.5,
+      "latency_ms": 47,
+      "top_results": [
+        "code:grammar (67%)",
+        "code:CodeAnalyzer (65%)",
+        "code:collect_calls_recursive (65%)",
+        "code:collect_calls_recursive (65%)",
+        "code:grammar (65%)",
+        "module_doc:src (64%)",
+        "readme:invoice-parse/README.md (62%)",
+        "crate:code-rag-types (61%)",
+        "module_doc:src (60%)"
+      ],
+      "file_hits": [
+        "parser.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "analyze_with_handler"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-docstring-extraction",
+      "query": "How are docstrings extracted from source code?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 56,
+      "top_results": [
+        "code:extract_docstring (78%)",
+        "code:extract_docstring (75%)",
+        "code:extract_docstring (74%)",
+        "code:extract_docstring (74%)",
+        "code:extract_doc (72%)",
+        "readme:invoice-parse/README.md (63%)",
+        "crate:code-rag-types (60%)",
+        "module_doc:src (58%)",
+        "module_doc:src (57%)"
+      ],
+      "file_hits": [
+        "language.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "extract_docstring"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-language-handler",
+      "query": "How does the LanguageHandler trait work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 58,
+      "top_results": [
+        "code:LanguageHandler (72%)",
+        "code:TypeScriptHandler (69%)",
+        "code:PythonHandler (68%)",
+        "code:RustHandler (68%)",
+        "code:analyze_with_handler (66%)",
+        "crate:code-rag-types (57%)",
+        "readme:code-rag/README.md (57%)",
+        "module_doc:src (56%)",
+        "module_doc:src (56%)"
+      ],
+      "file_hits": [
+        "language.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "LanguageHandler"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-app-state",
+      "query": "How is application state initialized?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 57,
+      "top_results": [
+        "code:state (64%)",
+        "code:state (64%)",
+        "code:state (64%)",
+        "code:state (64%)",
+        "code:state (64%)",
+        "readme:quant-trading-gym/frontend/README.md (56%)",
+        "crate:ingestion (53%)",
+        "module_doc:src (52%)",
+        "module_doc:src (52%)"
+      ],
+      "file_hits": [],
+      "file_misses": [
+        "state.rs"
+      ],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "AppState"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "impl-export",
+      "query": "How does the export subcommand work?",
+      "expected_intent": "implementation",
+      "classified_intent": "implementation",
+      "intent_correct": true,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 58,
+      "top_results": [
+        "code:test_jsdoc_with_export (64%)",
+        "code:Cli (64%)",
+        "code:handleCommand (62%)",
+        "code:test_parse_exported_function (62%)",
+        "code:SimCommand (61%)",
+        "crate:output (59%)",
+        "module_doc:src (58%)",
+        "readme:invoice-parse/README.md (57%)",
+        "module_doc:src (57%)"
+      ],
+      "file_hits": [],
+      "file_misses": [
+        "export.rs"
+      ],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "run_export"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 9
+    },
+    {
+      "case_id": "rel-what-calls-retrieve",
+      "query": "What calls the retrieve function?",
+      "expected_intent": "relationship",
+      "classified_intent": "relationship",
+      "intent_correct": true,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 55,
+      "top_results": [
+        "code:test_record_and_retrieve (64%)",
+        "code:retrieve (63%)",
+        "code:RetrievalResult (63%)",
+        "code:get (63%)",
+        "code:S (62%)",
+        "crate:quant-trading-gym (58%)",
+        "module_doc:src (58%)",
+        "crate:shared-rs (57%)",
+        "readme:quant-trading-gym/frontend/README.md (56%)",
+        "module_doc:src (56%)"
+      ],
+      "file_hits": [],
+      "file_misses": [
+        "handlers.rs"
+      ],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "rel-code-rag-types-usage",
+      "query": "What depends on code-rag-types?",
+      "expected_intent": "relationship",
+      "classified_intent": "relationship",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.0,
+      "latency_ms": 58,
+      "top_results": [
+        "crate:code-rag-types (75%)",
+        "crate:code-rag-store (70%)",
+        "readme:code-rag/README.md (68%)",
+        "code:chunks_only (65%)",
+        "code:chunks_only (65%)",
+        "module_doc:src (64%)",
+        "code:format_code_for_embedding (62%)",
+        "code:search_code (61%)",
+        "code:code_chunks_to_batch (61%)",
+        "module_doc:src (60%)"
+      ],
+      "file_hits": [],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "rel-embedder-consumers",
+      "query": "What modules use the Embedder?",
+      "expected_intent": "relationship",
+      "classified_intent": "relationship",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 0.5,
+      "latency_ms": 54,
+      "top_results": [
+        "code:embed_and_store_module_docs (71%)",
+        "code:Embedder (71%)",
+        "code:Embedder (70%)",
+        "code:embed_one (68%)",
+        "code:format_module_doc_for_embedding (68%)",
+        "module_doc:src (64%)",
+        "crate:code-raptor (64%)",
+        "module_doc:src (63%)",
+        "crate:code-rag-types (63%)",
+        "readme:code-rag/README.md (59%)"
+      ],
+      "file_hits": [
+        "embedder.rs"
+      ],
+      "file_misses": [
+        "state.rs"
+      ],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "rel-error-handling",
+      "query": "How do errors propagate through the system?",
+      "expected_intent": "relationship",
+      "classified_intent": "relationship",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.5,
+      "latency_ms": 54,
+      "top_results": [
+        "code:componentDidCatch (62%)",
+        "code:ErrorBody (61%)",
+        "code:ErrorBoundary (61%)",
+        "code:O (61%)",
+        "code:ApiError (60%)",
+        "crate:quant (58%)",
+        "module_doc:src (58%)",
+        "readme:invoice-parse/README.md (57%)",
+        "module_doc:src (56%)",
+        "crate:output (56%)"
+      ],
+      "file_hits": [
+        "error.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "rel-language-implementations",
+      "query": "What languages are supported for parsing?",
+      "expected_intent": "relationship",
+      "classified_intent": "relationship",
+      "intent_correct": true,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mrr": 0.0,
+      "latency_ms": 55,
+      "top_results": [
+        "code:CodeAnalyzer (63%)",
+        "code:grammar (63%)",
+        "code:LanguageHandler (63%)",
+        "readme:invoice-parse/README.md (63%)",
+        "code:analyze_with_handler (62%)",
+        "code:CodeAnalyzer (62%)",
+        "crate:code-rag-types (59%)",
+        "module_doc:src (58%)",
+        "crate:code-rag-chat (57%)",
+        "module_doc:src (57%)"
+      ],
+      "file_hits": [],
+      "file_misses": [
+        "languages/mod.rs"
+      ],
+      "identifier_hits": [],
+      "identifier_misses": [
+        "handler_for_path"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "comp-retriever-generator",
+      "query": "Compare the retriever and generator",
+      "expected_intent": "comparison",
+      "classified_intent": "comparison",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 0.5,
+      "latency_ms": 58,
+      "top_results": [
+        "code:test_classify_comparison (64%)",
+        "code:retrieve (62%)",
+        "code:from (62%)",
+        "code:from (61%)",
+        "code:test_record_and_retrieve (61%)",
+        "crate:code-rag-types (57%)",
+        "crate:quant-trading-gym (57%)",
+        "module_doc:src (57%)",
+        "readme:invoice-parse/README.md (57%)",
+        "module_doc:src (56%)"
+      ],
+      "file_hits": [
+        "retriever.rs"
+      ],
+      "file_misses": [
+        "generator.rs"
+      ],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "comp-chunk-types",
+      "query": "What is the difference between CodeChunk and ReadmeChunk?",
+      "expected_intent": "comparison",
+      "classified_intent": "comparison",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "latency_ms": 56,
+      "top_results": [
+        "code:ReadmeChunk (67%)",
+        "code:CodeChunk (64%)",
+        "code:readme_chunk (62%)",
+        "code:format_readme_section (61%)",
+        "code:sample_readme_chunk (61%)",
+        "crate:code-rag-types (58%)",
+        "module_doc:src (57%)",
+        "readme:code-rag/README.md (57%)",
+        "module_doc:src (57%)",
+        "crate:code-rag-chat (56%)"
+      ],
+      "file_hits": [
+        "code-rag-types/src/lib.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [
+        "CodeChunk",
+        "ReadmeChunk"
+      ],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "comp-rust-python-handler",
+      "query": "How do the Rust and Python language handlers differ?",
+      "expected_intent": "comparison",
+      "classified_intent": "comparison",
+      "intent_correct": true,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mrr": 1.0,
+      "latency_ms": 58,
+      "top_results": [
+        "code:PythonHandler (75%)",
+        "code:get_handlers (75%)",
+        "code:PythonHandler (74%)",
+        "code:LanguageHandler (74%)",
+        "code:analyze_with_handler (74%)",
+        "crate:output (61%)",
+        "crate:code-rag-types (61%)",
+        "crate:code-rag-store (60%)",
+        "module_doc:src (60%)",
+        "module_doc:src (59%)"
+      ],
+      "file_hits": [
+        "python.rs"
+      ],
+      "file_misses": [
+        "rust.rs"
+      ],
+      "identifier_hits": [
+        "PythonHandler"
+      ],
+      "identifier_misses": [
+        "RustHandler"
+      ],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    },
+    {
+      "case_id": "comp-embed-vs-search",
+      "query": "What is the difference between embedding and vector search?",
+      "expected_intent": "comparison",
+      "classified_intent": "comparison",
+      "intent_correct": true,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 0.5,
+      "latency_ms": 55,
+      "top_results": [
+        "code:retrieve (68%)",
+        "code:search_code (68%)",
+        "code:Embedder (67%)",
+        "code:search_crates (66%)",
+        "code:Embedder (65%)",
+        "module_doc:src (59%)",
+        "readme:invoice-parse/README.md (58%)",
+        "module_doc:src (57%)",
+        "crate:quant-trading-gym (55%)",
+        "crate:code-rag-types (55%)"
+      ],
+      "file_hits": [
+        "embedder.rs",
+        "vector_store.rs"
+      ],
+      "file_misses": [],
+      "identifier_hits": [],
+      "identifier_misses": [],
+      "project_hits": [],
+      "project_misses": [],
+      "excluded_violations": [],
+      "min_relevant_met": null,
+      "relevant_count": 10
+    }
+  ],
+  "warnings": [
+    "Expected file 'state.rs' referenced in test cases but never found in any results",
+    "Expected file 'languages/mod.rs' referenced in test cases but never found in any results",
+    "Expected file 'export.rs' referenced in test cases but never found in any results",
+    "Expected file 'rust.rs' referenced in test cases but never found in any results"
+  ]
+}

@@ -59,6 +59,7 @@ impl From<crate::engine::EngineError> for ApiError {
             }
             EngineError::Embedding(e) => ApiError::Internal(e.to_string()),
             EngineError::Generation(e) => ApiError::Internal(format!("LLM error: {}", e)),
+            EngineError::Rerank(e) => ApiError::Internal(format!("Reranking error: {}", e)),
         }
     }
 }

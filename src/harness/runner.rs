@@ -5,7 +5,7 @@ use code_rag_engine::intent::{self, IntentClassifier, QueryIntent};
 use code_rag_engine::retriever::{FlatChunk, RetrievalResult};
 
 use crate::engine::retriever::retrieve;
-use crate::store::{Embedder, VectorStore};
+use crate::store::{Embedder, Reranker, VectorStore};
 
 use super::dataset::TestCase;
 
@@ -56,10 +56,12 @@ pub fn to_retrieved_items(result: &RetrievalResult) -> Vec<RetrievedItem> {
 ///
 /// If `ground_truth` is true, uses `expected_intent` from each test case for routing
 /// instead of the classifier. Cases without `expected_intent` are skipped with a warning.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_all(
     cases: &[TestCase],
     embedder: &mut Embedder,
     classifier: &IntentClassifier,
+    mut reranker: Option<&mut Reranker>,
     store: &VectorStore,
     config: &EngineConfig,
     ground_truth: bool,
@@ -108,9 +110,19 @@ pub async fn run_all(
         // 3. Route
         let retrieval_config = intent::route(classified_intent, &config.routing);
 
-        // 4. Retrieve
-        let retrieval_result =
-            retrieve(&embedding, store, &retrieval_config, classified_intent).await?;
+        // 4. Retrieve (with optional reranking)
+        // Reborrow to allow reuse across loop iterations
+        let reranker_ref = reranker.as_deref_mut();
+        let retrieval_result = retrieve(
+            &case.query,
+            &embedding,
+            store,
+            &retrieval_config,
+            &config.rerank,
+            reranker_ref,
+            classified_intent,
+        )
+        .await?;
 
         let latency = start.elapsed();
 

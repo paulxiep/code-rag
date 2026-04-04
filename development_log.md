@@ -1,5 +1,115 @@
 # Development Log
 
+## 2026-04-04: B1 — Cross-Encoder Reranking
+
+### Summary
+
+Implemented cross-encoder reranking using ms-marco-MiniLM-L-6-v2 as a second stage between vector retrieval and context building. Over-retrieves 4x candidates for code chunks, scores each (query, chunk) pair with the cross-encoder, sigmoid-normalizes logits, trims to final limits. Model auto-downloads from HuggingFace Hub via `hf-hub` crate (same cache mechanism as fastembed embedder). Gated by intent after empirical testing showed regressions on relationship/comparison queries.
+
+### Motivation
+
+- **Highest-ROI Track B item:** Cross-encoder reranking is the standard two-stage retrieval pattern. The bi-encoder (BGE-small) retrieves candidates cheaply; the cross-encoder scores each (query, doc) pair for higher-quality ranking.
+- **MRR improvement:** Even when recall@5 can't improve (files absent from search), reranking promotes better results to rank 1.
+- **Prerequisite for B2:** Hybrid search (BM25 + vector) feeds candidates into the reranker for a two-stage pipeline.
+
+### Architecture
+
+- **`code-rag-store/reranker.rs`** — `Reranker` struct wrapping fastembed `TextRerank` via `UserDefinedRerankingModel` + `OnnxSource::File`. Auto-downloads from HF Hub. `&mut self` (same Mutex pattern as `Embedder`).
+- **`code-rag-engine/retriever.rs`** — `RerankText` trait (pure, WASM-safe) with impls for all 4 chunk types. `sigmoid()` for logit normalization. CodeChunk text capped at 1200 chars, ReadmeChunk at 1500 chars (512-token model limit).
+- **`code-rag-engine/config.rs`** — `RerankConfig` with per-type fetch multipliers. `fetch_limits()` computes over-retrieval limits.
+- **`src/engine/retriever.rs`** — Core integration. `rerank_chunks<T>()` generic helper. Intent-gated: only `Implementation` and `Overview` intents are reranked.
+- **Server** — `Option<Mutex<Reranker>>` in `AppState`, enabled via `ENABLE_RERANKER=true` env var.
+- **Harness** — `--rerank` CLI flag, `SystemConfig` metadata for A/B comparison.
+- **Dockerfile** — Fixed dummy source step to include `src/bin/harness.rs`.
+
+### Model Choice
+
+ms-marco-MiniLM-L-6-v2 (~22MB quantized) — the only cross-encoder available in both fastembed (ONNX, server) and transformers.js (`Xenova/ms-marco-MiniLM-L-6-v2`, browser). Built-in fastembed reranker models (BGE, Jina) lack browser equivalents. Trained on MS MARCO web passages — acceptable because queries are natural language and discriminative signals (identifiers, docstrings) are NL-accessible.
+
+### Empirical Results
+
+Measured on re-ingested codebase (post-B1 code). Same index, same commit, reranking on vs off:
+
+**All-intent reranking (first attempt):**
+
+| Metric | No Rerank | Rerank All | Delta |
+|--------|-----------|------------|-------|
+| recall@5 | 0.69 | 0.70 | +0.01 |
+| MRR | 0.68 | 0.68 | 0 |
+
+| Intent | No Rerank | Rerank All | Delta |
+|--------|-----------|------------|-------|
+| implementation | 0.77 | **0.87** | **+0.10** |
+| overview | 1.00 | 1.00 | 0 |
+| comparison | 0.75 | 0.69 | **-0.06** |
+| relationship | 0.38 | 0.12 | **-0.26** |
+
+**Finding:** ms-marco cross-encoder hurts structural queries. For "What calls retrieve?", it confidently scores the `retrieve` function itself highest instead of callers. Web-passage models misjudge relational relevance in code.
+
+**Resolution:** Gated reranking by intent — only `Implementation` and `Overview`. This preserves the +10pp implementation gain while avoiding comparison/relationship regressions.
+
+**Intent-gated reranking results:**
+
+| Metric | No Rerank | Gated Rerank | Delta |
+|--------|-----------|--------------|-------|
+| recall@5 | 0.69 | **0.71** | +0.02 |
+| recall@10 | 0.69 | **0.77** | +0.08 |
+| MRR | 0.68 | 0.67 | -0.01 |
+
+| Intent | No Rerank | Gated Rerank | Delta |
+|--------|-----------|--------------|-------|
+| implementation | 0.77 | **0.87** | **+0.10** |
+| overview | 1.00 | 1.00 | 0 |
+| comparison | 0.75 | 0.75 | 0 (preserved) |
+| relationship | 0.38 | 0.12 | **-0.26** (still regressed) |
+
+**Remaining issue:** Relationship still regressed despite gating because the classifier misclassifies 3/5 relationship queries as implementation or overview (intent accuracy 40%), so they get reranked anyway. `rel-error-handling` ("How do errors propagate?") classified as `implementation` — has recall@5=1.0 without reranking but 0.0 with reranking. The cross-encoder actively demotes the correct result for misclassified structural queries. Full fix requires either better classifier accuracy or confidence-based gating.
+
+### Key Design Decisions
+
+1. **`UserDefinedRerankingModel` over built-in `RerankerModel`** — browser compatibility requires ms-marco-MiniLM, not in fastembed's enum
+2. **Auto-download via `hf-hub`** — no manual model download step; same pattern as embedder
+3. **Per-type fetch multipliers** — code 4x, readme 2x, crate 1x (sparse text), module_doc 2x. Keeps total docs ~33
+4. **Truncation-safe `rerank_text()`** — 512-token model limit; code capped at 1200 chars, readme at 1500 chars
+5. **All types reranked for score consistency** — even crate (multiplier=1) gets sigmoid scoring so `flatten()` never mixes scales
+6. **Intent-gated reranking** — only Implementation + Overview after empirical regressions on Comparison/Relationship
+7. **Graceful degradation** — reranker failure falls back to distance scores (server matches browser policy)
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `crates/code-rag-store/src/reranker.rs` | NEW — Reranker struct with auto-download |
+| `crates/code-rag-store/src/lib.rs` | Added reranker module + re-exports |
+| `crates/code-rag-store/Cargo.toml` | Added `hf-hub` dependency |
+| `crates/code-rag-engine/src/retriever.rs` | Added RerankText trait, sigmoid(), tests |
+| `crates/code-rag-engine/src/config.rs` | Added RerankConfig, fetch_limits(), updated EngineConfig |
+| `src/engine/mod.rs` | Added EngineError::Rerank, re-exported RerankConfig |
+| `src/engine/retriever.rs` | Core: rerank_chunks(), rerank_all(), intent-gated retrieve() |
+| `src/api/state.rs` | Added Option<Mutex<Reranker>> to AppState |
+| `src/api/handlers.rs` | Wired reranker into chat() |
+| `src/api/error.rs` | Added Rerank match arm |
+| `src/main.rs` | Added ENABLE_RERANKER env var |
+| `src/store/mod.rs` | Added Reranker re-export |
+| `src/harness/runner.rs` | Added reranker param to run_all() |
+| `src/harness/report.rs` | Added reranking metadata to SystemConfig |
+| `src/bin/harness.rs` | Added --rerank CLI flag + wiring |
+| `dockerfile/Dockerfile` | Fixed dummy source for src/bin/harness.rs |
+| `.gitignore` | Added /models |
+| `B1.md` | Updated with empirical results, truncation handling, intent gating |
+
+### Latency Note
+
+Reranking adds ~2900ms p50 — far over the 600ms target. Needs profiling. Likely causes: sequential ONNX inference per chunk type (4 calls), possible session overhead, no warm-up query. This is acceptable for the harness but needs optimization before production use.
+
+### Next Steps
+
+- **B2 (Hybrid Search):** BM25 + vector with RRF fusion addresses the first-stage recall gap (4 "never found" files). B1's reranker becomes B2's second stage.
+- **Latency profiling:** Investigate 2900ms p50 — batch optimization, warm-up, or ONNX session reuse.
+- **Browser reranking:** `code-rag-ui/reranker.rs` WASM bridge + transformers.js integration (out of scope for this PR).
+
+---
+
 ## 2026-04-03: V3.3 — Baseline Quality Metrics
 
 ### Summary

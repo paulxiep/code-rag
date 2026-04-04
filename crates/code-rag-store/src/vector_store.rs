@@ -3,7 +3,7 @@ use arrow_array::{
 };
 use futures::TryStreamExt;
 use lancedb::{
-    Connection, Table, connect,
+    Connection, DistanceType, Table, connect,
     query::{ExecutableQuery, QueryBase},
 };
 use std::sync::Arc;
@@ -141,6 +141,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -158,6 +159,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -175,6 +177,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -192,6 +195,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;

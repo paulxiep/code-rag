@@ -34,8 +34,9 @@ COPY code-rag/crates/code-raptor/Cargo.toml ./crates/code-raptor/
 COPY code-rag/crates/code-rag-ui/Cargo.toml ./crates/code-rag-ui/
 
 # Create dummy sources for dependency caching
-RUN mkdir -p src crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
+RUN mkdir -p src/bin crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
     echo "fn main() {println!(\"dummy\")}" > src/main.rs && \
+    echo "fn main() {}" > src/bin/harness.rs && \
     echo "// dummy" > crates/code-rag-types/src/lib.rs && \
     echo "// dummy" > crates/code-rag-engine/src/lib.rs && \
     echo "// dummy" > crates/code-rag-store/src/lib.rs && \
@@ -61,6 +62,7 @@ COPY code-rag/crates/code-rag-ui/static ./crates/code-rag-ui/static
 
 # Rebuild server with real source
 RUN touch src/main.rs \
+          src/bin/harness.rs \
           crates/code-rag-types/src/lib.rs \
           crates/code-rag-engine/src/lib.rs \
           crates/code-rag-store/src/lib.rs \

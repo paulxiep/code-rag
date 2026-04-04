@@ -10,6 +10,8 @@ mod embedder;
 #[cfg(feature = "standalone")]
 mod gemini;
 #[cfg(feature = "standalone")]
+mod reranker;
+#[cfg(feature = "standalone")]
 mod search;
 #[cfg(feature = "standalone")]
 mod standalone_api;
@@ -102,16 +104,22 @@ fn standalone_app() -> impl IntoView {
                 classifier_signal.set(Some(Arc::new(classifier)));
                 index_signal.set(Some(Arc::new(index)));
 
-                set_embedder_status.set("Loading AI model...");
+                set_embedder_status.set("Loading AI models...");
                 // Pre-warm the embedder (downloads model on first use)
                 match embedder::init().await {
-                    Ok(()) => set_embedder_status.set("Ready"),
+                    Ok(()) => {}
                     Err(e) => {
-                        // Non-fatal: embedder will retry on first query
                         web_sys::console::warn_1(&format!("Embedder pre-warm failed: {e}").into());
-                        set_embedder_status.set("Ready");
                     }
                 }
+                // Pre-warm the reranker (non-fatal on failure)
+                match reranker::init().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        web_sys::console::warn_1(&format!("Reranker pre-warm failed: {e}").into());
+                    }
+                }
+                set_embedder_status.set("Ready");
             }
             Err(e) => {
                 set_load_error.set(Some(format!("Failed to load index: {e}")));

@@ -38,6 +38,14 @@ pub struct SystemConfig {
     pub label: String,
     /// Tracks completed at time of measurement, e.g. [] for baseline, ["a1", "b1"] for post-track
     pub completed_tracks: Vec<String>,
+    /// Whether cross-encoder reranking was enabled
+    pub reranking_enabled: bool,
+    /// Reranker model name, if reranking enabled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker_model: Option<String>,
+    /// Code over-retrieval multiplier, if reranking enabled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_fetch_multiplier: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,6 +221,14 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
             md,
             "**Completed tracks:** {}",
             report.system.completed_tracks.join(", ")
+        )?;
+    }
+    if report.system.reranking_enabled {
+        writeln!(
+            md,
+            "**Reranking:** {} (code {}x)",
+            report.system.reranker_model.as_deref().unwrap_or("unknown"),
+            report.system.code_fetch_multiplier.unwrap_or(4)
         )?;
     }
     writeln!(
@@ -441,6 +457,9 @@ mod tests {
                 use_classifier: true,
                 label: "baseline".to_string(),
                 completed_tracks: vec![],
+                reranking_enabled: false,
+                reranker_model: None,
+                code_fetch_multiplier: None,
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -484,6 +503,9 @@ mod tests {
                 use_classifier: true,
                 label: "baseline".to_string(),
                 completed_tracks: vec![],
+                reranking_enabled: false,
+                reranker_model: None,
+                code_fetch_multiplier: None,
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,

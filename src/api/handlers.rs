@@ -27,14 +27,22 @@ pub async fn chat(
     let retrieval_config = intent::route(classification.intent, &state.config.routing);
     tracing::info!(intent = ?classification.intent, confidence = classification.confidence, "query classified");
 
-    // Retrieve with pre-computed embedding and intent
+    // Retrieve with optional reranking
+    let mut reranker_guard = match &state.reranker {
+        Some(r) => Some(r.lock().await),
+        None => None,
+    };
     let result = retriever::retrieve(
+        query,
         &query_embedding,
         &state.store,
         &retrieval_config,
+        &state.config.rerank,
+        reranker_guard.as_deref_mut(),
         classification.intent,
     )
     .await?;
+    drop(reranker_guard); // Release lock before LLM call
 
     // Build context (pure function)
     let context = context::build_context(&result);

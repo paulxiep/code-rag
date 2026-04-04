@@ -1,12 +1,12 @@
 use clap::Parser;
 
-use code_rag_chat::engine::EngineConfig;
 use code_rag_chat::engine::intent::IntentClassifier;
+use code_rag_chat::engine::{EngineConfig, RerankConfig};
 use code_rag_chat::harness::dataset::TestDataset;
 use code_rag_chat::harness::metrics;
 use code_rag_chat::harness::report::{self, HarnessReport, SystemConfig};
 use code_rag_chat::harness::runner;
-use code_rag_chat::store::{Embedder, VectorStore};
+use code_rag_chat::store::{Embedder, Reranker, VectorStore};
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +49,14 @@ struct Cli {
     /// Tracks completed at time of measurement (repeatable, e.g. --track a1 --track b1)
     #[arg(long = "track")]
     completed_tracks: Vec<String>,
+
+    /// Enable cross-encoder reranking (auto-downloads ms-marco-MiniLM-L-6-v2)
+    #[arg(long)]
+    rerank: bool,
+
+    /// Over-retrieval multiplier for code chunks
+    #[arg(long, default_value = "4")]
+    code_fetch_multiplier: usize,
 }
 
 #[tokio::main]
@@ -94,7 +102,22 @@ async fn main() -> anyhow::Result<()> {
     let mut embedder = Embedder::new()?;
     let classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
     let store = VectorStore::new(&cli.db_path, embedder.dimension()).await?;
-    let config = EngineConfig::default();
+
+    let mut config = EngineConfig::default();
+
+    // Initialize reranker if enabled (auto-downloads model on first use)
+    let mut reranker = if cli.rerank {
+        println!("Initializing reranker (ms-marco-MiniLM-L-6-v2)...");
+        let r = Reranker::new()?;
+        config.rerank = RerankConfig {
+            enabled: true,
+            code_fetch_multiplier: cli.code_fetch_multiplier,
+            ..Default::default()
+        };
+        Some(r)
+    } else {
+        None
+    };
 
     // Warmup: force model load before measurement loop
     let _ = embedder.embed_one("warmup");
@@ -105,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         &owned_cases,
         &mut embedder,
         &classifier,
+        reranker.as_mut(),
         &store,
         &config,
         cli.ground_truth_intent,
@@ -143,6 +167,17 @@ async fn main() -> anyhow::Result<()> {
             use_classifier: !cli.ground_truth_intent,
             label: cli.label.clone(),
             completed_tracks: cli.completed_tracks.clone(),
+            reranking_enabled: cli.rerank,
+            reranker_model: if cli.rerank {
+                Some("ms-marco-MiniLM-L-6-v2".to_string())
+            } else {
+                None
+            },
+            code_fetch_multiplier: if cli.rerank {
+                Some(cli.code_fetch_multiplier)
+            } else {
+                None
+            },
         },
         aggregate,
         generation_cost: None,
