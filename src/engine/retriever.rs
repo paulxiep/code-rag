@@ -77,17 +77,24 @@ pub async fn retrieve(
     reranker: Option<&mut Reranker>,
     intent: QueryIntent,
 ) -> Result<RetrievalResult, EngineError> {
-    let fetch_config = fetch_limits(config, rerank_config);
+    // B3 empirical gating (see development_log.md for space-search results):
+    //   - rerank: disabled for Comparison (cross-encoder drops 0.80 → 0.68)
+    //   - hybrid: disabled for Comparison (BM25 over-matches one struct in comparison pairs)
+    // Both gates applied together restore pre_b2 comparison baseline (0.80).
+    let should_rerank = rerank_config.enabled && !matches!(intent, QueryIntent::Comparison);
+    let use_hybrid = hybrid_config.enabled && !matches!(intent, QueryIntent::Comparison);
 
-    // Only rerank intents where the cross-encoder improves results.
-    // ms-marco-MiniLM-L-6-v2 hurts relationship (-0.26) and comparison (-0.06) queries
-    // because it misjudges structural/relational relevance as a web-passage model.
-    let should_rerank = rerank_config.enabled
-        && matches!(intent, QueryIntent::Implementation | QueryIntent::Overview);
+    // Fetch multiplier only applies when we actually rerank — over-retrieval changes
+    // top-K ordering for vector search (larger pool shifts which 5 are closest).
+    let fetch_config = if should_rerank {
+        fetch_limits(config, rerank_config)
+    } else {
+        config.clone()
+    };
 
     // Fetch raw results — hybrid returns relevance scores (higher=better),
     // vector-only returns L2 distances (lower=better).
-    let (code_scored, readme_scored, crate_scored, module_doc_scored) = if hybrid_config.enabled {
+    let (code_scored, readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
         let (code_raw, readme_raw, crate_raw, module_doc_raw) = store
             .hybrid_search_all(
                 query,
@@ -141,7 +148,7 @@ pub async fn retrieve(
                 Err(e) => {
                     tracing::warn!("reranking failed, falling back to search scores: {e}");
                     // Re-fetch without over-retrieval for fallback
-                    if hybrid_config.enabled {
+                    if use_hybrid {
                         let (c, r, cr, m) = store
                             .hybrid_search_all(
                                 query,

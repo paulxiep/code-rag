@@ -17,7 +17,15 @@ pub trait RerankText {
 
 impl RerankText for CodeChunk {
     fn rerank_text(&self) -> String {
-        let mut parts = vec![format!("{} ({})", self.identifier, self.language)];
+        let mut parts = Vec::new();
+
+        // Use signature (with language label) when available, else identifier
+        if let Some(ref sig) = self.signature {
+            parts.push(format!("{} ({})", sig, self.language));
+        } else {
+            parts.push(format!("{} ({})", self.identifier, self.language));
+        }
+
         if let Some(ref doc) = self.docstring
             && !doc.is_empty()
         {
@@ -26,7 +34,7 @@ impl RerankText for CodeChunk {
         if self.code_content.len() > RERANK_CODE_CHAR_LIMIT {
             parts.push(format!(
                 "{}...",
-                &self.code_content[..RERANK_CODE_CHAR_LIMIT]
+                truncate_at_char_boundary(&self.code_content, RERANK_CODE_CHAR_LIMIT)
             ));
         } else {
             parts.push(self.code_content.clone());
@@ -35,10 +43,22 @@ impl RerankText for CodeChunk {
     }
 }
 
+/// Truncate a string at a safe UTF-8 char boundary at or below `max_bytes`.
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl RerankText for ReadmeChunk {
     fn rerank_text(&self) -> String {
         let content = if self.content.len() > RERANK_README_CHAR_LIMIT {
-            format!("{}...", &self.content[..RERANK_README_CHAR_LIMIT])
+            format!("{}...", truncate_at_char_boundary(&self.content, RERANK_README_CHAR_LIMIT))
         } else {
             self.content.clone()
         };
@@ -230,6 +250,7 @@ mod tests {
             start_line: line,
             project_name: project.to_string(),
             docstring: None,
+            signature: None,
             chunk_id: "test-id".to_string(),
             content_hash: "test-hash".to_string(),
             embedding_model_version: "test".to_string(),
@@ -403,6 +424,7 @@ mod tests {
             start_line: 1,
             project_name: "proj".to_string(),
             docstring: Some("Search vector store".to_string()),
+            signature: None,
             chunk_id: "id".to_string(),
             content_hash: "hash".to_string(),
             embedding_model_version: "test".to_string(),
@@ -435,6 +457,7 @@ mod tests {
             start_line: 1,
             project_name: "proj".to_string(),
             docstring: None,
+            signature: None,
             chunk_id: "id".to_string(),
             content_hash: "hash".to_string(),
             embedding_model_version: "test".to_string(),

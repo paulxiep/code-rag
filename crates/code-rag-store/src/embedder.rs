@@ -64,15 +64,24 @@ fn embedding_dimension(model: &EmbeddingModel) -> usize {
 }
 
 /// Formats a code chunk for embedding.
-/// Concatenates identifier + docstring + code + calls for richer semantic signal.
+/// Concatenates identifier/signature + docstring + code + calls for richer semantic signal.
+/// When a signature is available, it replaces the bare identifier line.
 pub fn format_code_for_embedding(
     identifier: &str,
     language: &str,
     docstring: Option<&str>,
     code: &str,
     calls: &[String],
+    signature: Option<&str>,
 ) -> String {
-    let mut parts = vec![format!("{} ({})", identifier, language)];
+    let mut parts = Vec::new();
+
+    // Signature (with language label) when available, else identifier
+    if let Some(sig) = signature {
+        parts.push(format!("{} ({})", sig, language));
+    } else {
+        parts.push(format!("{} ({})", identifier, language));
+    }
 
     if let Some(doc) = docstring
         && !doc.is_empty()
@@ -130,6 +139,7 @@ mod tests {
             Some("Processes input data and returns results"),
             "fn process_data() {}",
             &[],
+            None,
         );
 
         assert!(result.contains("process_data (rust)"));
@@ -139,11 +149,27 @@ mod tests {
 
     #[test]
     fn test_format_code_for_embedding_without_docstring() {
-        let result = format_code_for_embedding("helper", "python", None, "def helper(): pass", &[]);
+        let result =
+            format_code_for_embedding("helper", "python", None, "def helper(): pass", &[], None);
 
         assert!(result.contains("helper (python)"));
         assert!(result.contains("def helper"));
         assert!(!result.contains("\n\n")); // no empty docstring line
+    }
+
+    #[test]
+    fn test_format_code_with_signature() {
+        let result = format_code_for_embedding(
+            "foo",
+            "rust",
+            None,
+            "fn foo() {}",
+            &[],
+            Some("pub fn foo() -> bool"),
+        );
+
+        assert!(result.contains("pub fn foo() -> bool (rust)"));
+        assert!(!result.contains("\nfoo (rust)")); // signature replaces identifier
     }
 
     #[test]
@@ -154,6 +180,7 @@ mod tests {
             None,
             "fn foo() {}",
             &["bar".to_string(), "baz".to_string()],
+            None,
         );
 
         assert!(result.contains("Calls: bar, baz"));
@@ -161,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_format_code_without_calls() {
-        let result = format_code_for_embedding("foo", "rust", None, "fn foo() {}", &[]);
+        let result = format_code_for_embedding("foo", "rust", None, "fn foo() {}", &[], None);
 
         assert!(!result.contains("Calls:"));
     }

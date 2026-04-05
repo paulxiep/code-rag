@@ -63,14 +63,14 @@ pub fn hybrid_search(
     Vec<(code_rag_types::CrateChunk, f32)>,
     Vec<(code_rag_types::ModuleDocChunk, f32)>,
 ) {
-    use crate::text_search::{bm25_search, rrf_fuse};
+    use crate::text_search::{bm25_search, bm25_search_precomputed, rrf_fuse};
 
     let code = if let Some(ref idf) = index.code_idf {
         let vec_results = top_k(query_embedding, &index.code_chunks, config.code_limit);
-        let bm25_results = bm25_search(
+        let bm25_results = bm25_search_precomputed(
             query,
             &index.code_chunks,
-            |c| &c.code_content,
+            &index.code_searchable_texts,
             idf,
             config.code_limit,
         );

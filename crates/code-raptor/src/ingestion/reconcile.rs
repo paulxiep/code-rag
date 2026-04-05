@@ -260,6 +260,7 @@ mod tests {
             start_line: 1,
             project_name: "test".into(),
             docstring: None,
+            signature: None,
             chunk_id: new_chunk_id(),
             content_hash: hash.into(),
             embedding_model_version: MODEL.into(),

@@ -12,4 +12,4 @@ pub use embedder::{
     format_module_doc_for_embedding, format_readme_for_embedding,
 };
 pub use reranker::{RerankError, Reranker};
-pub use vector_store::{StoreError, VectorStore};
+pub use vector_store::{StoreError, VectorStore, build_searchable_text, split_camel_case};

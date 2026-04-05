@@ -86,6 +86,58 @@ pub fn bm25_search<T: Clone>(
     scored
 }
 
+/// BM25 search using pre-computed text strings (B3).
+/// Like bm25_search but uses a Vec<String> instead of a closure for text extraction.
+/// Used for code chunks where searchable_text is computed at load time.
+pub fn bm25_search_precomputed<T: Clone>(
+    query: &str,
+    chunks: &[super::data::EmbeddedChunk<T>],
+    texts: &[String],
+    idf_table: &IdfTable,
+    limit: usize,
+) -> Vec<(T, f32)> {
+    let query_tokens = tokenize(query);
+    if query_tokens.is_empty() || chunks.is_empty() {
+        return vec![];
+    }
+    let k1 = 1.2_f32;
+    let b = 0.75_f32;
+
+    let avg_dl: f32 = texts
+        .iter()
+        .map(|t| tokenize(t).len() as f32)
+        .sum::<f32>()
+        / texts.len() as f32;
+
+    let mut scored: Vec<(T, f32)> = chunks
+        .iter()
+        .zip(texts.iter())
+        .map(|(ec, text)| {
+            let doc_tokens = tokenize(text);
+            let dl = doc_tokens.len() as f32;
+
+            let score: f32 = query_tokens
+                .iter()
+                .map(|qt| {
+                    let tf = doc_tokens.iter().filter(|t| t == qt).count() as f32;
+                    if tf == 0.0 {
+                        return 0.0;
+                    }
+                    let idf = idf_table.idf(qt);
+                    idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avg_dl))
+                })
+                .sum();
+
+            (ec.chunk.clone(), score)
+        })
+        .filter(|(_, score)| *score > 0.0)
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    scored
+}
+
 /// Reciprocal Rank Fusion: combine two ranked lists.
 /// Each result gets score = 1/(k + rank) from each list, summed.
 /// Chunks found by both arms get higher fused scores.

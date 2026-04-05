@@ -419,6 +419,7 @@ async fn embed_and_store_code(
                     c.docstring.as_deref(),
                     &c.code_content,
                     chunk_calls,
+                    c.signature.as_deref(),
                 )
             })
             .collect();

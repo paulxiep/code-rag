@@ -159,6 +159,7 @@ mod tests {
                 start_line: 1,
                 project_name: "proj".to_string(),
                 docstring: None,
+                signature: None,
                 chunk_id: "id".to_string(),
                 content_hash: "hash".to_string(),
                 embedding_model_version: "test".to_string(),

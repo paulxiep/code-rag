@@ -102,6 +102,35 @@ impl LanguageHandler for RustHandler {
         calls.dedup();
         calls
     }
+
+    fn extract_signature(
+        &self,
+        source: &str,
+        node: &Node,
+        _source_bytes: &[u8],
+    ) -> Option<String> {
+        let kind = node.kind();
+        match kind {
+            "function_item" => {
+                let body_block = node.child_by_field_name("body")?;
+                let sig_text = &source[node.start_byte()..body_block.start_byte()];
+                let sig = sig_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            "struct_item" | "enum_item" | "trait_item" | "impl_item" | "type_item" => {
+                let body = node.child_by_field_name("body").or_else(|| {
+                    let mut cursor = node.walk();
+                    node.children(&mut cursor)
+                        .find(|c| c.kind() == "{" || c.kind() == ";")
+                });
+                let sig_end = body.map(|b| b.start_byte()).unwrap_or(node.end_byte());
+                let sig_text = &source[node.start_byte()..sig_end];
+                let sig = sig_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Walk tree-sitter AST collecting call identifiers.

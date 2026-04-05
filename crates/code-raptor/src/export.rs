@@ -1,6 +1,7 @@
 //! Export all chunks with embeddings from LanceDB to JSON for static deployment.
 
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt64Array};
+use code_rag_store::build_searchable_text;
 use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
@@ -110,9 +111,27 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         intent_prototypes.len()
     );
 
-    // IDF tables for browser-side BM25 (B2).
-    // Disabled until hybrid search is enabled (post-B3 searchable_text column).
-    // To enable: uncomment and set to Some(IdfTable::build(...)).
+    // B3: Populate IDF tables for browser-side BM25.
+    // Code chunks use searchable_text (identifier + signature + docstring).
+    // Other chunk types use their natural text columns.
+    let code_idf = Some(IdfTable::build(code_chunks.iter().map(|ec| {
+        build_searchable_text(
+            &ec.chunk.identifier,
+            ec.chunk.signature.as_deref(),
+            ec.chunk.docstring.as_deref(),
+        )
+    })));
+    let readme_idf = Some(IdfTable::build(
+        readme_chunks.iter().map(|ec| ec.chunk.content.clone()),
+    ));
+    let crate_idf = Some(IdfTable::build(crate_chunks.iter().filter_map(|ec| {
+        ec.chunk.description.clone()
+    })));
+    let module_doc_idf = Some(IdfTable::build(
+        module_doc_chunks
+            .iter()
+            .map(|ec| ec.chunk.doc_content.clone()),
+    ));
 
     let index = ExportIndex {
         code_chunks,
@@ -121,10 +140,10 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         module_doc_chunks,
         intent_prototypes,
         projects,
-        code_idf: None,
-        readme_idf: None,
-        crate_idf: None,
-        module_doc_idf: None,
+        code_idf,
+        readme_idf,
+        crate_idf,
+        module_doc_idf,
     };
 
     if let Some(parent) = std::path::Path::new(output_path).parent() {
@@ -264,6 +283,7 @@ async fn export_code_chunks(
         let project_names = str_col(batch, "project_name")?;
         let start_lines = u64_col(batch, "start_line")?;
         let docstrings = opt_str_col(batch, "docstring");
+        let signatures = opt_str_col(batch, "signature");
 
         for i in 0..batch.num_rows() {
             let chunk = CodeChunk {
@@ -275,6 +295,7 @@ async fn export_code_chunks(
                 start_line: start_lines.value(i) as usize,
                 project_name: project_names.value(i).to_string(),
                 docstring: opt_str(docstrings, i),
+                signature: opt_str(signatures, i),
                 chunk_id: chunk_ids.value(i).to_string(),
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),

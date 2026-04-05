@@ -22,7 +22,7 @@ pub struct HybridConfig {
 impl Default for HybridConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true, // B3: searchable_text + signatures fix B2 regression (harness verified)
             rrf_k: 60.0,
         }
     }

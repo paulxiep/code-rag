@@ -97,11 +97,8 @@ async fn run_retrieval(
         ..Default::default()
     };
 
-    // Only rerank intents where the cross-encoder improves results
-    let should_rerank = matches!(
-        classification.intent,
-        QueryIntent::Implementation | QueryIntent::Overview
-    );
+    // B3: rerank disabled for Comparison (cross-encoder drops 0.80 → 0.68 empirically).
+    let should_rerank = !matches!(classification.intent, QueryIntent::Comparison);
 
     let final_config = intent::route(classification.intent, &routing);
     let search_config = if should_rerank {
@@ -110,10 +107,11 @@ async fn run_retrieval(
         final_config.clone()
     };
 
-    // Use hybrid search (BM25 + vector via RRF) when IDF data is available.
-    // Hybrid results are relevance-scored (higher=better), vector-only returns distances (lower=better).
-    let has_idf = index.code_idf.is_some();
-    let (code_raw, readme_raw, crate_raw, module_doc_raw) = if has_idf {
+    // B3: hybrid (BM25 + vector) is disabled for Comparison queries —
+    // BM25 over-matches one struct from a comparison pair, swamping the fusion.
+    let use_hybrid =
+        index.code_idf.is_some() && !matches!(classification.intent, QueryIntent::Comparison);
+    let (code_raw, readme_raw, crate_raw, module_doc_raw) = if use_hybrid {
         search::hybrid_search(query, query_embedding, index, &search_config)
     } else {
         search::brute_force_search(query_embedding, index, &search_config)
@@ -122,7 +120,7 @@ async fn run_retrieval(
     let result = if should_rerank {
         // Convert to scored chunks — hybrid scores are already relevance (higher=better),
         // vector distances need conversion.
-        let (code_scored, readme_scored, crate_scored, module_doc_scored) = if has_idf {
+        let (code_scored, readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
             (
                 retriever::to_scored_relevance(code_raw),
                 retriever::to_scored_relevance(readme_raw),
@@ -154,12 +152,12 @@ async fn run_retrieval(
                 web_sys::console::warn_1(
                     &format!("Reranking failed, using search scores: {e}").into(),
                 );
-                let (c, r, cr, m) = if has_idf {
+                let (c, r, cr, m) = if use_hybrid {
                     search::hybrid_search(query, query_embedding, index, &final_config)
                 } else {
                     search::brute_force_search(query_embedding, index, &final_config)
                 };
-                if has_idf {
+                if use_hybrid {
                     RetrievalResult {
                         code_chunks: retriever::to_scored_relevance(c),
                         readme_chunks: retriever::to_scored_relevance(r),
@@ -172,7 +170,7 @@ async fn run_retrieval(
                 }
             }
         }
-    } else if has_idf {
+    } else if use_hybrid {
         RetrievalResult {
             code_chunks: retriever::to_scored_relevance(code_raw),
             readme_chunks: retriever::to_scored_relevance(readme_raw),

@@ -41,4 +41,18 @@ pub trait LanguageHandler: Send + Sync {
     fn extract_calls(&self, _source: &str, _node: &Node, _source_bytes: &[u8]) -> Vec<String> {
         Vec::new()
     }
+
+    /// Extract declaration signature from a code element (B3).
+    ///
+    /// For functions: "pub async fn retrieve(query: &str) -> Result<Vec<CodeChunk>>"
+    /// For structs/enums/traits: "pub struct VectorStore", "pub trait Foo: Send + Sync"
+    /// Default returns None.
+    fn extract_signature(
+        &self,
+        _source: &str,
+        _node: &Node,
+        _source_bytes: &[u8],
+    ) -> Option<String> {
+        None
+    }
 }

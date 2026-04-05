@@ -254,7 +254,7 @@ impl VectorStore {
     /// Create FTS indices on all tables. Call after ingestion.
     pub async fn create_fts_indices(&self) -> Result<(), StoreError> {
         let tables_and_columns = [
-            (CODE_TABLE, "code_content"),
+            (CODE_TABLE, "searchable_text"),
             (README_TABLE, "content"),
             (CRATE_TABLE, "description"),
             (MODULE_DOC_TABLE, "doc_content"),
@@ -771,6 +771,19 @@ fn code_chunks_to_batch(
         .collect();
     let docstrings: StringArray = chunks.iter().map(|c| c.docstring.as_deref()).collect();
 
+    // B3: signature and searchable_text columns
+    let signatures: StringArray = chunks.iter().map(|c| c.signature.as_deref()).collect();
+    let searchable_texts: StringArray = chunks
+        .iter()
+        .map(|c| {
+            Some(build_searchable_text(
+                &c.identifier,
+                c.signature.as_deref(),
+                c.docstring.as_deref(),
+            ))
+        })
+        .collect();
+
     // New V1.1 fields
     let chunk_ids: StringArray = chunks.iter().map(|c| Some(c.chunk_id.as_str())).collect();
     let content_hashes: StringArray = chunks
@@ -802,6 +815,8 @@ fn code_chunks_to_batch(
         arrow_schema::Field::new("start_line", arrow_schema::DataType::UInt64, false),
         arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("docstring", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("signature", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("searchable_text", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("content_hash", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new(
@@ -834,6 +849,8 @@ fn code_chunks_to_batch(
             Arc::new(start_lines),
             Arc::new(project_names),
             Arc::new(docstrings),
+            Arc::new(signatures),
+            Arc::new(searchable_texts),
             Arc::new(chunk_ids),
             Arc::new(content_hashes),
             Arc::new(model_versions),
@@ -1180,6 +1197,10 @@ fn extract_code_chunks_from_batch_with_score(
         .column_by_name("docstring")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
+    let signatures = batch
+        .column_by_name("signature")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
     let scores = batch
         .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
@@ -1200,6 +1221,7 @@ fn extract_code_chunks_from_batch_with_score(
                 start_line: start_lines.value(i) as usize,
                 project_name: project_names.value(i).to_string(),
                 docstring: nullable_string(docstrings, i),
+                signature: nullable_string(signatures, i),
                 chunk_id: chunk_ids.value(i).to_string(),
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
@@ -1485,6 +1507,67 @@ fn extract_module_doc_chunks_from_batch_with_score(
     Ok(chunks)
 }
 
+// --- B3: Searchable text construction ---
+
+/// Build searchable_text from high-signal fields only.
+/// Excludes code body and calls — these dilute BM25 signal.
+///
+/// Two BM25 optimizations:
+/// 1. Identifier repeated 2x — simulates field-level boosting (LanceDB single-column FTS)
+/// 2. camelCase/PascalCase split into component words alongside original
+pub fn build_searchable_text(
+    identifier: &str,
+    signature: Option<&str>,
+    docstring: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+
+    // Identifier with boost (2x) + camelCase split
+    let split = split_camel_case(identifier);
+    if split != identifier.to_lowercase() {
+        parts.push(format!("{} {} {}", identifier, identifier, split));
+    } else {
+        parts.push(format!("{} {}", identifier, identifier));
+    }
+
+    if let Some(sig) = signature {
+        parts.push(sig.to_string());
+    }
+    if let Some(doc) = docstring {
+        if !doc.is_empty() {
+            parts.push(doc.to_string());
+        }
+    }
+    parts.join("\n")
+}
+
+/// Split camelCase/PascalCase into lowercase words.
+/// "VectorStore" → "vector store"
+/// "parseHTTPResponse" → "parse http response"
+/// "snake_case" → "snake_case" (unchanged, already split by tokenizer)
+pub fn split_camel_case(s: &str) -> String {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c.is_uppercase() && !current.is_empty() {
+            let prev_upper = i > 0 && chars[i - 1].is_uppercase();
+            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
+            if !prev_upper || next_lower {
+                words.push(current.to_lowercase());
+                current = String::new();
+            }
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        words.push(current.to_lowercase());
+    }
+    words.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1499,6 +1582,7 @@ mod tests {
             start_line: 1,
             project_name: "test_project".into(),
             docstring: Some("A test function".into()),
+            signature: Some("fn test_func()".into()),
             chunk_id: "test-uuid-1234".into(),
             content_hash: "abc123".into(),
             embedding_model_version: "BGESmallENV15_384".into(),
@@ -1528,7 +1612,7 @@ mod tests {
         let batch = code_chunks_to_batch(&chunks, embeddings, 384).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 12); // 11 fields + vector
+        assert_eq!(batch.num_columns(), 14); // 13 fields + vector (11 original + signature + searchable_text)
     }
 
     #[test]

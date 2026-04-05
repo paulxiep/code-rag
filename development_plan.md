@@ -686,14 +686,41 @@ Independent track. Can run in parallel with Track A and C.
 
 ---
 
-## B3: Function Signature Extraction
+## B3: Declaration Signatures + searchable_text + Hybrid Re-enablement ✅ DONE (2026-04-05)
 
-**Estimated effort:** 3-4 days
+- AST-extracted declaration signatures for functions + structs/enums/traits/interfaces/classes (Rust, Python, TypeScript)
+- `searchable_text` column: `identifier(2x) + camelCase_split + signature + docstring` — high-signal BM25 target
+- FTS index retargeted from `code_content` to `searchable_text`
+- Hybrid search re-enabled (was disabled after B2 regression)
+- Per-intent empirical gating via 4×4 space search
+- **Crates:** code-rag-types, code-raptor, code-rag-store, code-rag-engine, code-rag-ui
 
-- Extract: function name, parameters, return type, type hints
-- Store as structured metadata
-- Include in embedding text: `fn process(input: &str) -> Result<Output>`
-- **Crate:** code-raptor
+See `development_log.md` for results and per-intent gating rationale.
+
+---
+
+## B4: Intent Classifier Improvement
+
+**Estimated effort:** 0.5-1 day
+
+- Expand comparison prototypes (cover "difference between X and Y", "X vs Y", "X differs from Y" patterns)
+- Tune classification threshold
+- Optional keyword pre-filter for explicit comparison patterns
+- **Objective:** raise classifier accuracy from 58% → ≥75% on the harness test set. Classification accuracy only — downstream retrieval gains are secondary.
+- **Motivation:** B3 ground-truth harness exposed 58% classifier accuracy as a bottleneck. 3 of 5 Comparison queries misclassified as overview/relationship. Intent is a first-class pipeline component with its own metric ceiling.
+- **Crate:** code-rag-engine (intent.rs — data-only change)
+
+---
+
+## B5: Dual Embeddings (Signature + Body)
+
+**Estimated effort:** 2-3 days
+
+- Two embeddings per code chunk: `signature_embedding` (short, structural) + `body_embedding` (pre-B3 format, behavioral)
+- Query-time fusion via RRF or intent-weighted combination
+- **Motivation:** B3 empirical result showed signatures in vector embeddings regress Comparison queries. Dual embeddings isolate signature BM25 value without polluting body vector search. B4 (intent classifier) is run first because part of the Comparison drop comes from misrouting, not embedding pollution.
+- **Precedent:** ColBERT, Jina Code v2, Qdrant/Weaviate named vectors, Sourcegraph multi-index
+- **Crates:** code-rag-types, code-rag-store, code-rag-engine
 
 ---
 

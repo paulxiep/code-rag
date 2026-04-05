@@ -48,6 +48,9 @@ To clean, run `sh clean_docker.sh`.
 | **V3.1** | 2026-04-02 | Retrieval test dataset (43 queries, 4 intent categories) |
 | **V3.2** | 2026-04-02 | Recall measurement harness (recall@K, MRR, intent accuracy) |
 | **V3.3** | 2026-04-03 | Baseline quality metrics (dual-run, per-intent breakdown) |
+| **B1** | 2026-04-04 | Cross-encoder reranking (ms-marco-MiniLM-L-6-v2) |
+| **B2** | 2026-04-04 | Hybrid BM25+semantic search infrastructure (disabled pending B3) |
+| **B3** | 2026-04-05 | Declaration signatures + searchable_text + per-intent gating (recall@5 0.70→0.75) |
 
 ## Purpose
 
@@ -94,22 +97,26 @@ To clean, run `sh clean_docker.sh`.
 - Function-level chunking: 1 function/class → 1 vector (BGE-small, 384 dim)
 - Supports Rust, Python, and TypeScript via tree-sitter AST parsing
 - Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc)
+- Declaration signatures extracted: functions + structs/enums/traits/interfaces/classes
 - Call graph extraction: direct + method calls enriched into embeddings
 - Intent classification: cosine similarity against prototype query embeddings
 - Query routing: declarative routing table maps intent → retrieval limits
+- **Two-stage retrieval**: hybrid (BM25 on `searchable_text` + vector) → cross-encoder reranking (ms-marco-MiniLM-L-6-v2)
+- **Per-intent gating**: rerank + hybrid disabled for Comparison intent (empirically verified optimum)
 - Retrieval traces: all 4 chunk types surfaced with relevance scores, sorted by relevance
-- Quality harness: 43-query test dataset, recall@K, MRR, intent accuracy, latency — dual-run mode
-- Baseline: recall@5 = 0.65, overview 1.00, implementation 0.70, comparison 0.75, relationship 0.38
+- Quality harness: 49-query test dataset, recall@K, MRR, intent accuracy, latency — dual-run mode
+- Post-B3: recall@5 = 0.75 (classifier) / 0.78 (ground-truth intent); overview 1.00, implementation 0.83, comparison 0.58, relationship 0.50
 - Incremental ingestion: SHA256 file hashing, skips unchanged files
 - Shared `code-rag-engine` crate: pure algorithms compile to native + wasm32
 - GitHub Pages demo: `standalone` feature runs full RAG pipeline in-browser (LLM generation optional)
-- 192 tests, 0 warnings
+- 208 tests, 0 warnings
 
 ## Known Limitations
 
 - **Granularity**: Cannot search within functions or at file/module level
-- **Relationships**: Call enrichment is probabilistic — no structured graph queries yet (relationship recall@5 = 0.38)
-- **Exact match**: No keyword/BM25 search — exact identifier queries rely on semantic similarity alone
+- **Relationships**: Call enrichment is probabilistic — no structured graph queries yet (relationship recall@5 = 0.50)
+- **Comparison queries**: Signatures in embeddings hurt pair comparisons (e.g. "CodeChunk vs CrateChunk"); mitigated by gating but recovery pending B4 (dual embeddings)
+- **Intent classifier**: 58% accuracy caps aggregate recall at 0.75 vs 0.78 with ground-truth routing
 
 ## Planned Features
 

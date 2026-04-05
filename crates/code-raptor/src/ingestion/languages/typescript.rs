@@ -131,6 +131,61 @@ impl LanguageHandler for TypeScriptHandler {
         calls.dedup();
         calls
     }
+
+    fn extract_signature(
+        &self,
+        source: &str,
+        node: &Node,
+        _source_bytes: &[u8],
+    ) -> Option<String> {
+        let kind = node.kind();
+        match kind {
+            // Named functions and class methods
+            "function_declaration" | "method_definition" => {
+                let body = node.child_by_field_name("body")?;
+                let sig_text = &source[node.start_byte()..body.start_byte()];
+                let sig = sig_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            // Arrow functions: walk up to enclosing declaration for the name
+            "arrow_function" => {
+                let body = node.child_by_field_name("body")?;
+                let declarator = node.parent()?;
+                if declarator.kind() != "variable_declarator" {
+                    return None;
+                }
+                let declaration = declarator.parent()?;
+                if declaration.kind() != "lexical_declaration"
+                    && declaration.kind() != "variable_declaration"
+                {
+                    return None;
+                }
+                let sig_text = &source[declaration.start_byte()..body.start_byte()];
+                let sig = sig_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            // Classes, interfaces, enums: declaration line before body
+            "class_declaration" | "interface_declaration" | "enum_declaration" => {
+                let body = node.child_by_field_name("body")?;
+                let sig_text = &source[node.start_byte()..body.start_byte()];
+                let sig = sig_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            // Type aliases: full declaration (no body block)
+            "type_alias_declaration" => {
+                let sig_text = &source[node.start_byte()..node.end_byte()];
+                let sig = sig_text
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_string();
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Walk tree-sitter AST collecting call identifiers.
