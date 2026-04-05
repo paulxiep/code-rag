@@ -38,6 +38,19 @@ pub struct SystemConfig {
     pub label: String,
     /// Tracks completed at time of measurement, e.g. [] for baseline, ["a1", "b1"] for post-track
     pub completed_tracks: Vec<String>,
+    /// Whether cross-encoder reranking was enabled
+    pub reranking_enabled: bool,
+    /// Reranker model name, if reranking enabled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker_model: Option<String>,
+    /// Code over-retrieval multiplier, if reranking enabled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_fetch_multiplier: Option<usize>,
+    /// Whether hybrid (BM25 + semantic) search was enabled
+    pub hybrid_enabled: bool,
+    /// Whether B5 dual-embedding (signature_vector arm) was enabled
+    #[serde(default)]
+    pub dual_embedding_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,6 +60,8 @@ pub struct QueryReport {
     pub expected_intent: Option<String>,
     pub classified_intent: String,
     pub intent_correct: Option<bool>,
+    pub intent_confidence: f32,
+    pub intent_margin: f32,
     pub recall_at_5: f32,
     pub recall_at_10: f32,
     pub mrr: f32,
@@ -92,6 +107,8 @@ pub fn build_query_reports(results: &[(QueryResult, &TestCase)]) -> Vec<QueryRep
                 expected_intent: case.expected_intent.clone(),
                 classified_intent: format!("{:?}", result.classified_intent).to_lowercase(),
                 intent_correct: hits.intent_correct,
+                intent_confidence: result.confidence,
+                intent_margin: result.margin,
                 recall_at_5: metrics::recall_at_k(result, case, 5),
                 recall_at_10: metrics::recall_at_k(result, case, 10),
                 mrr: metrics::mrr(result, case),
@@ -214,6 +231,20 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
             "**Completed tracks:** {}",
             report.system.completed_tracks.join(", ")
         )?;
+    }
+    if report.system.reranking_enabled {
+        writeln!(
+            md,
+            "**Reranking:** {} (code {}x)",
+            report.system.reranker_model.as_deref().unwrap_or("unknown"),
+            report.system.code_fetch_multiplier.unwrap_or(4)
+        )?;
+    }
+    if report.system.hybrid_enabled {
+        writeln!(md, "**Hybrid search:** BM25 + semantic (RRF fusion)")?;
+    }
+    if report.system.dual_embedding_enabled {
+        writeln!(md, "**Dual embedding:** body_vector + signature_vector (app-level RRF)")?;
     }
     writeln!(
         md,
@@ -441,6 +472,11 @@ mod tests {
                 use_classifier: true,
                 label: "baseline".to_string(),
                 completed_tracks: vec![],
+                reranking_enabled: false,
+                reranker_model: None,
+                code_fetch_multiplier: None,
+                hybrid_enabled: false,
+                dual_embedding_enabled: false,
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -484,6 +520,11 @@ mod tests {
                 use_classifier: true,
                 label: "baseline".to_string(),
                 completed_tracks: vec![],
+                reranking_enabled: false,
+                reranker_model: None,
+                code_fetch_multiplier: None,
+                hybrid_enabled: false,
+                dual_embedding_enabled: false,
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,

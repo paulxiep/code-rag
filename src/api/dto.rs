@@ -91,6 +91,7 @@ mod tests {
             start_line: 42,
             project_name: "my_project".into(),
             docstring: None,
+            signature: None,
             chunk_id: "test-1".into(),
             content_hash: "hash-1".into(),
             embedding_model_version: "BGESmallENV15_384".into(),

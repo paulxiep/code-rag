@@ -14,5 +14,5 @@ pub use ingestion::{
 // Re-export store functionality for convenience
 pub use code_rag_store::{
     Embedder, StoreError, VectorStore, format_code_for_embedding, format_crate_for_embedding,
-    format_module_doc_for_embedding, format_readme_for_embedding,
+    format_module_doc_for_embedding, format_readme_for_embedding, format_signature_for_embedding,
 };

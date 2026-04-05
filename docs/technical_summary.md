@@ -79,6 +79,19 @@ User Query
 └─────────────────┘      │  intent limits   │
                          └────────┬─────────┘
                                   │
+                                  ▼
+                         ┌──────────────────┐
+                         │  Hybrid Search   │  vector + BM25(searchable_text)
+                         │  (per ArmPolicy) │  → N-ary RRF fusion
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │  Cross-Encoder   │  ms-marco-MiniLM-L-6-v2
+                         │   Reranker       │  (4× over-retrieve on code,
+                         │  (per ArmPolicy) │   sigmoid-normalized)
+                         └────────┬─────────┘
+                                  │
                     ┌─────────────┴─────────────┐
                     ▼                           ▼
           ┌─────────────────┐         ┌─────────────────┐
@@ -98,12 +111,12 @@ User Query
 
 ## Vector Schema (4 Tables)
 
-| Table | Content | Embedding Input |
-|-------|---------|-----------------|
-| `code_chunks` | Functions, classes, structs | `identifier (language) + docstring + code + calls` |
-| `readme_chunks` | README.md files | `Project: name + content` |
-| `crate_chunks` | Cargo.toml metadata | `Crate: name + description + dependencies` |
-| `module_doc_chunks` | Module-level docs (`//!`) | `Module: name + doc_content` |
+| Table | Content | Embedding Input | FTS / BM25 Target |
+|-------|---------|-----------------|-------------------|
+| `code_chunks` | Functions, classes, structs, traits, enums, interfaces | `identifier + docstring + code + calls` (body_vector) + `signature + language + docstring` (nullable `signature_vector`, shipped OFF) | `searchable_text` = identifier (2×) + camelCase split + signature + docstring |
+| `readme_chunks` | README.md files | `Project: name + content` | `content` |
+| `crate_chunks` | Cargo.toml metadata | `Crate: name + description + dependencies` | natural text |
+| `module_doc_chunks` | Module-level docs (`//!`) | `Module: name + doc_content` | natural text |
 
 ## Ingestion Pipeline
 
@@ -165,6 +178,13 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 18. **Optional LLM generation**: Retrieval pipeline works without auth; LLM answers are an add-on
 19. **Quality harness with dual-run**: Measures recall@K, MRR, intent accuracy, latency across 43 test cases. Dual-run (classifier vs. ground-truth intent) isolates retrieval vs. classification quality
 20. **Report metadata for parallel tracks**: `label` + `completed_tracks` in JSON reports enables comparison across independently-developed Track improvements
+21. **Two-stage retrieval with cross-encoder**: bi-encoder (BGE-small) retrieves 4× over-candidates; cross-encoder (`ms-marco-MiniLM-L-6-v2`) scores each `(query, chunk)` pair with sigmoid-normalized logits. Intent-gated — web-passage model misjudges structural (relationship/comparison) queries, so it is switched off per-intent via `ArmPolicy`
+22. **`searchable_text` as BM25 target, not `code_content`**: identifier repeated 2× (simulates field boosting since LanceDB supports single-column FTS) + camelCase split index-side + signature + docstring. BM25 on full code bodies was noisy; concentrating high-signal tokens recovered hybrid search
+23. **Per-intent `ArmPolicy` as single source of truth**: `{body_vec, sig_vec, bm25, rerank}` per intent replaces scattered `matches!(intent, Comparison)` gates. Overview=hybrid+rerank, Implementation=rerank-only, Relationship=hybrid+rerank, Comparison=vector-only. Used by both native server `retriever` and browser `standalone_api`
+24. **N-ary RRF fusion in `code-rag-engine::fusion`**: generic over arbitrary arm count (body + sig + bm25). Browser + server share the same fusion code
+25. **Dual-vector schema shipped OFF**: `signature_vector` column populated but disabled. 8-config space sweep showed signature arm regressed every intent — short-text geometry mismatch with BGE-small (trained on passages) + sparse-arm RRF penalty (sig_vec null on ~25% of chunks). Column retained for future experiments
+26. **k-NN prototype voting (k=3)**: classifier flattens all prototypes, takes top-k by similarity, similarity-weighted votes per intent. Robust to imbalanced prototype counts
+27. **Comparison keyword pre-filter with adversarial guards**: hard-overrides to Comparison on `"difference between"`, `" vs "`, `compare`, etc., but rejects idioms (`"difference this makes"`) and identifier-embedded `_vs_` tokens (`transformer_vs_rnn.py`)
 
 ## Quality Harness (V3)
 
@@ -172,9 +192,9 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 
 V3 required a structural refactor: module declarations moved from `main.rs` to `src/lib.rs`, enabling a second binary target (`code-rag-harness`) to share library code. `FlatChunk` + `RetrievalResult::flatten()` centralize chunk flattening — used by both API (`build_sources()`) and harness evaluation. Single modification point when new chunk types are added.
 
-### Test Dataset (V3.1)
+### Test Dataset (V3.1 → B4/B5)
 
-43-query declarative test corpus with typed expectations. Three-tier strategy:
+Grew from 43 → 101 → 81 (cleaned) declarative test cases with typed expectations. B4 added 48 held-out classifier cases (incl. 3 adversarial Comparison-trap cases); B5 cleanup removed 20 cases targeting non-ingested file types / non-existent entities and added file/identifier targets to the previously classifier-only B4 cases. Net: 73 of 81 cases now score recall (90%); 8 intentionally use only `min_relevant_results` or are unscoreable smoke/edge cases. Three-tier strategy:
 
 | Tier | Count | Expectations | Purpose |
 |------|-------|-------------|---------|
@@ -210,26 +230,27 @@ data/test_queries.json (43 cases)
 
 Matching: substring for file paths (survives directory restructuring), exact for identifiers/projects/chunk types. Recall excludes coverage checks — `expected_chunk_types`, `expected_projects`, `min_relevant_results`, and `excluded_files` are boolean checks alongside recall.
 
-### Baseline (V3.3)
+### Baseline (V3.3 → B5)
 
-**Dual-run mode:** Full pipeline (real classifier) vs. ground-truth intent (bypassed classifier) isolates classifier-induced recall loss.
+**Dual-run mode:** Full pipeline (real classifier) vs. ground-truth intent (bypassed classifier) isolates classifier-induced recall loss. Current numbers measured on the 81-case cleaned dataset with composite per-intent `ArmPolicy`:
 
-| Metric | Full Pipeline | Ground-Truth |
-|--------|--------------|-------------|
-| recall@5 | 0.65 | 0.67 |
-| MRR | 0.60 | 0.61 |
-| Intent accuracy | 62% | 100% |
+| Metric | Classifier |
+|--------|:---------:|
+| recall@5 (aggregate) | 0.674 |
+| Intent accuracy (97-case corpus) | 74% |
 
-Per-intent recall@5: overview 1.00, implementation 0.70, comparison 0.75, relationship 0.38. Ground-truth routing improves recall by only +0.02 — retrieval quality is the bottleneck, not classification. Report metadata (`label`, `completed_tracks`) enables comparison across parallel Track improvements.
+Per-intent recall@5: overview 0.787, implementation 0.740, relationship 0.500, comparison 0.597. Post-B4 the classifier→GT recall gap is ~2pp — classification is no longer the dominant bottleneck. Comparison and Relationship remain the weakest intents (short-text / structural queries). Report metadata (`label`, `completed_tracks`, `hybrid_enabled`, `rerank_enabled`, `dual_embedding_enabled`) enables comparison across parallel Track improvements and ArmPolicy sweeps.
 
 ## Intent-Aware Retrieval
 
-| Intent | code | readme | crate | module_doc |
-|--------|------|--------|-------|------------|
-| Overview | 5 | 3 | 3 | 3 |
-| Implementation | 5 | 1 | 1 | 2 |
-| Relationship | 5 | 1 | 2 | 2 |
-| Comparison | 5 | 2 | 3 | 2 |
+| Intent | code | readme | crate | module_doc | bm25 | rerank | sig_vec |
+|--------|:----:|:------:|:-----:|:----------:|:----:|:------:|:-------:|
+| Overview | 5 | 3 | 3 | 3 | ✓ | ✓ | ✗ |
+| Implementation | 5 | 1 | 1 | 2 | ✗ | ✓ | ✗ |
+| Relationship | 5 | 1 | 2 | 2 | ✓ | ✓ | ✗ |
+| Comparison | 5 | 2 | 3 | 2 | ✗ | ✗ | ✗ |
+
+`ArmPolicy` (right 3 columns) was derived empirically from a B5 8-config × per-intent space sweep — each gate is the arg-max of that intent's recall@5 curve.
 
 ## Build & Run
 

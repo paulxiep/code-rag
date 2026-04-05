@@ -39,11 +39,14 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
+    let enable_reranker = std::env::var("ENABLE_RERANKER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
-    tracing::info!(db_path, model, "Initializing application");
+    tracing::info!(db_path, model, enable_reranker, "Initializing application");
 
     // Build application state
-    let state = api::AppState::from_config(&db_path, &model).await?;
+    let state = api::AppState::from_config(&db_path, &model, enable_reranker).await?;
 
     // Build router
     let app = api::router(state);

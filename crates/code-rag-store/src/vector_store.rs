@@ -3,7 +3,9 @@ use arrow_array::{
 };
 use futures::TryStreamExt;
 use lancedb::{
-    Connection, Table, connect,
+    Connection, DistanceType, Table, connect,
+    index::Index,
+    index::scalar::{FtsIndexBuilder, FullTextSearchQuery},
     query::{ExecutableQuery, QueryBase},
 };
 use std::sync::Arc;
@@ -60,16 +62,22 @@ impl VectorStore {
     // ========================================================================
 
     /// Insert code chunks with their embeddings. Creates table if needed.
+    ///
+    /// `signature_embeddings` is aligned 1:1 with `chunks`; entries are `None`
+    /// when the chunk has no signature (macros, statements, etc.). Passing an
+    /// all-`None` vector is equivalent to pre-B5 single-vector ingest.
     pub async fn upsert_code_chunks(
         &self,
         chunks: &[CodeChunk],
         embeddings: Vec<Vec<f32>>,
+        signature_embeddings: Vec<Option<Vec<f32>>>,
     ) -> Result<usize, StoreError> {
         if chunks.is_empty() {
             return Ok(0);
         }
 
-        let batch = code_chunks_to_batch(chunks, embeddings, self.dimension)?;
+        let batch =
+            code_chunks_to_batch(chunks, embeddings, signature_embeddings, self.dimension)?;
         let count = batch.num_rows();
 
         self.upsert_batch(CODE_TABLE, batch).await?;
@@ -141,6 +149,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -158,6 +167,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -175,6 +185,29 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .column("vector")
+            .distance_type(DistanceType::L2)
+            .limit(limit)
+            .execute()
+            .await?;
+
+        batches_to_code_chunks(results).await
+    }
+
+    /// B5: Search code chunks by signature-vector similarity. Rows whose
+    /// `signature_vector` is null are skipped by LanceDB's vector search.
+    /// Returns (chunk, distance) pairs — same shape as `search_code()`.
+    pub async fn search_code_signatures(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        let table = self.get_table(CODE_TABLE).await?;
+
+        let results = table
+            .vector_search(query_embedding.to_vec())?
+            .column("signature_vector")
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -192,6 +225,7 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
             .await?;
@@ -227,6 +261,216 @@ impl VectorStore {
             .await
             .unwrap_or_default();
         Ok((code, readme, crates, module_docs))
+    }
+
+    // ========================================================================
+    // Hybrid search operations (B2: BM25 + semantic)
+    // ========================================================================
+
+    /// Code-appropriate FTS tokenizer config.
+    /// `simple` tokenizer splits on non-alphanumeric (good for snake_case).
+    /// Stemming and stop-word removal disabled (code identifiers aren't English words,
+    /// and Rust keywords like `self`, `for`, `return` overlap with English stop words).
+    fn code_fts_config() -> FtsIndexBuilder {
+        FtsIndexBuilder::default()
+            .base_tokenizer("simple".to_owned())
+            .lower_case(true)
+            .stem(false)
+            .remove_stop_words(true)
+    }
+
+    /// Create FTS indices on all tables. Call after ingestion.
+    pub async fn create_fts_indices(&self) -> Result<(), StoreError> {
+        let tables_and_columns = [
+            (CODE_TABLE, "searchable_text"),
+            (README_TABLE, "content"),
+            (CRATE_TABLE, "description"),
+            (MODULE_DOC_TABLE, "doc_content"),
+        ];
+
+        for (table_name, column) in &tables_and_columns {
+            match self.conn.open_table(*table_name).execute().await {
+                Ok(table) => {
+                    table
+                        .create_index(&[*column], Index::FTS(Self::code_fts_config()))
+                        .replace(true)
+                        .execute()
+                        .await?;
+                    tracing::info!("FTS index created on {}.{}", table_name, column);
+                }
+                Err(_) => {
+                    tracing::debug!("Table {} not found, skipping FTS index", table_name);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Hybrid search code chunks: vector + FTS combined via RRF.
+    /// Returns (chunk, relevance_score) pairs where score is higher=better.
+    pub async fn hybrid_search_code(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        let table = self.get_table(CODE_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .column("vector")
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_code_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    CODE_TABLE,
+                    e
+                );
+                let results = self.search_code(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search readme chunks: vector + FTS combined via RRF.
+    pub async fn hybrid_search_readme(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+        let table = self.get_table(README_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_readme_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    README_TABLE,
+                    e
+                );
+                let results = self.search_readme(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search crate chunks: vector + FTS combined via RRF.
+    pub async fn hybrid_search_crates(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+        let table = self.get_table(CRATE_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_crate_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    CRATE_TABLE,
+                    e
+                );
+                let results = self.search_crates(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search module doc chunks: vector + FTS combined via RRF.
+    pub async fn hybrid_search_module_docs(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+        let table = self.get_table(MODULE_DOC_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_module_doc_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    MODULE_DOC_TABLE,
+                    e
+                );
+                let results = self.search_module_docs(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// Hybrid search all chunk types in parallel. Returns (chunk, relevance_score) tuples.
+    pub async fn hybrid_search_all(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        code_limit: usize,
+        readme_limit: usize,
+        crate_limit: usize,
+        module_doc_limit: usize,
+    ) -> Result<
+        (
+            Vec<(CodeChunk, f32)>,
+            Vec<(ReadmeChunk, f32)>,
+            Vec<(CrateChunk, f32)>,
+            Vec<(ModuleDocChunk, f32)>,
+        ),
+        StoreError,
+    > {
+        let (code, readme, crates, module_docs) = tokio::join!(
+            self.hybrid_search_code(query_text, query_embedding, code_limit),
+            self.hybrid_search_readme(query_text, query_embedding, readme_limit),
+            self.hybrid_search_crates(query_text, query_embedding, crate_limit),
+            self.hybrid_search_module_docs(query_text, query_embedding, module_doc_limit),
+        );
+        Ok((
+            code?,
+            readme?,
+            crates.unwrap_or_default(),
+            module_docs.unwrap_or_default(),
+        ))
     }
 
     // ========================================================================
@@ -536,6 +780,7 @@ impl VectorStore {
 fn code_chunks_to_batch(
     chunks: &[CodeChunk],
     embeddings: Vec<Vec<f32>>,
+    signature_embeddings: Vec<Option<Vec<f32>>>,
     dim: usize,
 ) -> Result<RecordBatch, StoreError> {
     use arrow_array::builder::FixedSizeListBuilder;
@@ -555,6 +800,19 @@ fn code_chunks_to_batch(
         .map(|c| Some(c.project_name.as_str()))
         .collect();
     let docstrings: StringArray = chunks.iter().map(|c| c.docstring.as_deref()).collect();
+
+    // B3: signature and searchable_text columns
+    let signatures: StringArray = chunks.iter().map(|c| c.signature.as_deref()).collect();
+    let searchable_texts: StringArray = chunks
+        .iter()
+        .map(|c| {
+            Some(build_searchable_text(
+                &c.identifier,
+                c.signature.as_deref(),
+                c.docstring.as_deref(),
+            ))
+        })
+        .collect();
 
     // New V1.1 fields
     let chunk_ids: StringArray = chunks.iter().map(|c| Some(c.chunk_id.as_str())).collect();
@@ -578,6 +836,27 @@ fn code_chunks_to_batch(
 
     let vectors = vector_builder.finish();
 
+    // B5: signature_vector column (nullable). Rows without a signature embedding
+    // append null; the inner float builder still needs `dim` zero values so the
+    // fixed-size list stays consistent.
+    let mut sig_vector_builder =
+        FixedSizeListBuilder::new(arrow_array::builder::Float32Builder::new(), dim as i32);
+    for sig_emb in &signature_embeddings {
+        match sig_emb {
+            Some(emb) => {
+                sig_vector_builder.values().append_slice(emb);
+                sig_vector_builder.append(true);
+            }
+            None => {
+                sig_vector_builder
+                    .values()
+                    .append_slice(&vec![0.0_f32; dim]);
+                sig_vector_builder.append(false);
+            }
+        }
+    }
+    let signature_vectors = sig_vector_builder.finish();
+
     let schema = Arc::new(arrow_schema::Schema::new(vec![
         arrow_schema::Field::new("file_path", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("language", arrow_schema::DataType::Utf8, false),
@@ -587,6 +866,8 @@ fn code_chunks_to_batch(
         arrow_schema::Field::new("start_line", arrow_schema::DataType::UInt64, false),
         arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("docstring", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("signature", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("searchable_text", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("content_hash", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new(
@@ -606,6 +887,18 @@ fn code_chunks_to_batch(
             ),
             false,
         ),
+        arrow_schema::Field::new(
+            "signature_vector",
+            arrow_schema::DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new(
+                    "item",
+                    arrow_schema::DataType::Float32,
+                    true,
+                )),
+                dim as i32,
+            ),
+            true,
+        ),
     ]));
 
     Ok(RecordBatch::try_new(
@@ -619,10 +912,13 @@ fn code_chunks_to_batch(
             Arc::new(start_lines),
             Arc::new(project_names),
             Arc::new(docstrings),
+            Arc::new(signatures),
+            Arc::new(searchable_texts),
             Arc::new(chunk_ids),
             Arc::new(content_hashes),
             Arc::new(model_versions),
             Arc::new(vectors),
+            Arc::new(signature_vectors),
         ],
     )?)
 }
@@ -910,8 +1206,32 @@ async fn batches_to_code_chunks(
         .await
 }
 
+async fn batches_to_code_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_code_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_code_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+    extract_code_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_code_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
     let col = |name: &str| -> Result<&StringArray, StoreError> {
         batch
@@ -941,8 +1261,12 @@ fn extract_code_chunks_from_batch(
         .column_by_name("docstring")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
-    let distances = batch
-        .column_by_name("_distance")
+    let signatures = batch
+        .column_by_name("signature")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let nullable_string = |arr: Option<&StringArray>, i: usize| -> Option<String> {
@@ -961,12 +1285,13 @@ fn extract_code_chunks_from_batch(
                 start_line: start_lines.value(i) as usize,
                 project_name: project_names.value(i).to_string(),
                 docstring: nullable_string(docstrings, i),
+                signature: nullable_string(signatures, i),
                 chunk_id: chunk_ids.value(i).to_string(),
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
@@ -987,8 +1312,32 @@ async fn batches_to_readme_chunks(
         .await
 }
 
+async fn batches_to_readme_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_readme_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_readme_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+    extract_readme_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_readme_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
     let col = |name: &str| -> Result<&StringArray, StoreError> {
         batch
@@ -1004,8 +1353,8 @@ fn extract_readme_chunks_from_batch(
     let content_hashes = col("content_hash")?;
     let model_versions = col("embedding_model_version")?;
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let chunks = (0..batch.num_rows())
@@ -1018,8 +1367,8 @@ fn extract_readme_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
@@ -1040,8 +1389,32 @@ async fn batches_to_crate_chunks(
         .await
 }
 
+async fn batches_to_crate_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_crate_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_crate_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+    extract_crate_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_crate_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
     use arrow_array::ListArray;
 
@@ -1068,8 +1441,8 @@ fn extract_crate_chunks_from_batch(
         .column_by_name("dependencies")
         .and_then(|c| c.as_any().downcast_ref::<ListArray>());
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let nullable_string = |arr: Option<&StringArray>, i: usize| -> Option<String> {
@@ -1111,8 +1484,8 @@ fn extract_crate_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
@@ -1133,8 +1506,32 @@ async fn batches_to_module_doc_chunks(
         .await
 }
 
+async fn batches_to_module_doc_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_module_doc_chunks_from_batch_with_score(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
 fn extract_module_doc_chunks_from_batch(
     batch: &RecordBatch,
+) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+    extract_module_doc_chunks_from_batch_with_score(batch, "_distance")
+}
+
+fn extract_module_doc_chunks_from_batch_with_score(
+    batch: &RecordBatch,
+    score_column: &str,
 ) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
     let col = |name: &str| -> Result<&StringArray, StoreError> {
         batch
@@ -1151,8 +1548,8 @@ fn extract_module_doc_chunks_from_batch(
     let content_hashes = col("content_hash")?;
     let model_versions = col("embedding_model_version")?;
 
-    let distances = batch
-        .column_by_name("_distance")
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
     let chunks = (0..batch.num_rows())
@@ -1166,12 +1563,73 @@ fn extract_module_doc_chunks_from_batch(
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
             };
-            let dist = distances.map(|d| d.value(i)).unwrap_or(0.0);
-            (chunk, dist)
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
         })
         .collect();
 
     Ok(chunks)
+}
+
+// --- B3: Searchable text construction ---
+
+/// Build searchable_text from high-signal fields only.
+/// Excludes code body and calls — these dilute BM25 signal.
+///
+/// Two BM25 optimizations:
+/// 1. Identifier repeated 2x — simulates field-level boosting (LanceDB single-column FTS)
+/// 2. camelCase/PascalCase split into component words alongside original
+pub fn build_searchable_text(
+    identifier: &str,
+    signature: Option<&str>,
+    docstring: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+
+    // Identifier with boost (2x) + camelCase split
+    let split = split_camel_case(identifier);
+    if split != identifier.to_lowercase() {
+        parts.push(format!("{} {} {}", identifier, identifier, split));
+    } else {
+        parts.push(format!("{} {}", identifier, identifier));
+    }
+
+    if let Some(sig) = signature {
+        parts.push(sig.to_string());
+    }
+    if let Some(doc) = docstring {
+        if !doc.is_empty() {
+            parts.push(doc.to_string());
+        }
+    }
+    parts.join("\n")
+}
+
+/// Split camelCase/PascalCase into lowercase words.
+/// "VectorStore" → "vector store"
+/// "parseHTTPResponse" → "parse http response"
+/// "snake_case" → "snake_case" (unchanged, already split by tokenizer)
+pub fn split_camel_case(s: &str) -> String {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c.is_uppercase() && !current.is_empty() {
+            let prev_upper = i > 0 && chars[i - 1].is_uppercase();
+            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
+            if !prev_upper || next_lower {
+                words.push(current.to_lowercase());
+                current = String::new();
+            }
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        words.push(current.to_lowercase());
+    }
+    words.join(" ")
 }
 
 #[cfg(test)]
@@ -1188,6 +1646,7 @@ mod tests {
             start_line: 1,
             project_name: "test_project".into(),
             docstring: Some("A test function".into()),
+            signature: Some("fn test_func()".into()),
             chunk_id: "test-uuid-1234".into(),
             content_hash: "abc123".into(),
             embedding_model_version: "BGESmallENV15_384".into(),
@@ -1213,11 +1672,28 @@ mod tests {
     fn test_code_chunks_to_batch() {
         let chunks = vec![sample_code_chunk()];
         let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let batch = code_chunks_to_batch(&chunks, embeddings, 384).unwrap();
+        let batch =
+            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 12); // 11 fields + vector
+        // 13 text/int fields + body vector + signature_vector = 15
+        assert_eq!(batch.num_columns(), 15);
+    }
+
+    #[test]
+    fn test_code_chunks_to_batch_signature_null() {
+        // Chunks without signatures get null in signature_vector column.
+        let chunks = vec![sample_code_chunk()];
+        let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings: Vec<Option<Vec<f32>>> = vec![None];
+
+        let batch =
+            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
+
+        let sig_col = batch.column_by_name("signature_vector").unwrap();
+        assert!(sig_col.is_null(0));
     }
 
     #[test]
@@ -1236,8 +1712,10 @@ mod tests {
         let chunk = sample_code_chunk();
         let chunks = vec![chunk.clone()];
         let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let batch = code_chunks_to_batch(&chunks, embeddings, 384).unwrap();
+        let batch =
+            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         let identifiers = batch
             .column_by_name("identifier")
@@ -1261,8 +1739,12 @@ mod tests {
 
         let chunks = vec![sample_code_chunk()];
         let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let count = store.upsert_code_chunks(&chunks, embeddings).await.unwrap();
+        let count = store
+            .upsert_code_chunks(&chunks, embeddings, sig_embeddings)
+            .await
+            .unwrap();
         assert_eq!(count, 1);
 
         let results = store.search_code(&fake_embedding(384), 10).await.unwrap();

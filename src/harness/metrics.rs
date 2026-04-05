@@ -233,6 +233,7 @@ mod tests {
             case_id: "test".to_string(),
             classified_intent: intent,
             confidence: 0.9,
+            margin: 0.0,
             retrieved: items
                 .into_iter()
                 .map(|(flat, rank)| RetrievedItem { flat, rank })

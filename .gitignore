@@ -1,6 +1,10 @@
 /target
-/data
+/data/*
+!/data/reports/
+/data/reports/*.json
 /cache
 .env
 /.fastembed_cache
 /dist
+/crates/code-rag-ui/dist
+/models

@@ -725,7 +725,7 @@ impl VectorStore {
 
     /// Search code chunks by vector similarity.
     ///
-    /// Uses cosine similarity (LanceDB default for normalized vectors).
+    /// Uses L2 (Euclidean) distance (LanceDB default).
     ///
     /// # Arguments
     /// * `query_embedding` - 384-dim query vector

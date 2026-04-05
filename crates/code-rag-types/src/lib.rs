@@ -33,6 +33,13 @@ pub struct CodeChunk {
     pub project_name: String,      // e.g., "7_wonders", "catan"
     pub docstring: Option<String>, // Extracted documentation
 
+    /// Extracted declaration signature (B3).
+    /// Functions: "pub async fn retrieve(query: &str) -> Result<Vec<CodeChunk>>"
+    /// Structs/enums/traits: "pub struct VectorStore", "pub trait Foo: Send + Sync"
+    /// None for macro_definition and if extraction fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+
     /// Deterministic ID: hash(file_path, content). Stable across re-indexing for unchanged chunks.
     /// Foreign key for Track C call graph edges.
     pub chunk_id: String,

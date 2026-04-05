@@ -22,19 +22,35 @@ pub async fn chat(
         embedder.embed_one(query)?
     };
 
-    // Classify using prototype similarity (no lock needed)
-    let classification = intent::classify(&query_embedding, &state.classifier);
-    let retrieval_config = intent::route(classification.intent, &state.config.routing);
-    tracing::info!(intent = ?classification.intent, confidence = classification.confidence, "query classified");
+    // Keyword pre-filter for unambiguous comparison cues, else embedding classification.
+    let intent = if let Some(pre) = intent::pre_classify_comparison(query) {
+        tracing::info!(intent = ?pre, "query classified via keyword pre-filter");
+        pre
+    } else {
+        let classification = intent::classify(&query_embedding, &state.classifier);
+        tracing::info!(intent = ?classification.intent, confidence = classification.confidence, "query classified");
+        classification.intent
+    };
+    let retrieval_config = intent::route(intent, &state.config.routing);
 
-    // Retrieve with pre-computed embedding and intent
+    // Retrieve with optional reranking
+    let mut reranker_guard = match &state.reranker {
+        Some(r) => Some(r.lock().await),
+        None => None,
+    };
     let result = retriever::retrieve(
+        query,
         &query_embedding,
         &state.store,
         &retrieval_config,
-        classification.intent,
+        &state.config.rerank,
+        &state.config.hybrid,
+        &state.config.dual_embedding,
+        reranker_guard.as_deref_mut(),
+        intent,
     )
     .await?;
+    drop(reranker_guard); // Release lock before LLM call
 
     // Build context (pure function)
     let context = context::build_context(&result);

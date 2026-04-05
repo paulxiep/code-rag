@@ -5,7 +5,7 @@ use code_rag_engine::intent::{self, IntentClassifier, QueryIntent};
 use code_rag_engine::retriever::{FlatChunk, RetrievalResult};
 
 use crate::engine::retriever::retrieve;
-use crate::store::{Embedder, VectorStore};
+use crate::store::{Embedder, Reranker, VectorStore};
 
 use super::dataset::TestCase;
 
@@ -20,6 +20,9 @@ pub struct QueryResult {
 
     /// Cosine similarity confidence from classifier
     pub confidence: f32,
+
+    /// Margin between top-1 and top-2 intent scores (0.0 for ground-truth).
+    pub margin: f32,
 
     /// All retrieved items, flattened across chunk types, sorted by relevance desc
     pub retrieved: Vec<RetrievedItem>,
@@ -56,10 +59,12 @@ pub fn to_retrieved_items(result: &RetrievalResult) -> Vec<RetrievedItem> {
 ///
 /// If `ground_truth` is true, uses `expected_intent` from each test case for routing
 /// instead of the classifier. Cases without `expected_intent` are skipped with a warning.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_all(
     cases: &[TestCase],
     embedder: &mut Embedder,
     classifier: &IntentClassifier,
+    mut reranker: Option<&mut Reranker>,
     store: &VectorStore,
     config: &EngineConfig,
     ground_truth: bool,
@@ -91,7 +96,7 @@ pub async fn run_all(
         let embedding = embedder.embed_one(&case.query)?;
 
         // 2. Classify or use ground-truth intent
-        let (classified_intent, confidence) = if ground_truth {
+        let (classified_intent, confidence, margin) = if ground_truth {
             let intent_str = case
                 .expected_intent
                 .as_deref()
@@ -99,18 +104,35 @@ pub async fn run_all(
             let intent: QueryIntent = intent_str
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!("{}", e))?;
-            (intent, 1.0)
+            (intent, 1.0, 0.0)
         } else {
-            let cr = intent::classify(&embedding, classifier);
-            (cr.intent, cr.confidence)
+            // Keyword pre-filter for unambiguous comparison cues (hard override)
+            if let Some(pre) = intent::pre_classify_comparison(&case.query) {
+                (pre, 1.0, 0.0)
+            } else {
+                let cr = intent::classify(&embedding, classifier);
+                (cr.intent, cr.confidence, cr.margin)
+            }
         };
 
         // 3. Route
         let retrieval_config = intent::route(classified_intent, &config.routing);
 
-        // 4. Retrieve
-        let retrieval_result =
-            retrieve(&embedding, store, &retrieval_config, classified_intent).await?;
+        // 4. Retrieve (with optional reranking)
+        // Reborrow to allow reuse across loop iterations
+        let reranker_ref = reranker.as_deref_mut();
+        let retrieval_result = retrieve(
+            &case.query,
+            &embedding,
+            store,
+            &retrieval_config,
+            &config.rerank,
+            &config.hybrid,
+            &config.dual_embedding,
+            reranker_ref,
+            classified_intent,
+        )
+        .await?;
 
         let latency = start.elapsed();
 
@@ -121,6 +143,7 @@ pub async fn run_all(
             case_id: case.id.clone(),
             classified_intent,
             confidence,
+            margin,
             retrieved,
             latency,
         });
@@ -146,6 +169,7 @@ mod tests {
                 start_line: 1,
                 project_name: "proj".to_string(),
                 docstring: None,
+                signature: None,
                 chunk_id: "id".to_string(),
                 content_hash: "hash".to_string(),
                 embedding_model_version: "test".to_string(),

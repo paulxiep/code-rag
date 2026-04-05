@@ -63,7 +63,15 @@ impl CodeAnalyzer {
 
         // Use StreamingIterator::fold to collect matches
         // Extract docstring and calls inside fold where Node is still alive
-        type RawMatch = (String, String, String, usize, Option<String>, Vec<String>);
+        type RawMatch = (
+            String,
+            String,
+            String,
+            usize,
+            Option<String>,
+            Vec<String>,
+            Option<String>,
+        );
         let raw_matches: Vec<RawMatch> = cursor
             .captures(&query, tree.root_node(), source_bytes)
             .fold(Vec::new(), |mut acc, (m, _)| {
@@ -72,6 +80,7 @@ impl CodeAnalyzer {
                 if let (Some(b), Some(n)) = (body, name) {
                     let docstring = handler.extract_docstring(source, &b.node, source_bytes);
                     let calls = handler.extract_calls(source, &b.node, source_bytes);
+                    let signature = handler.extract_signature(source, &b.node, source_bytes);
                     acc.push((
                         b.node.kind().to_string(),
                         n.node
@@ -82,6 +91,7 @@ impl CodeAnalyzer {
                         b.node.start_position().row + 1,
                         docstring,
                         calls,
+                        signature,
                     ));
                 }
                 acc
@@ -91,7 +101,7 @@ impl CodeAnalyzer {
         let mut pairs: Vec<(CodeChunk, Vec<String>)> = raw_matches
             .into_iter()
             .map(
-                |(node_type, identifier, code_content, start_line, docstring, calls)| {
+                |(node_type, identifier, code_content, start_line, docstring, calls, signature)| {
                     let hash = content_hash(&code_content);
                     let chunk = CodeChunk {
                         file_path: "<set_by_caller>".to_string(),
@@ -101,6 +111,7 @@ impl CodeAnalyzer {
                         start_line,
                         project_name: String::new(),
                         docstring,
+                        signature,
                         chunk_id: new_chunk_id(),
                         content_hash: hash,
                         embedding_model_version: DEFAULT_EMBEDDING_MODEL.to_string(),

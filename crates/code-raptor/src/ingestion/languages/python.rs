@@ -47,6 +47,29 @@ impl LanguageHandler for PythonHandler {
         calls.dedup();
         calls
     }
+
+    fn extract_signature(
+        &self,
+        source: &str,
+        node: &Node,
+        _source_bytes: &[u8],
+    ) -> Option<String> {
+        match node.kind() {
+            "function_definition" | "class_definition" => {
+                let body = node.child_by_field_name("body")?;
+                let sig_text = &source[node.start_byte()..body.start_byte()];
+                let sig = sig_text
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim_end_matches(':')
+                    .trim()
+                    .to_string();
+                if sig.is_empty() { None } else { Some(sig) }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Parse a Python string literal into clean docstring text

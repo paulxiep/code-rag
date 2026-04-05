@@ -5,8 +5,8 @@ pub mod retriever;
 pub use code_rag_engine::context;
 pub use code_rag_engine::intent;
 
-pub use code_rag_engine::config::EngineConfig;
 pub use code_rag_engine::config::RetrievalConfig;
+pub use code_rag_engine::config::{DualEmbeddingConfig, EngineConfig, HybridConfig, RerankConfig};
 pub use code_rag_engine::retriever::FlatChunk;
 pub use generator::LlmClient;
 
@@ -22,4 +22,7 @@ pub enum EngineError {
 
     #[error("generation failed: {0}")]
     Generation(String),
+
+    #[error("reranking failed: {0}")]
+    Rerank(String),
 }

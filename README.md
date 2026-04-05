@@ -48,6 +48,11 @@ To clean, run `sh clean_docker.sh`.
 | **V3.1** | 2026-04-02 | Retrieval test dataset (43 queries, 4 intent categories) |
 | **V3.2** | 2026-04-02 | Recall measurement harness (recall@K, MRR, intent accuracy) |
 | **V3.3** | 2026-04-03 | Baseline quality metrics (dual-run, per-intent breakdown) |
+| **B1** | 2026-04-04 | Cross-encoder reranking (ms-marco-MiniLM-L-6-v2) |
+| **B2** | 2026-04-04 | Hybrid BM25+semantic search infrastructure (disabled pending B3) |
+| **B3** | 2026-04-05 | Declaration signatures + searchable_text + per-intent gating (recall@5 0.70→0.75) |
+| **B4** | 2026-04-05 | Intent classifier 58%→74% (prototypes + k-NN + keyword pre-filter) |
+| **B5** | 2026-04-06 | Dual-vector schema + per-intent ArmPolicy (bm25/rerank gating) |
 
 ## Purpose
 
@@ -94,22 +99,28 @@ To clean, run `sh clean_docker.sh`.
 - Function-level chunking: 1 function/class → 1 vector (BGE-small, 384 dim)
 - Supports Rust, Python, and TypeScript via tree-sitter AST parsing
 - Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc)
+- Declaration signatures extracted: functions + structs/enums/traits/interfaces/classes
 - Call graph extraction: direct + method calls enriched into embeddings
 - Intent classification: cosine similarity against prototype query embeddings
 - Query routing: declarative routing table maps intent → retrieval limits
+- **Two-stage retrieval**: hybrid (BM25 on `searchable_text` + vector) → cross-encoder reranking (ms-marco-MiniLM-L-6-v2), fused via N-ary RRF in shared `code-rag-engine::fusion`
+- **Per-intent `ArmPolicy`**: per-intent `{body_vec, sig_vec, bm25, rerank}` gating (single source of truth, server + browser). Overview = hybrid+rerank; Implementation = rerank-only; Relationship = hybrid+rerank; Comparison = vector-only
+- **Dual-vector schema**: nullable `signature_vector` column populated at ingest (shipped OFF after 8-config space sweep; column retained for future experiments)
+- Intent classifier: prototype cosine similarity + k-NN (k=3) weighted voting + Comparison keyword pre-filter with adversarial guards — **74% accuracy** (was 58%)
 - Retrieval traces: all 4 chunk types surfaced with relevance scores, sorted by relevance
-- Quality harness: 43-query test dataset, recall@K, MRR, intent accuracy, latency — dual-run mode
-- Baseline: recall@5 = 0.65, overview 1.00, implementation 0.70, comparison 0.75, relationship 0.38
+- Quality harness: 81-query cleaned test dataset (73 recall-scoreable), recall@K, MRR, intent accuracy, latency — dual-run mode
+- Post-B5 (composite `ArmPolicy`, classifier routing): recall@5 = **0.674** aggregate · overview 0.787 · implementation 0.740 · relationship 0.500 · comparison 0.597
 - Incremental ingestion: SHA256 file hashing, skips unchanged files
 - Shared `code-rag-engine` crate: pure algorithms compile to native + wasm32
 - GitHub Pages demo: `standalone` feature runs full RAG pipeline in-browser (LLM generation optional)
-- 192 tests, 0 warnings
+- 208 tests, 0 warnings
 
 ## Known Limitations
 
 - **Granularity**: Cannot search within functions or at file/module level
-- **Relationships**: Call enrichment is probabilistic — no structured graph queries yet (relationship recall@5 = 0.38)
-- **Exact match**: No keyword/BM25 search — exact identifier queries rely on semantic similarity alone
+- **Relationships**: Call enrichment is probabilistic — no structured graph queries yet (relationship recall@5 = 0.50)
+- **Comparison queries**: Still the weakest retrieval intent; B5 dual-vector experiment did not recover them — Comparison gated to body-only vector search
+- **Classifier**: No longer the dominant bottleneck post-B4 (+2pp classifier→GT gap on recall@5). Implementation and Relationship classification still below targets (70% / 53%)
 
 ## Planned Features
 
@@ -121,9 +132,9 @@ See [project-vision.md](project-vision.md) and [development_plan.md](development
 
 - **Language:** `Rust`
 - **Architecture & Patterns:** `Layered Architecture (API/Store/Ingestion)` · `Trait-Based Abstraction (LanguageHandler)` · `Registry Pattern (OnceLock)` · `Three-Layer Pipeline (Parse→Reconcile→Orchestrate)` · `Router Pattern` · `Handler Pattern` · `Shared State (Arc)` · `Repository Pattern` · `DTO Pattern` · `Modular Design` · `Pipeline Pattern (Ingest→Embed→Store)` · `Visitor Pattern (WalkDir)` · `Error Propagation (thiserror)` · `Ephemeral Side-Channel Pattern` · `Declarative Routing Table` · `Scored Search API` · `ScoredChunk<T> (Generic Wrapper)` · `Retrieval Traces` · `Multi-Binary Crate (lib.rs extraction)` · `FlatChunk Centralization`
-- **LLM & RAG:** `RAG (Retrieval-Augmented Generation)` · `LLM Integration` · `Google Gemini API` · `rig-core` · `Semantic Search` · `Chatbot` · `Intent Classification (Cosine Similarity)` · `Prototype Query Embeddings` · `Intent-Aware Retrieval` · `Cross-Type Source Ranking` · `Distance-to-Relevance Scoring` · `Retrieval Transparency`
-- **Quality & Evaluation:** `Recall@K` · `MRR (Mean Reciprocal Rank)` · `Intent Accuracy` · `Latency Percentiles (p50/p95)` · `Dual-Run Evaluation (Classifier vs Ground-Truth)` · `Per-Intent Breakdown` · `Declarative Test Dataset` · `Substring File Matching` · `Dataset Freeze Policy` · `Baseline Regression Tracking`
-- **Vector Database:** `LanceDB` · `FastEmbed` · `BGE Embeddings`
+- **LLM & RAG:** `RAG (Retrieval-Augmented Generation)` · `LLM Integration` · `Google Gemini API` · `rig-core` · `Semantic Search` · `Chatbot` · `Intent Classification (Cosine Similarity)` · `Prototype Query Embeddings` · `k-NN Prototype Voting` · `Keyword Pre-Filter (adversarial-guarded)` · `Intent-Aware Retrieval` · `Per-Intent Gating (ArmPolicy)` · `Two-Stage Retrieval` · `Cross-Encoder Reranking` · `Hybrid Search (BM25 + Dense)` · `RRF Fusion` · `Dual-Vector Schema` · `Declaration Signatures` · `searchable_text (IR field boosting)` · `camelCase Splitting (index-time)` · `Cross-Type Source Ranking` · `Distance-to-Relevance Scoring` · `Retrieval Transparency`
+- **Quality & Evaluation:** `Recall@K` · `MRR (Mean Reciprocal Rank)` · `Intent Accuracy` · `Latency Percentiles (p50/p95)` · `Dual-Run Evaluation (Classifier vs Ground-Truth)` · `Per-Intent Breakdown` · `Declarative Test Dataset` · `Substring File Matching` · `Dataset Freeze Policy` · `Baseline Regression Tracking` · `Space Search (per-intent ArmPolicy sweep)` · `Adversarial Test Cases` · `Held-out Classifier Eval`
+- **Vector Database:** `LanceDB` · `LanceDB FTS` · `BM25` · `FastEmbed` · `BGE Embeddings` · `ms-marco-MiniLM-L-6-v2 (ONNX)`
 - **Code Analysis:** `Tree-sitter` · `AST Parsing` · `Code Chunking` · `Docstring Extraction` · `JSDoc Parsing` · `Multi-Language (Rust, Python, TypeScript)` · `Incremental Ingestion (SHA256)` · `Call Graph Extraction (AST-based)` · `Function Call Detection (Direct + Method)`
 - **Web Framework:** `Axum` · `Leptos (WASM CSR)` · `Tower HTTP` · `CORS`
 - **Async & Runtime:** `Tokio Runtime` · `Async Programming`

@@ -1,12 +1,12 @@
 use clap::Parser;
 
-use code_rag_chat::engine::EngineConfig;
 use code_rag_chat::engine::intent::IntentClassifier;
+use code_rag_chat::engine::{DualEmbeddingConfig, EngineConfig, HybridConfig, RerankConfig};
 use code_rag_chat::harness::dataset::TestDataset;
 use code_rag_chat::harness::metrics;
 use code_rag_chat::harness::report::{self, HarnessReport, SystemConfig};
 use code_rag_chat::harness::runner;
-use code_rag_chat::store::{Embedder, VectorStore};
+use code_rag_chat::store::{Embedder, Reranker, VectorStore};
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +49,22 @@ struct Cli {
     /// Tracks completed at time of measurement (repeatable, e.g. --track a1 --track b1)
     #[arg(long = "track")]
     completed_tracks: Vec<String>,
+
+    /// Enable cross-encoder reranking (auto-downloads ms-marco-MiniLM-L-6-v2)
+    #[arg(long)]
+    rerank: bool,
+
+    /// Enable hybrid (BM25 + semantic) search
+    #[arg(long)]
+    hybrid: bool,
+
+    /// B5: Enable dual-embedding retrieval (body_vector + signature_vector arms)
+    #[arg(long = "dual-embedding")]
+    dual_embedding: bool,
+
+    /// Over-retrieval multiplier for code chunks
+    #[arg(long, default_value = "4")]
+    code_fetch_multiplier: usize,
 }
 
 #[tokio::main]
@@ -92,9 +108,53 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Initialize engine (mirrors AppState::from_config, minus LlmClient and Mutex)
     let mut embedder = Embedder::new()?;
-    let classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+    let mut classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+    if let Ok(v) = std::env::var("INTENT_THRESHOLD").map(|s| s.parse::<f32>()) {
+        if let Ok(v) = v {
+            println!("Overriding intent threshold: {}", v);
+            classifier = classifier.with_threshold(v);
+        }
+    }
+    if let Ok(v) = std::env::var("INTENT_MARGIN").map(|s| s.parse::<f32>()) {
+        if let Ok(v) = v {
+            println!("Overriding intent margin: {}", v);
+            classifier = classifier.with_margin_threshold(v);
+        }
+    }
+    if let Ok(v) = std::env::var("INTENT_KNN_K").map(|s| s.parse::<usize>()) {
+        if let Ok(v) = v {
+            println!("Enabling k-NN voting with k={}", v);
+            classifier = classifier.with_knn_k(Some(v));
+        }
+    }
     let store = VectorStore::new(&cli.db_path, embedder.dimension()).await?;
-    let config = EngineConfig::default();
+
+    let mut config = EngineConfig::default();
+
+    // Initialize reranker if enabled (auto-downloads model on first use)
+    let mut reranker = if cli.rerank {
+        println!("Initializing reranker (ms-marco-MiniLM-L-6-v2)...");
+        let r = Reranker::new()?;
+        config.rerank = RerankConfig {
+            enabled: true,
+            code_fetch_multiplier: cli.code_fetch_multiplier,
+            ..Default::default()
+        };
+        Some(r)
+    } else {
+        None
+    };
+
+    // HybridConfig::default() has enabled=true, so the flag must SET the value
+    // (not guard it) to get a real h0 vs h1 contrast during sweeps.
+    config.hybrid = HybridConfig {
+        enabled: cli.hybrid,
+        ..Default::default()
+    };
+
+    config.dual_embedding = DualEmbeddingConfig {
+        enabled: cli.dual_embedding,
+    };
 
     // Warmup: force model load before measurement loop
     let _ = embedder.embed_one("warmup");
@@ -105,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         &owned_cases,
         &mut embedder,
         &classifier,
+        reranker.as_mut(),
         &store,
         &config,
         cli.ground_truth_intent,
@@ -112,11 +173,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // 5. Compute metrics
+    // 5. Compute metrics — join by case_id (ground-truth mode skips cases without
+    // expected_intent, so positional zip would mis-pair results with cases).
+    let case_by_id: std::collections::HashMap<&str, &_> = owned_cases
+        .iter()
+        .map(|c| (c.id.as_str(), c))
+        .collect();
     let pairs: Vec<_> = query_results
         .iter()
-        .zip(owned_cases.iter())
-        .map(|(r, c)| (r.clone(), c))
+        .filter_map(|r| {
+            case_by_id
+                .get(r.case_id.as_str())
+                .map(|c| (r.clone(), *c))
+        })
         .collect();
 
     let aggregate = metrics::compute_aggregate(&pairs);
@@ -143,6 +212,19 @@ async fn main() -> anyhow::Result<()> {
             use_classifier: !cli.ground_truth_intent,
             label: cli.label.clone(),
             completed_tracks: cli.completed_tracks.clone(),
+            reranking_enabled: cli.rerank,
+            reranker_model: if cli.rerank {
+                Some("ms-marco-MiniLM-L-6-v2".to_string())
+            } else {
+                None
+            },
+            code_fetch_multiplier: if cli.rerank {
+                Some(cli.code_fetch_multiplier)
+            } else {
+                None
+            },
+            hybrid_enabled: cli.hybrid,
+            dual_embedding_enabled: cli.dual_embedding,
         },
         aggregate,
         generation_cost: None,

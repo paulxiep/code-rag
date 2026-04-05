@@ -1,13 +1,56 @@
 //! Export all chunks with embeddings from LanceDB to JSON for static deployment.
 
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt64Array};
+use code_rag_store::build_searchable_text;
 use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::info;
+
+/// Pre-computed IDF table for browser-side BM25.
+#[derive(Serialize)]
+pub struct IdfTable {
+    pub num_docs: usize,
+    pub doc_frequencies: HashMap<String, usize>,
+}
+
+impl IdfTable {
+    /// Build from an iterator of text content.
+    /// Tokenizes identically to server-side `simple` tokenizer:
+    /// split on non-alphanumeric boundaries, lowercase.
+    #[allow(dead_code)]
+    pub fn build(texts: impl Iterator<Item = impl AsRef<str>>) -> Self {
+        let mut doc_frequencies: HashMap<String, usize> = HashMap::new();
+        let mut num_docs = 0;
+        for text in texts {
+            num_docs += 1;
+            let mut seen = HashSet::new();
+            for token in tokenize(text.as_ref()) {
+                if seen.insert(token.clone()) {
+                    *doc_frequencies.entry(token).or_default() += 1;
+                }
+            }
+        }
+        Self {
+            num_docs,
+            doc_frequencies,
+        }
+    }
+}
+
+/// Tokenize identically to server-side `simple` tokenizer: split on non-alphanumeric, lowercase.
+#[allow(dead_code)]
+fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
 
 /// Matches the ChunkIndex format expected by code-rag-ui standalone mode.
 #[derive(Serialize)]
@@ -18,6 +61,16 @@ pub struct ExportIndex {
     pub module_doc_chunks: Vec<EmbeddedChunk<ModuleDocChunk>>,
     pub intent_prototypes: HashMap<String, Vec<Vec<f32>>>,
     pub projects: Vec<String>,
+    /// IDF tables for browser-side BM25 (B2).
+    /// None until hybrid search is enabled (post-B3 searchable_text column).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_idf: Option<IdfTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readme_idf: Option<IdfTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_idf: Option<IdfTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_doc_idf: Option<IdfTable>,
 }
 
 #[derive(Serialize)]
@@ -25,6 +78,11 @@ pub struct EmbeddedChunk<T: Serialize> {
     #[serde(flatten)]
     pub chunk: T,
     pub embedding: Vec<f32>,
+    /// B5: signature-text embedding. Only populated for code chunks that have
+    /// a signature; all other chunk types and signature-less code chunks
+    /// serialize with this field absent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signature_embedding: Option<Vec<f32>>,
 }
 
 pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> {
@@ -58,6 +116,28 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         intent_prototypes.len()
     );
 
+    // B3: Populate IDF tables for browser-side BM25.
+    // Code chunks use searchable_text (identifier + signature + docstring).
+    // Other chunk types use their natural text columns.
+    let code_idf = Some(IdfTable::build(code_chunks.iter().map(|ec| {
+        build_searchable_text(
+            &ec.chunk.identifier,
+            ec.chunk.signature.as_deref(),
+            ec.chunk.docstring.as_deref(),
+        )
+    })));
+    let readme_idf = Some(IdfTable::build(
+        readme_chunks.iter().map(|ec| ec.chunk.content.clone()),
+    ));
+    let crate_idf = Some(IdfTable::build(crate_chunks.iter().filter_map(|ec| {
+        ec.chunk.description.clone()
+    })));
+    let module_doc_idf = Some(IdfTable::build(
+        module_doc_chunks
+            .iter()
+            .map(|ec| ec.chunk.doc_content.clone()),
+    ));
+
     let index = ExportIndex {
         code_chunks,
         readme_chunks,
@@ -65,6 +145,10 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         module_doc_chunks,
         intent_prototypes,
         projects,
+        code_idf,
+        readme_idf,
+        crate_idf,
+        module_doc_idf,
     };
 
     if let Some(parent) = std::path::Path::new(output_path).parent() {
@@ -92,6 +176,9 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "What does this do?",
                 "Describe the purpose",
                 "What is the architecture?",
+                "What is the purpose of this module?",
+                "What is the role of this component?",
+                "What is this package?",
             ],
         ),
         (
@@ -100,8 +187,10 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "How does this function work?",
                 "Show me the implementation",
                 "How is this implemented?",
-                "What does this code do?",
                 "Walk me through the logic",
+                "How is this function implemented?",
+                "Walk through this code step by step",
+                "What are the steps of this algorithm?",
             ],
         ),
         (
@@ -112,6 +201,8 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "What depends on this?",
                 "Show me the call chain",
                 "What uses this module?",
+                "What formats does this support?",
+                "How do errors propagate through the system?",
             ],
         ),
         (
@@ -123,6 +214,9 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "A versus B",
                 "Contrast these approaches",
                 "What are the pros and cons?",
+                "What is the difference between X and Y?",
+                "How does X compare to Y?",
+                "Differences between X and Y",
             ],
         ),
     ];
@@ -159,17 +253,24 @@ fn u64_col<'a>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a UInt64A
 }
 
 fn get_embedding(batch: &RecordBatch, row: usize) -> Vec<f32> {
-    if let Some(col) = batch.column_by_name("vector")
-        && let Some(list) = col
-            .as_any()
-            .downcast_ref::<arrow_array::FixedSizeListArray>()
-    {
-        let value: Arc<dyn Array> = list.value(row);
-        if let Some(values) = value.as_any().downcast_ref::<Float32Array>() {
-            return values.values().to_vec();
-        }
+    get_vector_column(batch, row, "vector").unwrap_or_default()
+}
+
+/// Read a fixed-size-list Float32 column by name at `row`.
+/// Returns None when the column is absent OR the row is null.
+fn get_vector_column(batch: &RecordBatch, row: usize, name: &str) -> Option<Vec<f32>> {
+    let col = batch.column_by_name(name)?;
+    let list = col
+        .as_any()
+        .downcast_ref::<arrow_array::FixedSizeListArray>()?;
+    if list.is_null(row) {
+        return None;
     }
-    Vec::new()
+    let value: Arc<dyn Array> = list.value(row);
+    value
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .map(|values| values.values().to_vec())
 }
 
 fn opt_str(arr: Option<&StringArray>, i: usize) -> Option<String> {
@@ -204,6 +305,7 @@ async fn export_code_chunks(
         let project_names = str_col(batch, "project_name")?;
         let start_lines = u64_col(batch, "start_line")?;
         let docstrings = opt_str_col(batch, "docstring");
+        let signatures = opt_str_col(batch, "signature");
 
         for i in 0..batch.num_rows() {
             let chunk = CodeChunk {
@@ -215,6 +317,7 @@ async fn export_code_chunks(
                 start_line: start_lines.value(i) as usize,
                 project_name: project_names.value(i).to_string(),
                 docstring: opt_str(docstrings, i),
+                signature: opt_str(signatures, i),
                 chunk_id: chunk_ids.value(i).to_string(),
                 content_hash: content_hashes.value(i).to_string(),
                 embedding_model_version: model_versions.value(i).to_string(),
@@ -222,6 +325,7 @@ async fn export_code_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: get_vector_column(batch, i, "signature_vector"),
             });
         }
     }
@@ -254,6 +358,7 @@ async fn export_readme_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: None,
             });
         }
     }
@@ -300,6 +405,7 @@ async fn export_crate_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: None,
             });
         }
     }
@@ -337,6 +443,7 @@ async fn export_module_doc_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: None,
             });
         }
     }
