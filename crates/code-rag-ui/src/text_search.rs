@@ -1,7 +1,11 @@
 //! Browser-side BM25 search and RRF fusion for hybrid retrieval (B2).
 
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+// B5: RRF fusion lives in the shared engine crate so server and browser
+// stay in sync. Callers keep using `text_search::rrf_fuse`.
+pub use code_rag_engine::fusion::rrf_fuse;
 
 /// Pre-computed IDF table for BM25 scoring.
 /// Built during `code-raptor export`, included in the JSON bundle.
@@ -138,34 +142,6 @@ pub fn bm25_search_precomputed<T: Clone>(
     scored
 }
 
-/// Reciprocal Rank Fusion: combine two ranked lists.
-/// Each result gets score = 1/(k + rank) from each list, summed.
-/// Chunks found by both arms get higher fused scores.
-pub fn rrf_fuse<T: Clone>(
-    vector_results: Vec<(T, f32)>,
-    text_results: Vec<(T, f32)>,
-    k: usize,
-    id_fn: impl Fn(&T) -> &str,
-) -> Vec<(T, f32)> {
-    let mut scores: HashMap<String, (T, f32)> = HashMap::new();
-
-    for (rank, (chunk, _)) in vector_results.iter().enumerate() {
-        let id = id_fn(chunk).to_string();
-        let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
-        scores.entry(id).or_insert_with(|| (chunk.clone(), 0.0)).1 += rrf_score;
-    }
-
-    for (rank, (chunk, _)) in text_results.iter().enumerate() {
-        let id = id_fn(chunk).to_string();
-        let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
-        scores.entry(id).or_insert_with(|| (chunk.clone(), 0.0)).1 += rrf_score;
-    }
-
-    let mut fused: Vec<(T, f32)> = scores.into_values().collect();
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    fused
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,26 +185,5 @@ mod tests {
         assert!(unknown_idf > 0.0, "Unknown term should have positive IDF");
     }
 
-    #[test]
-    fn test_rrf_fuse_basic() {
-        let vec_results = vec![("a", 0.9), ("b", 0.7), ("c", 0.5)];
-        let text_results = vec![("b", 5.0), ("c", 3.0), ("d", 1.0)];
-
-        let fused = rrf_fuse(vec_results, text_results, 60, |s: &&str| s);
-        // "b" appears in both lists → highest RRF score
-        assert_eq!(*fused[0].0, "b");
-    }
-
-    #[test]
-    fn test_rrf_fuse_disjoint() {
-        let vec_results = vec![("a", 0.9)];
-        let text_results = vec![("b", 5.0)];
-
-        let fused = rrf_fuse(vec_results, text_results, 60, |s: &&str| s);
-        assert_eq!(fused.len(), 2);
-        // Same RRF score (both rank 0), order is arbitrary but both present
-        let ids: HashSet<&str> = fused.iter().map(|(id, _)| **id).collect();
-        assert!(ids.contains("a"));
-        assert!(ids.contains("b"));
-    }
+    // rrf_fuse tests moved to code-rag-engine::fusion — this crate just re-exports it.
 }

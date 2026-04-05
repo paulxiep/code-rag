@@ -78,6 +78,11 @@ pub struct EmbeddedChunk<T: Serialize> {
     #[serde(flatten)]
     pub chunk: T,
     pub embedding: Vec<f32>,
+    /// B5: signature-text embedding. Only populated for code chunks that have
+    /// a signature; all other chunk types and signature-less code chunks
+    /// serialize with this field absent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signature_embedding: Option<Vec<f32>>,
 }
 
 pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> {
@@ -248,17 +253,24 @@ fn u64_col<'a>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a UInt64A
 }
 
 fn get_embedding(batch: &RecordBatch, row: usize) -> Vec<f32> {
-    if let Some(col) = batch.column_by_name("vector")
-        && let Some(list) = col
-            .as_any()
-            .downcast_ref::<arrow_array::FixedSizeListArray>()
-    {
-        let value: Arc<dyn Array> = list.value(row);
-        if let Some(values) = value.as_any().downcast_ref::<Float32Array>() {
-            return values.values().to_vec();
-        }
+    get_vector_column(batch, row, "vector").unwrap_or_default()
+}
+
+/// Read a fixed-size-list Float32 column by name at `row`.
+/// Returns None when the column is absent OR the row is null.
+fn get_vector_column(batch: &RecordBatch, row: usize, name: &str) -> Option<Vec<f32>> {
+    let col = batch.column_by_name(name)?;
+    let list = col
+        .as_any()
+        .downcast_ref::<arrow_array::FixedSizeListArray>()?;
+    if list.is_null(row) {
+        return None;
     }
-    Vec::new()
+    let value: Arc<dyn Array> = list.value(row);
+    value
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .map(|values| values.values().to_vec())
 }
 
 fn opt_str(arr: Option<&StringArray>, i: usize) -> Option<String> {
@@ -313,6 +325,7 @@ async fn export_code_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: get_vector_column(batch, i, "signature_vector"),
             });
         }
     }
@@ -345,6 +358,7 @@ async fn export_readme_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: None,
             });
         }
     }
@@ -391,6 +405,7 @@ async fn export_crate_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: None,
             });
         }
     }
@@ -428,6 +443,7 @@ async fn export_module_doc_chunks(
             result.push(EmbeddedChunk {
                 chunk,
                 embedding: get_embedding(batch, i),
+                signature_embedding: None,
             });
         }
     }

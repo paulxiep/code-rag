@@ -128,6 +128,7 @@ pub async fn run_all(
             &retrieval_config,
             &config.rerank,
             &config.hybrid,
+            &config.dual_embedding,
             reranker_ref,
             classified_intent,
         )

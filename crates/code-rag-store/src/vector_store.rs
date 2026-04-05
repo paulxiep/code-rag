@@ -62,16 +62,22 @@ impl VectorStore {
     // ========================================================================
 
     /// Insert code chunks with their embeddings. Creates table if needed.
+    ///
+    /// `signature_embeddings` is aligned 1:1 with `chunks`; entries are `None`
+    /// when the chunk has no signature (macros, statements, etc.). Passing an
+    /// all-`None` vector is equivalent to pre-B5 single-vector ingest.
     pub async fn upsert_code_chunks(
         &self,
         chunks: &[CodeChunk],
         embeddings: Vec<Vec<f32>>,
+        signature_embeddings: Vec<Option<Vec<f32>>>,
     ) -> Result<usize, StoreError> {
         if chunks.is_empty() {
             return Ok(0);
         }
 
-        let batch = code_chunks_to_batch(chunks, embeddings, self.dimension)?;
+        let batch =
+            code_chunks_to_batch(chunks, embeddings, signature_embeddings, self.dimension)?;
         let count = batch.num_rows();
 
         self.upsert_batch(CODE_TABLE, batch).await?;
@@ -179,6 +185,28 @@ impl VectorStore {
 
         let results = table
             .vector_search(query_embedding.to_vec())?
+            .column("vector")
+            .distance_type(DistanceType::L2)
+            .limit(limit)
+            .execute()
+            .await?;
+
+        batches_to_code_chunks(results).await
+    }
+
+    /// B5: Search code chunks by signature-vector similarity. Rows whose
+    /// `signature_vector` is null are skipped by LanceDB's vector search.
+    /// Returns (chunk, distance) pairs — same shape as `search_code()`.
+    pub async fn search_code_signatures(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        let table = self.get_table(CODE_TABLE).await?;
+
+        let results = table
+            .vector_search(query_embedding.to_vec())?
+            .column("signature_vector")
             .distance_type(DistanceType::L2)
             .limit(limit)
             .execute()
@@ -291,6 +319,7 @@ impl VectorStore {
 
         match table
             .vector_search(query_embedding.to_vec())?
+            .column("vector")
             .distance_type(DistanceType::L2)
             .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
             .limit(limit)
@@ -751,6 +780,7 @@ impl VectorStore {
 fn code_chunks_to_batch(
     chunks: &[CodeChunk],
     embeddings: Vec<Vec<f32>>,
+    signature_embeddings: Vec<Option<Vec<f32>>>,
     dim: usize,
 ) -> Result<RecordBatch, StoreError> {
     use arrow_array::builder::FixedSizeListBuilder;
@@ -806,6 +836,27 @@ fn code_chunks_to_batch(
 
     let vectors = vector_builder.finish();
 
+    // B5: signature_vector column (nullable). Rows without a signature embedding
+    // append null; the inner float builder still needs `dim` zero values so the
+    // fixed-size list stays consistent.
+    let mut sig_vector_builder =
+        FixedSizeListBuilder::new(arrow_array::builder::Float32Builder::new(), dim as i32);
+    for sig_emb in &signature_embeddings {
+        match sig_emb {
+            Some(emb) => {
+                sig_vector_builder.values().append_slice(emb);
+                sig_vector_builder.append(true);
+            }
+            None => {
+                sig_vector_builder
+                    .values()
+                    .append_slice(&vec![0.0_f32; dim]);
+                sig_vector_builder.append(false);
+            }
+        }
+    }
+    let signature_vectors = sig_vector_builder.finish();
+
     let schema = Arc::new(arrow_schema::Schema::new(vec![
         arrow_schema::Field::new("file_path", arrow_schema::DataType::Utf8, false),
         arrow_schema::Field::new("language", arrow_schema::DataType::Utf8, false),
@@ -836,6 +887,18 @@ fn code_chunks_to_batch(
             ),
             false,
         ),
+        arrow_schema::Field::new(
+            "signature_vector",
+            arrow_schema::DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new(
+                    "item",
+                    arrow_schema::DataType::Float32,
+                    true,
+                )),
+                dim as i32,
+            ),
+            true,
+        ),
     ]));
 
     Ok(RecordBatch::try_new(
@@ -855,6 +918,7 @@ fn code_chunks_to_batch(
             Arc::new(content_hashes),
             Arc::new(model_versions),
             Arc::new(vectors),
+            Arc::new(signature_vectors),
         ],
     )?)
 }
@@ -1608,11 +1672,28 @@ mod tests {
     fn test_code_chunks_to_batch() {
         let chunks = vec![sample_code_chunk()];
         let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let batch = code_chunks_to_batch(&chunks, embeddings, 384).unwrap();
+        let batch =
+            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 14); // 13 fields + vector (11 original + signature + searchable_text)
+        // 13 text/int fields + body vector + signature_vector = 15
+        assert_eq!(batch.num_columns(), 15);
+    }
+
+    #[test]
+    fn test_code_chunks_to_batch_signature_null() {
+        // Chunks without signatures get null in signature_vector column.
+        let chunks = vec![sample_code_chunk()];
+        let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings: Vec<Option<Vec<f32>>> = vec![None];
+
+        let batch =
+            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
+
+        let sig_col = batch.column_by_name("signature_vector").unwrap();
+        assert!(sig_col.is_null(0));
     }
 
     #[test]
@@ -1631,8 +1712,10 @@ mod tests {
         let chunk = sample_code_chunk();
         let chunks = vec![chunk.clone()];
         let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let batch = code_chunks_to_batch(&chunks, embeddings, 384).unwrap();
+        let batch =
+            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         let identifiers = batch
             .column_by_name("identifier")
@@ -1656,8 +1739,12 @@ mod tests {
 
         let chunks = vec![sample_code_chunk()];
         let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let count = store.upsert_code_chunks(&chunks, embeddings).await.unwrap();
+        let count = store
+            .upsert_code_chunks(&chunks, embeddings, sig_embeddings)
+            .await
+            .unwrap();
         assert_eq!(count, 1);
 
         let results = store.search_code(&fake_embedding(384), 10).await.unwrap();

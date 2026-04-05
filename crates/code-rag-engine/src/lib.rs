@@ -6,5 +6,6 @@
 
 pub mod config;
 pub mod context;
+pub mod fusion;
 pub mod intent;
 pub mod retriever;

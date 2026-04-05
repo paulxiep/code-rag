@@ -6,6 +6,7 @@ pub struct EngineConfig {
     pub routing: RoutingTable,
     pub rerank: RerankConfig,
     pub hybrid: HybridConfig,
+    pub dual_embedding: DualEmbeddingConfig,
 }
 
 /// Hybrid search (BM25 + semantic) configuration.
@@ -26,6 +27,17 @@ impl Default for HybridConfig {
             rrf_k: 60.0,
         }
     }
+}
+
+/// Dual-embedding (signature_vector + body_vector) configuration.
+/// When enabled, the CODE table exposes a second vector column derived from
+/// signature text, searched in parallel with the body vector and fused via RRF.
+/// The per-intent arm policy ultimately decides whether sig-vec is used.
+#[derive(Clone, Debug, Default)]
+pub struct DualEmbeddingConfig {
+    /// Whether dual-embedding retrieval is enabled.
+    /// When false, only the body vector column is queried (pre-B5 behavior).
+    pub enabled: bool,
 }
 
 /// How many chunks to retrieve

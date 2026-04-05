@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use code_rag_engine::config::{RerankConfig, fetch_limits};
 use code_rag_engine::context;
 use code_rag_engine::intent::{
-    self, ClassificationResult, IntentClassifier, QueryIntent, RoutingTable,
+    self, ClassificationResult, IntentClassifier, QueryIntent, RoutingTable, arm_policy,
 };
 use code_rag_engine::retriever::{self, RerankText, RetrievalResult, ScoredChunk, sigmoid};
 
@@ -106,8 +106,15 @@ async fn run_retrieval(
         ..Default::default()
     };
 
-    // B3: rerank disabled for Comparison (cross-encoder drops 0.80 → 0.68 empirically).
-    let should_rerank = !matches!(classification.intent, QueryIntent::Comparison);
+    // B5: per-intent arm policy + bundle capability checks.
+    let policy = arm_policy(classification.intent);
+    let should_rerank = policy.rerank;
+    let use_hybrid = policy.bm25 && index.code_idf.is_some();
+    let sig_vec_available = index
+        .code_chunks
+        .iter()
+        .any(|c| c.signature_embedding.is_some());
+    let use_sig_vec = policy.sig_vec && sig_vec_available;
 
     let final_config = intent::route(classification.intent, &routing);
     let search_config = if should_rerank {
@@ -116,41 +123,49 @@ async fn run_retrieval(
         final_config.clone()
     };
 
-    // B3: hybrid (BM25 + vector) is disabled for Comparison queries —
-    // BM25 over-matches one struct from a comparison pair, swamping the fusion.
-    let use_hybrid =
-        index.code_idf.is_some() && !matches!(classification.intent, QueryIntent::Comparison);
-    let (code_raw, readme_raw, crate_raw, module_doc_raw) = if use_hybrid {
-        search::hybrid_search(query, query_embedding, index, &search_config)
+    let (code_raw, code_is_relevance) = search::search_code_arm(
+        query,
+        query_embedding,
+        index,
+        search_config.code_limit,
+        use_hybrid,
+        use_sig_vec,
+    );
+    let (readme_raw, crate_raw, module_doc_raw) = if use_hybrid {
+        search::hybrid_search_non_code(query, query_embedding, index, &search_config)
     } else {
-        search::brute_force_search(query_embedding, index, &search_config)
+        search::brute_force_non_code(query_embedding, index, &search_config)
+    };
+
+    // Normalize all four arms to ScoredChunk. Code uses relevance or distance
+    // based on whether fusion happened; non-code uses relevance (hybrid) or
+    // distance (brute-force).
+    let code_scored = if code_is_relevance {
+        retriever::to_scored_relevance(code_raw)
+    } else {
+        retriever::to_scored(code_raw)
+    };
+    let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
+        (
+            retriever::to_scored_relevance(readme_raw),
+            retriever::to_scored_relevance(crate_raw),
+            retriever::to_scored_relevance(module_doc_raw),
+        )
+    } else {
+        (
+            retriever::to_scored(readme_raw),
+            retriever::to_scored(crate_raw),
+            retriever::to_scored(module_doc_raw),
+        )
     };
 
     let result = if should_rerank {
-        // Convert to scored chunks — hybrid scores are already relevance (higher=better),
-        // vector distances need conversion.
-        let (code_scored, readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
-            (
-                retriever::to_scored_relevance(code_raw),
-                retriever::to_scored_relevance(readme_raw),
-                retriever::to_scored_relevance(crate_raw),
-                retriever::to_scored_relevance(module_doc_raw),
-            )
-        } else {
-            (
-                retriever::to_scored(code_raw),
-                retriever::to_scored(readme_raw),
-                retriever::to_scored(crate_raw),
-                retriever::to_scored(module_doc_raw),
-            )
-        };
-
         match rerank_all(
             query,
-            code_scored,
-            readme_scored,
-            crate_scored,
-            module_doc_scored,
+            code_scored.clone(),
+            readme_scored.clone(),
+            crate_scored.clone(),
+            module_doc_scored.clone(),
             &final_config,
             classification.intent,
         )
@@ -161,40 +176,52 @@ async fn run_retrieval(
                 web_sys::console::warn_1(
                     &format!("Reranking failed, using search scores: {e}").into(),
                 );
-                let (c, r, cr, m) = if use_hybrid {
-                    search::hybrid_search(query, query_embedding, index, &final_config)
+                // Fallback: re-run searches with the non-over-retrieved config.
+                let (c_raw, c_is_rel) = search::search_code_arm(
+                    query,
+                    query_embedding,
+                    index,
+                    final_config.code_limit,
+                    use_hybrid,
+                    use_sig_vec,
+                );
+                let (r, cr, m) = if use_hybrid {
+                    search::hybrid_search_non_code(query, query_embedding, index, &final_config)
                 } else {
-                    search::brute_force_search(query_embedding, index, &final_config)
+                    search::brute_force_non_code(query_embedding, index, &final_config)
+                };
+                let code_chunks = if c_is_rel {
+                    retriever::to_scored_relevance(c_raw)
+                } else {
+                    retriever::to_scored(c_raw)
                 };
                 if use_hybrid {
                     RetrievalResult {
-                        code_chunks: retriever::to_scored_relevance(c),
+                        code_chunks,
                         readme_chunks: retriever::to_scored_relevance(r),
                         crate_chunks: retriever::to_scored_relevance(cr),
                         module_doc_chunks: retriever::to_scored_relevance(m),
                         intent: classification.intent,
                     }
                 } else {
-                    retriever::to_retrieval_result(c, r, cr, m, classification.intent)
+                    RetrievalResult {
+                        code_chunks,
+                        readme_chunks: retriever::to_scored(r),
+                        crate_chunks: retriever::to_scored(cr),
+                        module_doc_chunks: retriever::to_scored(m),
+                        intent: classification.intent,
+                    }
                 }
             }
         }
-    } else if use_hybrid {
+    } else {
         RetrievalResult {
-            code_chunks: retriever::to_scored_relevance(code_raw),
-            readme_chunks: retriever::to_scored_relevance(readme_raw),
-            crate_chunks: retriever::to_scored_relevance(crate_raw),
-            module_doc_chunks: retriever::to_scored_relevance(module_doc_raw),
+            code_chunks: code_scored,
+            readme_chunks: readme_scored,
+            crate_chunks: crate_scored,
+            module_doc_chunks: module_doc_scored,
             intent: classification.intent,
         }
-    } else {
-        retriever::to_retrieval_result(
-            code_raw,
-            readme_raw,
-            crate_raw,
-            module_doc_raw,
-            classification.intent,
-        )
     };
 
     (result, classification)

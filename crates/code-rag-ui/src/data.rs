@@ -11,6 +11,11 @@ pub struct EmbeddedChunk<T> {
     #[serde(flatten)]
     pub chunk: T,
     pub embedding: Vec<f32>,
+    /// B5: signature-text embedding. Only populated for code chunks that have
+    /// a signature. Non-code chunks and signature-less code chunks deserialize
+    /// with None via `#[serde(default)]`.
+    #[serde(default)]
+    pub signature_embedding: Option<Vec<f32>>,
 }
 
 /// All pre-computed data needed for in-browser RAG.

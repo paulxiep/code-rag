@@ -98,6 +98,26 @@ pub fn format_code_for_embedding(
     parts.join("\n")
 }
 
+/// Formats a signature chunk for embedding (B5 dual-embedding path).
+///
+/// Short, high-density: signature line + optional docstring, with the
+/// language label for parity with `format_code_for_embedding`. Returns
+/// `None` when the chunk has no signature (macros, statements, etc.).
+pub fn format_signature_for_embedding(
+    signature: Option<&str>,
+    language: &str,
+    docstring: Option<&str>,
+) -> Option<String> {
+    let sig = signature?;
+    let mut parts = vec![format!("{} ({})", sig, language)];
+    if let Some(doc) = docstring
+        && !doc.is_empty()
+    {
+        parts.push(doc.to_string());
+    }
+    Some(parts.join("\n"))
+}
+
 /// Formats a README chunk for embedding.
 pub fn format_readme_for_embedding(project_name: &str, content: &str) -> String {
     format!("Project: {}\n{}", project_name, content)
@@ -199,6 +219,33 @@ mod tests {
 
         assert!(result.starts_with("Project: my_project"));
         assert!(result.contains("# Title"));
+    }
+
+    #[test]
+    fn test_format_signature_for_embedding_with_docstring() {
+        let result = format_signature_for_embedding(
+            Some("pub fn parse(input: &str) -> Result<Ast, ParseError>"),
+            "rust",
+            Some("Parse input into an AST"),
+        );
+        let s = result.expect("signature present → Some");
+        assert!(s.contains("pub fn parse"));
+        assert!(s.contains("(rust)"));
+        assert!(s.contains("Parse input into an AST"));
+    }
+
+    #[test]
+    fn test_format_signature_none_returns_none() {
+        let result = format_signature_for_embedding(None, "rust", Some("doc"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_format_signature_without_docstring() {
+        let result = format_signature_for_embedding(Some("fn foo() -> bool"), "rust", None);
+        let s = result.expect("signature present → Some");
+        assert!(s.contains("fn foo() -> bool"));
+        assert!(!s.contains("\n\n"));
     }
 
     // Integration test - only run if model download is acceptable

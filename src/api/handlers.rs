@@ -45,6 +45,7 @@ pub async fn chat(
         &retrieval_config,
         &state.config.rerank,
         &state.config.hybrid,
+        &state.config.dual_embedding,
         reranker_guard.as_deref_mut(),
         intent,
     )

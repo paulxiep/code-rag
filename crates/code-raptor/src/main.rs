@@ -7,6 +7,7 @@ use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use code_raptor::{
     DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
     IngestionStats, VectorStore, format_code_for_embedding, format_crate_for_embedding,
+    format_signature_for_embedding,
     format_module_doc_for_embedding, format_readme_for_embedding, reconcile, run_ingestion,
 };
 use std::collections::{HashMap, HashSet};
@@ -405,11 +406,14 @@ async fn embed_and_store_code(
         return Ok(0);
     }
 
-    info!("Embedding {} code chunks...", chunks.len());
+    info!("Embedding {} code chunks (body + signature)...", chunks.len());
     let empty = Vec::new();
     let mut total = 0;
     for batch in chunks.chunks(EMBEDDING_BATCH_SIZE) {
-        let texts: Vec<String> = batch
+        // B5: body embedding uses pre-B3 text (no signature prepended). The BM25
+        // arm (searchable_text) still carries the signature signal, and the
+        // signature_vector column captures it on a separate axis.
+        let body_texts: Vec<String> = batch
             .iter()
             .map(|c| {
                 let chunk_calls = calls_map.get(&c.chunk_id).unwrap_or(&empty);
@@ -419,13 +423,37 @@ async fn embed_and_store_code(
                     c.docstring.as_deref(),
                     &c.code_content,
                     chunk_calls,
-                    c.signature.as_deref(),
+                    None, // B5: exclude signature from body text
                 )
             })
             .collect();
-        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        let embeddings = embedder.embed_batch(&text_refs)?;
-        total += store.upsert_code_chunks(batch, embeddings).await?;
+        let body_refs: Vec<&str> = body_texts.iter().map(|s| s.as_str()).collect();
+        let body_embeddings = embedder.embed_batch(&body_refs)?;
+
+        // B5: signature embeddings — build texts for chunks that have a signature,
+        // embed those, then scatter back into an aligned Vec<Option<Vec<f32>>>.
+        let sig_text_indices: Vec<(usize, String)> = batch
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                format_signature_for_embedding(
+                    c.signature.as_deref(),
+                    &c.language,
+                    c.docstring.as_deref(),
+                )
+                .map(|t| (i, t))
+            })
+            .collect();
+        let sig_texts: Vec<&str> = sig_text_indices.iter().map(|(_, t)| t.as_str()).collect();
+        let sig_embeddings_dense = embedder.embed_batch(&sig_texts)?;
+        let mut signature_embeddings: Vec<Option<Vec<f32>>> = vec![None; batch.len()];
+        for ((idx, _), emb) in sig_text_indices.iter().zip(sig_embeddings_dense.into_iter()) {
+            signature_embeddings[*idx] = Some(emb);
+        }
+
+        total += store
+            .upsert_code_chunks(batch, body_embeddings, signature_embeddings)
+            .await?;
     }
     Ok(total)
 }

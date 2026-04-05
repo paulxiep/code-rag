@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use code_rag_chat::engine::intent::IntentClassifier;
-use code_rag_chat::engine::{EngineConfig, HybridConfig, RerankConfig};
+use code_rag_chat::engine::{DualEmbeddingConfig, EngineConfig, HybridConfig, RerankConfig};
 use code_rag_chat::harness::dataset::TestDataset;
 use code_rag_chat::harness::metrics;
 use code_rag_chat::harness::report::{self, HarnessReport, SystemConfig};
@@ -57,6 +57,10 @@ struct Cli {
     /// Enable hybrid (BM25 + semantic) search
     #[arg(long)]
     hybrid: bool,
+
+    /// B5: Enable dual-embedding retrieval (body_vector + signature_vector arms)
+    #[arg(long = "dual-embedding")]
+    dual_embedding: bool,
 
     /// Over-retrieval multiplier for code chunks
     #[arg(long, default_value = "4")]
@@ -141,12 +145,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    if cli.hybrid {
-        config.hybrid = HybridConfig {
-            enabled: true,
-            ..Default::default()
-        };
-    }
+    // HybridConfig::default() has enabled=true, so the flag must SET the value
+    // (not guard it) to get a real h0 vs h1 contrast during sweeps.
+    config.hybrid = HybridConfig {
+        enabled: cli.hybrid,
+        ..Default::default()
+    };
+
+    config.dual_embedding = DualEmbeddingConfig {
+        enabled: cli.dual_embedding,
+    };
 
     // Warmup: force model load before measurement loop
     let _ = embedder.embed_one("warmup");
@@ -216,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
                 None
             },
             hybrid_enabled: cli.hybrid,
+            dual_embedding_enabled: cli.dual_embedding,
         },
         aggregate,
         generation_cost: None,

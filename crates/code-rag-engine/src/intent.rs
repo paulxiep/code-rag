@@ -302,6 +302,66 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (mag_a * mag_b)
 }
 
+// --- B5 Per-intent Arm Policy ---
+
+/// Which retrieval arms a given intent is ALLOWED to use.
+///
+/// Callers AND these booleans with their own config flags
+/// (`HybridConfig.enabled`, `RerankConfig.enabled`, `DualEmbeddingConfig.enabled`)
+/// before activating an arm. The policy captures intent-specific empirical
+/// findings; the config flags capture the global feature toggle.
+///
+/// `body_vec` is always true — it is the unconditional baseline arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmPolicy {
+    pub body_vec: bool,
+    pub sig_vec: bool,
+    pub bm25: bool,
+    pub rerank: bool,
+}
+
+/// Per-intent arm policy. Values are empirical — derived from the B5 space
+/// sweep (8 configs × 73 scored queries). Signature-vector arm is OFF
+/// everywhere: it either regressed or stayed neutral on every intent.
+/// BM25 is retuned per-intent: it helps overview/relationship, hurts
+/// implementation (too much identifier-match noise).
+pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
+    match intent {
+        // Overview: hybrid + rerank wins (+4.9pp over no-hybrid at same rerank setting).
+        // Queries are project/crate-level, BM25 on identifiers helps anchor results.
+        QueryIntent::Overview => ArmPolicy {
+            body_vec: true,
+            sig_vec: false,
+            bm25: true,
+            rerank: true,
+        },
+        // Implementation: hybrid HURTS (-4.2pp). BM25 over-matches identifier tokens
+        // in test/caller chunks, swamping the real implementation chunk.
+        QueryIntent::Implementation => ArmPolicy {
+            body_vec: true,
+            sig_vec: false,
+            bm25: false,
+            rerank: true,
+        },
+        // Relationship: hybrid+rerank tied with body-vec-only at 0.485.
+        // Keep BM25 on because caller/dependency queries benefit from term match.
+        QueryIntent::Relationship => ArmPolicy {
+            body_vec: true,
+            sig_vec: false,
+            bm25: true,
+            rerank: true,
+        },
+        // Comparison: all arms off except body-vec. B3 finding preserved —
+        // signature tokens + BM25 + rerank all over-rank ONE half of a pair.
+        QueryIntent::Comparison => ArmPolicy {
+            body_vec: true,
+            sig_vec: false,
+            bm25: false,
+            rerank: false,
+        },
+    }
+}
+
 // --- Query Routing ---
 
 /// Declarative routing table: maps each intent to retrieval limits.
@@ -591,6 +651,63 @@ mod tests {
     }
 
     // --- FromStr tests ---
+
+    // --- B5 arm_policy tests ---
+
+    #[test]
+    fn test_arm_policy_comparison_body_only() {
+        let p = arm_policy(QueryIntent::Comparison);
+        assert!(p.body_vec);
+        assert!(!p.sig_vec);
+        assert!(!p.bm25);
+        assert!(!p.rerank);
+    }
+
+    #[test]
+    fn test_arm_policy_rerank_on_except_comparison() {
+        assert!(!arm_policy(QueryIntent::Comparison).rerank);
+        for intent in [
+            QueryIntent::Overview,
+            QueryIntent::Implementation,
+            QueryIntent::Relationship,
+        ] {
+            assert!(arm_policy(intent).rerank, "{intent:?} rerank should be on");
+        }
+    }
+
+    #[test]
+    fn test_arm_policy_bm25_per_intent() {
+        // Post-B5 sweep findings:
+        assert!(arm_policy(QueryIntent::Overview).bm25);
+        assert!(!arm_policy(QueryIntent::Implementation).bm25); // hybrid hurts impl
+        assert!(arm_policy(QueryIntent::Relationship).bm25);
+        assert!(!arm_policy(QueryIntent::Comparison).bm25);
+    }
+
+    #[test]
+    fn test_arm_policy_sig_vec_off_everywhere() {
+        // B5 sweep: sig_vec never helps — regresses body-only everywhere.
+        for intent in [
+            QueryIntent::Overview,
+            QueryIntent::Implementation,
+            QueryIntent::Relationship,
+            QueryIntent::Comparison,
+        ] {
+            assert!(!arm_policy(intent).sig_vec, "{intent:?} sig_vec should be off");
+        }
+    }
+
+    #[test]
+    fn test_arm_policy_body_vec_always_on() {
+        for intent in [
+            QueryIntent::Overview,
+            QueryIntent::Implementation,
+            QueryIntent::Relationship,
+            QueryIntent::Comparison,
+        ] {
+            assert!(arm_policy(intent).body_vec);
+        }
+    }
 
     #[test]
     fn test_from_str_all_variants() {

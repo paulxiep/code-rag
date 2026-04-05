@@ -2,13 +2,58 @@
 pub use code_rag_engine::retriever::{RetrievalResult, to_retrieval_result};
 
 use crate::store::{Reranker, VectorStore};
-use code_rag_engine::config::{HybridConfig, RerankConfig, RetrievalConfig, fetch_limits};
-use code_rag_engine::intent::QueryIntent;
+use code_rag_engine::config::{
+    DualEmbeddingConfig, HybridConfig, RerankConfig, RetrievalConfig, fetch_limits,
+};
+use code_rag_engine::fusion::rrf_fuse;
+use code_rag_engine::intent::{QueryIntent, arm_policy};
 use code_rag_engine::retriever::{
     RerankText, ScoredChunk, sigmoid, to_scored, to_scored_relevance,
 };
 
 use super::EngineError;
+
+/// Fetch the code arm, respecting hybrid + dual-embedding toggles.
+/// Returns (chunk, relevance_score) tuples where higher=better so downstream
+/// `to_scored_relevance` can wrap them uniformly.
+async fn fetch_code_arm(
+    store: &VectorStore,
+    query: &str,
+    query_embedding: &[f32],
+    limit: usize,
+    use_hybrid: bool,
+    use_sig_vec: bool,
+) -> Result<Vec<(code_rag_types::CodeChunk, f32)>, code_rag_store::StoreError> {
+    // Body arm: either hybrid (body-vec + BM25 fused inside LanceDB) or pure body-vec.
+    // Normalize to higher=better relevance scores.
+    let body: Vec<(code_rag_types::CodeChunk, f32)> = if use_hybrid {
+        store.hybrid_search_code(query, query_embedding, limit).await?
+    } else {
+        store
+            .search_code(query_embedding, limit)
+            .await?
+            .into_iter()
+            .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+            .collect()
+    };
+
+    if !use_sig_vec {
+        return Ok(body);
+    }
+
+    // Signature arm: pure vector search over signature_vector column.
+    let sig: Vec<(code_rag_types::CodeChunk, f32)> = store
+        .search_code_signatures(query_embedding, limit)
+        .await?
+        .into_iter()
+        .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+        .collect();
+
+    // App-level RRF fusion. rrf_fuse ignores the input scores and fuses by rank.
+    Ok(rrf_fuse(&[body, sig], 60, |c: &code_rag_types::CodeChunk| {
+        c.chunk_id.as_str()
+    }))
+}
 
 /// Rerank a vec of scored chunks using the cross-encoder.
 /// Returns chunks re-sorted by sigmoid-normalized cross-encoder score, truncated to limit.
@@ -74,57 +119,64 @@ pub async fn retrieve(
     config: &RetrievalConfig,
     rerank_config: &RerankConfig,
     hybrid_config: &HybridConfig,
+    dual_embedding_config: &DualEmbeddingConfig,
     reranker: Option<&mut Reranker>,
     intent: QueryIntent,
 ) -> Result<RetrievalResult, EngineError> {
-    // B3 empirical gating (see development_log.md for space-search results):
-    //   - rerank: disabled for Comparison (cross-encoder drops 0.80 → 0.68)
-    //   - hybrid: disabled for Comparison (BM25 over-matches one struct in comparison pairs)
-    // Both gates applied together restore pre_b2 comparison baseline (0.80).
-    let should_rerank = rerank_config.enabled && !matches!(intent, QueryIntent::Comparison);
-    let use_hybrid = hybrid_config.enabled && !matches!(intent, QueryIntent::Comparison);
+    // B5: per-intent arm policy is combined with global config toggles.
+    // The policy captures intent-specific empirical findings; the config
+    // flags capture the global feature toggle.
+    let policy = arm_policy(intent);
+    let should_rerank = rerank_config.enabled && policy.rerank;
+    let use_hybrid = hybrid_config.enabled && policy.bm25;
+    let use_sig_vec = dual_embedding_config.enabled && policy.sig_vec;
 
     // Fetch multiplier only applies when we actually rerank — over-retrieval changes
     // top-K ordering for vector search (larger pool shifts which 5 are closest).
+    // B5: the multiplier applies to the code arm for every active sub-arm so RRF
+    // sees a richer pool on each axis.
     let fetch_config = if should_rerank {
         fetch_limits(config, rerank_config)
     } else {
         config.clone()
     };
 
-    // Fetch raw results — hybrid returns relevance scores (higher=better),
-    // vector-only returns L2 distances (lower=better).
-    let (code_scored, readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
-        let (code_raw, readme_raw, crate_raw, module_doc_raw) = store
-            .hybrid_search_all(
+    // Code arm is orchestrated at the app level to support dual-vector fusion.
+    let code_raw =
+        fetch_code_arm(
+            store,
+            query,
+            query_embedding,
+            fetch_config.code_limit,
+            use_hybrid,
+            use_sig_vec,
+        )
+        .await?;
+    let code_scored = to_scored_relevance(code_raw);
+
+    // Non-code tables are untouched by B5 — they follow the hybrid toggle only.
+    let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
+        let (readme_raw, crate_raw, module_doc_raw) = tokio::try_join!(
+            store.hybrid_search_readme(query, query_embedding, fetch_config.readme_limit),
+            store.hybrid_search_crates(query, query_embedding, fetch_config.crate_limit),
+            store.hybrid_search_module_docs(
                 query,
                 query_embedding,
-                fetch_config.code_limit,
-                fetch_config.readme_limit,
-                fetch_config.crate_limit,
-                fetch_config.module_doc_limit,
-            )
-            .await?;
-        // Hybrid scores are already higher=better — use directly
+                fetch_config.module_doc_limit
+            ),
+        )?;
         (
-            to_scored_relevance(code_raw),
             to_scored_relevance(readme_raw),
             to_scored_relevance(crate_raw),
             to_scored_relevance(module_doc_raw),
         )
     } else {
-        let (code_raw, readme_raw, crate_raw, module_doc_raw) = store
-            .search_all(
-                query_embedding,
-                fetch_config.code_limit,
-                fetch_config.readme_limit,
-                fetch_config.crate_limit,
-                fetch_config.module_doc_limit,
-            )
-            .await?;
-        // Distance scores need conversion to higher=better
+        let (readme_raw, crate_raw, module_doc_raw) = tokio::try_join!(
+            store.search_readme(query_embedding, fetch_config.readme_limit),
+            store.search_crates(query_embedding, fetch_config.crate_limit),
+            store.search_module_docs(query_embedding, fetch_config.module_doc_limit),
+        )?;
         (
-            to_scored(code_raw),
             to_scored(readme_raw),
             to_scored(crate_raw),
             to_scored(module_doc_raw),
@@ -147,36 +199,61 @@ pub async fn retrieve(
                 Ok(result) => result,
                 Err(e) => {
                     tracing::warn!("reranking failed, falling back to search scores: {e}");
-                    // Re-fetch without over-retrieval for fallback
-                    if use_hybrid {
-                        let (c, r, cr, m) = store
-                            .hybrid_search_all(
+                    // Re-fetch without over-retrieval for fallback. Use the same
+                    // dual-arm orchestrator so behavior is consistent with the
+                    // primary path.
+                    let code_raw = fetch_code_arm(
+                        store,
+                        query,
+                        query_embedding,
+                        config.code_limit,
+                        use_hybrid,
+                        use_sig_vec,
+                    )
+                    .await?;
+                    let (readme_raw, crate_raw, module_doc_raw, code_chunks) = if use_hybrid {
+                        let (r, cr, m) = tokio::try_join!(
+                            store.hybrid_search_readme(
                                 query,
                                 query_embedding,
-                                config.code_limit,
-                                config.readme_limit,
-                                config.crate_limit,
-                                config.module_doc_limit,
-                            )
-                            .await?;
-                        RetrievalResult {
-                            code_chunks: to_scored_relevance(c),
-                            readme_chunks: to_scored_relevance(r),
-                            crate_chunks: to_scored_relevance(cr),
-                            module_doc_chunks: to_scored_relevance(m),
-                            intent,
-                        }
-                    } else {
-                        let (c, r, cr, m) = store
-                            .search_all(
+                                config.readme_limit
+                            ),
+                            store.hybrid_search_crates(
+                                query,
                                 query_embedding,
-                                config.code_limit,
-                                config.readme_limit,
-                                config.crate_limit,
-                                config.module_doc_limit,
-                            )
-                            .await?;
-                        to_retrieval_result(c, r, cr, m, intent)
+                                config.crate_limit
+                            ),
+                            store.hybrid_search_module_docs(
+                                query,
+                                query_embedding,
+                                config.module_doc_limit
+                            ),
+                        )?;
+                        (
+                            to_scored_relevance(r),
+                            to_scored_relevance(cr),
+                            to_scored_relevance(m),
+                            to_scored_relevance(code_raw),
+                        )
+                    } else {
+                        let (r, cr, m) = tokio::try_join!(
+                            store.search_readme(query_embedding, config.readme_limit),
+                            store.search_crates(query_embedding, config.crate_limit),
+                            store.search_module_docs(query_embedding, config.module_doc_limit),
+                        )?;
+                        (
+                            to_scored(r),
+                            to_scored(cr),
+                            to_scored(m),
+                            to_scored_relevance(code_raw),
+                        )
+                    };
+                    RetrievalResult {
+                        code_chunks,
+                        readme_chunks: readme_raw,
+                        crate_chunks: crate_raw,
+                        module_doc_chunks: module_doc_raw,
+                        intent,
                     }
                 }
             }

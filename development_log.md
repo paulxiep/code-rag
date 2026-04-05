@@ -1,5 +1,86 @@
 # Development Log
 
+## 2026-04-06: B5 — Dual Embeddings (signature_vector + body_vector)
+
+### Summary
+
+Added a second `signature_vector` column to the code table — signature-text embedded separately from the body-text vector. Ran an 8-config × cleaned-dataset space sweep; **the signature arm never helped**. It regressed every intent by 0-28pp when fused via RRF, and was neutral-to-slightly-worse under rerank. Shipped with `arm_policy().sig_vec = false` for every intent; the signature column stays in storage for future experiments.
+
+Sweep surfaced a second finding that WAS shipped: BM25 (hybrid) is helpful for overview/relationship but hurts implementation by -4.2pp. Retuned `arm_policy.bm25` per intent (was: on for all non-Comparison; now: overview=on, implementation=off, relationship=on, comparison=off).
+
+Composite policy recall@5 = **0.674** (was 0.650 at best single global config). Per-intent: overview=0.787, implementation=0.740, relationship=0.500, comparison=0.597.
+
+Also removed the B4-signature regression in body text — body vectors now use pre-B3 content (identifier + docstring + code + calls, no signature prepended). Signature signal lives only in BM25 `searchable_text` going forward.
+
+### Motivation
+
+B3 found that signatures-in-body-embeddings regressed Comparison (~22pp) — signature tokens shifted the vector geometry away from pair-matching. The B3 production workaround (dual-gate hybrid+rerank OFF for Comparison) only partially mitigated it. B5's hypothesis: isolate signature signal into its own axis so neither arm pollutes the other.
+
+### Implementation
+
+- **New nullable `signature_vector` column** on the code table (`FixedSizeList<Float32, 384>`), populated at ingest by embedding `signature + language + docstring` only.
+- **`format_signature_for_embedding()`** helper in `code-rag-store::embedder`; existing `format_code_for_embedding(signature=None)` path gives pre-B3 body text.
+- **Server `search_code_signatures()`** uses lancedb 0.23 `.column("signature_vector")` to query by named column.
+- **App-level RRF fusion** when ≥2 arms active (body + sig, body + bm25, body + sig + bm25). Generic N-ary `rrf_fuse` moved from `code-rag-ui` to shared `code-rag-engine::fusion`; 4 browser call sites adapted to the new signature.
+- **`ArmPolicy`** (`{body_vec, sig_vec, bm25, rerank}` per intent) replaces scattered `!matches!(intent, Comparison)` gates. Single source of truth used by server retriever AND browser `standalone_api`.
+- **Browser parity**: `brute_force_signature_search` mirrors server arm; `EmbeddedChunk<T>` gained nullable `signature_embedding: Option<Vec<f32>>`; exported JSON bundle carries it per code chunk. `DualEmbeddingConfig.enabled` controls server-side; browser always on if bundle has sig embeddings.
+- **Harness**: new `--dual-embedding` flag, `dual_embedding_enabled` in JSON/markdown output.
+- **Fixed pre-existing `--hybrid` flag bug**: `HybridConfig::default()` had `enabled: true`, so the flag only set to true (never false). Previous sweep runs had hybrid silently always-on. After fix, h0 vs h1 configs actually diverge.
+
+### Sweep results (81-case dataset, classifier routing)
+
+```
+config       agg     ov    impl    rel    cmp
+-------------------------------------------------
+h0_d0_r0     0.605   0.750 0.573   0.485  0.597
+h0_d0_r1     0.642   0.738 0.719   0.451  0.597
+h0_d1_r0     0.486   0.750 0.292   0.373  0.597  ← sig_vec alone catastrophic
+h0_d1_r1     0.630   0.725 0.698   0.446  0.597
+h1_d0_r0     0.461   0.525 0.500   0.235  0.597  ← hybrid-no-rerank catastrophic
+h1_d0_r1     0.650   0.787 0.677   0.485  0.597  ← best single global config
+h1_d1_r0     0.493   0.500 0.604   0.255  0.597
+h1_d1_r1     0.639   0.775 0.656   0.485  0.597
+```
+
+Per-intent argmax → composite `arm_policy`:
+- overview: hybrid+rerank on → `{bm25: true, rerank: true}`
+- implementation: rerank only → `{bm25: false, rerank: true}`
+- relationship: hybrid+rerank (tied with body-only) → `{bm25: true, rerank: true}`
+- comparison: body-vec only (B3 gate preserved) → `{bm25: false, rerank: false}`
+- sig_vec: **false** everywhere
+
+### Why sig_vec regressed
+
+Two likely causes:
+1. **Short-text geometry**: signatures are 1-line inputs; BGE-small-en-v1.5 was trained on passage-length text. The embedding geometry for short structural snippets is weaker than for full function bodies.
+2. **Sparse arm fusion**: signature_vector is null for macros/statements (~20-30% of chunks). RRF-fusing a dense body-vec list with a sparse sig-vec list penalizes chunks that don't appear in both, dropping them below chunks that signature-only match.
+
+### Dataset cleanup (simultaneous with B5 work)
+
+The sweep exposed that **only 36 of 101 cases scored recall** — the other 65 vacuously passed because the harness only counts `expected_files` + `expected_identifiers`, not chunk_types/projects/min_relevant. Cleaned up:
+
+- **Removed 20 cases**: 10 flagged (non-existent entities, adversarial classifier-only, uncertain targets), 10 targeting only non-ingested file types (.yaml, non-README .md, .sql, qtg.py which has no function chunks).
+- **Cleaned 3 cases**: stripped `architecture.md`, `Cargo.toml` etc. from `expected_files` where those don't get ingested, kept valid targets.
+- **Tagged 8 cases** with `expected_intent` (edge-ambiguous + 7 smoke cases) — previously these contributed to aggregate but not per-intent buckets, which caused Simpson's-paradox-style inversions between aggregate and per-intent metrics.
+- **Added file/id targets to 43 B4 cases** that were originally intent-classification-only. B4 set now contributes real recall signal.
+
+**Result**: 73 of 81 cases (90%) now score recall. The 8 remaining vacuous cases use `min_relevant_results` by design (smoke tests) or are deliberately unscoreable (`edge-nonsense`).
+
+### Compared to B3 (post_b3_dual_gate_b263f8d.json)
+
+Dataset is not directly comparable — B3 measured on 43-case contract, B5 measures on 81-case cleaned set with different intent distribution. Net trajectory: aggregate recall@5 0.75 (B3, 43 cases) → 0.674 (B5, 81 cases). The drop is composition — the cleaned 81-case set contains more relationship queries (18) and comparison queries (12), which have structurally lower ceilings than the hero/implementation-heavy B3 set.
+
+### Files touched
+
+- `crates/code-rag-engine/src/{fusion.rs(NEW), intent.rs, config.rs, lib.rs}`
+- `crates/code-rag-store/src/{vector_store.rs, embedder.rs, lib.rs}`
+- `crates/code-raptor/src/{main.rs, export.rs, lib.rs}`
+- `crates/code-rag-ui/src/{data.rs, search.rs, standalone_api.rs, text_search.rs}`
+- `src/engine/{retriever.rs, mod.rs}`, `src/api/handlers.rs`, `src/harness/{runner.rs, report.rs}`, `src/bin/harness.rs`
+- `data/test_queries.json` (101 → 81 cases, 36 → 73 scored)
+
+---
+
 ## 2026-04-05: B4 — Intent Classifier Improvement
 
 ### Summary

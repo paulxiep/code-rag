@@ -48,6 +48,9 @@ pub struct SystemConfig {
     pub code_fetch_multiplier: Option<usize>,
     /// Whether hybrid (BM25 + semantic) search was enabled
     pub hybrid_enabled: bool,
+    /// Whether B5 dual-embedding (signature_vector arm) was enabled
+    #[serde(default)]
+    pub dual_embedding_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -239,6 +242,9 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
     }
     if report.system.hybrid_enabled {
         writeln!(md, "**Hybrid search:** BM25 + semantic (RRF fusion)")?;
+    }
+    if report.system.dual_embedding_enabled {
+        writeln!(md, "**Dual embedding:** body_vector + signature_vector (app-level RRF)")?;
     }
     writeln!(
         md,
@@ -470,6 +476,7 @@ mod tests {
                 reranker_model: None,
                 code_fetch_multiplier: None,
                 hybrid_enabled: false,
+                dual_embedding_enabled: false,
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -517,6 +524,7 @@ mod tests {
                 reranker_model: None,
                 code_fetch_multiplier: None,
                 hybrid_enabled: false,
+                dual_embedding_enabled: false,
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
