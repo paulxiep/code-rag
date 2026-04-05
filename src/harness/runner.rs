@@ -21,6 +21,9 @@ pub struct QueryResult {
     /// Cosine similarity confidence from classifier
     pub confidence: f32,
 
+    /// Margin between top-1 and top-2 intent scores (0.0 for ground-truth).
+    pub margin: f32,
+
     /// All retrieved items, flattened across chunk types, sorted by relevance desc
     pub retrieved: Vec<RetrievedItem>,
 
@@ -93,7 +96,7 @@ pub async fn run_all(
         let embedding = embedder.embed_one(&case.query)?;
 
         // 2. Classify or use ground-truth intent
-        let (classified_intent, confidence) = if ground_truth {
+        let (classified_intent, confidence, margin) = if ground_truth {
             let intent_str = case
                 .expected_intent
                 .as_deref()
@@ -101,10 +104,15 @@ pub async fn run_all(
             let intent: QueryIntent = intent_str
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!("{}", e))?;
-            (intent, 1.0)
+            (intent, 1.0, 0.0)
         } else {
-            let cr = intent::classify(&embedding, classifier);
-            (cr.intent, cr.confidence)
+            // Keyword pre-filter for unambiguous comparison cues (hard override)
+            if let Some(pre) = intent::pre_classify_comparison(&case.query) {
+                (pre, 1.0, 0.0)
+            } else {
+                let cr = intent::classify(&embedding, classifier);
+                (cr.intent, cr.confidence, cr.margin)
+            }
         };
 
         // 3. Route
@@ -134,6 +142,7 @@ pub async fn run_all(
             case_id: case.id.clone(),
             classified_intent,
             confidence,
+            margin,
             retrieved,
             latency,
         });

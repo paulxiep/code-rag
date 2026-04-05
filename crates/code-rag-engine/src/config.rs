@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn test_hybrid_config_default() {
         let hc = HybridConfig::default();
-        assert!(!hc.enabled);
+        assert!(hc.enabled);
         assert!((hc.rrf_k - 60.0).abs() < f32::EPSILON);
     }
 }

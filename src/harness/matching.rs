@@ -158,6 +158,7 @@ mod tests {
             case_id: "test".to_string(),
             classified_intent: QueryIntent::Implementation,
             confidence: 0.9,
+            margin: 0.0,
             retrieved: items,
             latency: Duration::from_millis(50),
         }

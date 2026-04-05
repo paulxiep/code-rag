@@ -104,7 +104,25 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Initialize engine (mirrors AppState::from_config, minus LlmClient and Mutex)
     let mut embedder = Embedder::new()?;
-    let classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+    let mut classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+    if let Ok(v) = std::env::var("INTENT_THRESHOLD").map(|s| s.parse::<f32>()) {
+        if let Ok(v) = v {
+            println!("Overriding intent threshold: {}", v);
+            classifier = classifier.with_threshold(v);
+        }
+    }
+    if let Ok(v) = std::env::var("INTENT_MARGIN").map(|s| s.parse::<f32>()) {
+        if let Ok(v) = v {
+            println!("Overriding intent margin: {}", v);
+            classifier = classifier.with_margin_threshold(v);
+        }
+    }
+    if let Ok(v) = std::env::var("INTENT_KNN_K").map(|s| s.parse::<usize>()) {
+        if let Ok(v) = v {
+            println!("Enabling k-NN voting with k={}", v);
+            classifier = classifier.with_knn_k(Some(v));
+        }
+    }
     let store = VectorStore::new(&cli.db_path, embedder.dimension()).await?;
 
     let mut config = EngineConfig::default();
@@ -147,11 +165,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // 5. Compute metrics
+    // 5. Compute metrics — join by case_id (ground-truth mode skips cases without
+    // expected_intent, so positional zip would mis-pair results with cases).
+    let case_by_id: std::collections::HashMap<&str, &_> = owned_cases
+        .iter()
+        .map(|c| (c.id.as_str(), c))
+        .collect();
     let pairs: Vec<_> = query_results
         .iter()
-        .zip(owned_cases.iter())
-        .map(|(r, c)| (r.clone(), c))
+        .filter_map(|r| {
+            case_by_id
+                .get(r.case_id.as_str())
+                .map(|c| (r.clone(), *c))
+        })
         .collect();
 
     let aggregate = metrics::compute_aggregate(&pairs);

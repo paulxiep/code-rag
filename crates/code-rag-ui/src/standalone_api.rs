@@ -91,7 +91,16 @@ async fn run_retrieval(
     classifier: &IntentClassifier,
 ) -> (RetrievalResult, ClassificationResult) {
     let routing = RoutingTable::default();
-    let classification = intent::classify(query_embedding, classifier);
+    // Keyword pre-filter for unambiguous comparison cues (hard override).
+    let classification = if let Some(pre) = intent::pre_classify_comparison(query) {
+        ClassificationResult {
+            intent: pre,
+            confidence: 1.0,
+            margin: 0.0,
+        }
+    } else {
+        intent::classify(query_embedding, classifier)
+    };
     let rerank_config = RerankConfig {
         enabled: true,
         ..Default::default()

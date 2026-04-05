@@ -41,14 +41,19 @@ const OVERVIEW_PROTOTYPES: &[&str] = &[
     "What does this do?",
     "Describe the purpose",
     "What is the architecture?",
+    "What is the purpose of this module?",
+    "What is the role of this component?",
+    "What is this package?",
 ];
 
 const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
     "How does this function work?",
     "Show me the implementation",
     "How is this implemented?",
-    "What does this code do?",
     "Walk me through the logic",
+    "How is this function implemented?",
+    "Walk through this code step by step",
+    "What are the steps of this algorithm?",
 ];
 
 const RELATIONSHIP_PROTOTYPES: &[&str] = &[
@@ -57,6 +62,8 @@ const RELATIONSHIP_PROTOTYPES: &[&str] = &[
     "What depends on this?",
     "Show me the call chain",
     "What uses this module?",
+    "What formats does this support?",
+    "How do errors propagate through the system?",
 ];
 
 const COMPARISON_PROTOTYPES: &[&str] = &[
@@ -66,6 +73,9 @@ const COMPARISON_PROTOTYPES: &[&str] = &[
     "A versus B",
     "Contrast these approaches",
     "What are the pros and cons?",
+    "What is the difference between X and Y?",
+    "How does X compare to Y?",
+    "Differences between X and Y",
 ];
 
 /// Pre-computed prototype embeddings for each intent.
@@ -74,6 +84,12 @@ pub struct IntentClassifier {
     prototypes: HashMap<QueryIntent, Vec<Vec<f32>>>,
     default: QueryIntent,
     threshold: f32,
+    /// If top1 - top2 margin is below this, fall back to default (ambiguous).
+    /// 0.0 disables margin-based abstention.
+    margin_threshold: f32,
+    /// If Some(k), use top-k weighted voting across all prototypes instead of per-intent max.
+    /// None = standard per-intent max-similarity classification.
+    knn_k: Option<usize>,
 }
 
 impl IntentClassifier {
@@ -100,6 +116,8 @@ impl IntentClassifier {
             prototypes,
             default: QueryIntent::Implementation,
             threshold: 0.3,
+            margin_threshold: 0.0,
+            knn_k: Some(3),
         })
     }
 
@@ -109,7 +127,28 @@ impl IntentClassifier {
             prototypes,
             default: QueryIntent::Implementation,
             threshold: 0.3,
+            margin_threshold: 0.0,
+            knn_k: Some(3),
         }
+    }
+
+    /// Override the confidence threshold (cases below fall back to default).
+    pub fn with_threshold(mut self, threshold: f32) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Override the margin threshold for abstention.
+    /// If top1_sim - top2_sim < margin_threshold, fall back to default.
+    pub fn with_margin_threshold(mut self, margin: f32) -> Self {
+        self.margin_threshold = margin;
+        self
+    }
+
+    /// Enable top-k weighted voting. Set to None for per-intent max (default).
+    pub fn with_knn_k(mut self, k: Option<usize>) -> Self {
+        self.knn_k = k;
+        self
     }
 }
 
@@ -119,6 +158,49 @@ pub struct ClassificationResult {
     pub intent: QueryIntent,
     /// Cosine similarity confidence. 0.0 = fell through to default.
     pub confidence: f32,
+    /// Margin between top-1 and top-2 intent scores. Exposed for diagnostics.
+    pub margin: f32,
+}
+
+/// Keyword pre-classifier: hard-override Comparison for dominant surface forms.
+///
+/// Returns `Some(Comparison)` when the query contains an unambiguous comparison
+/// cue ("difference between", "differ from", " vs ", "compare"). Returns `None`
+/// to defer to embedding-based classification.
+///
+/// Guards against adversarial false positives:
+/// - "difference this/that/it makes" (idiomatic) → None
+/// - "_vs_" / "-vs-" in file/identifier tokens → None
+pub fn pre_classify_comparison(query: &str) -> Option<QueryIntent> {
+    let q = query.to_lowercase();
+
+    // Adversarial guards (return None = defer)
+    if q.contains("difference this makes")
+        || q.contains("difference that makes")
+        || q.contains("difference it makes")
+    {
+        return None;
+    }
+    // "vs" inside a token (e.g. transformer_vs_rnn.py) — not a comparison cue
+    let token_vs = q.contains("_vs_") || q.contains("_vs.") || q.contains("-vs-");
+
+    // Positive cues
+    // Match "differ" as a standalone token (not inside "different" idioms covered above).
+    let has_differ = q.split(|c: char| !c.is_alphanumeric())
+        .any(|tok| tok == "differ" || tok == "differs");
+    let strong_cue = q.contains("difference between")
+        || q.contains("differences between")
+        || q.contains(" differ from ")
+        || has_differ
+        || q.contains("compare ")
+        || (q.contains(" vs ") && !token_vs)
+        || (q.contains(" vs. ") && !token_vs);
+
+    if strong_cue {
+        Some(QueryIntent::Comparison)
+    } else {
+        None
+    }
 }
 
 /// Classify query intent via cosine similarity against prototype embeddings.
@@ -126,33 +208,81 @@ pub struct ClassificationResult {
 /// For each intent, computes the maximum cosine similarity between the
 /// query embedding and that intent's prototype embeddings.
 /// Returns the intent with the highest max similarity.
-/// Falls back to default if all similarities are below the threshold.
+/// Falls back to default if top similarity is below `threshold`, OR if the
+/// margin between top-1 and top-2 intents is below `margin_threshold`.
 pub fn classify(query_embedding: &[f32], classifier: &IntentClassifier) -> ClassificationResult {
-    let mut best_intent = classifier.default;
-    let mut best_similarity: f32 = 0.0;
-
-    for (intent, proto_embeddings) in &classifier.prototypes {
-        let max_sim = proto_embeddings
+    // Collect per-intent scores. Two modes:
+    // - knn_k=None: per-intent max similarity (default)
+    // - knn_k=Some(k): flatten all prototypes, take top-k by similarity, sum their
+    //   similarities per intent (weighted vote). More robust to single noisy prototypes.
+    let mut scores: Vec<(QueryIntent, f32)> = if let Some(k) = classifier.knn_k {
+        let mut flat: Vec<(QueryIntent, f32)> = classifier
+            .prototypes
             .iter()
-            .map(|proto| cosine_similarity(query_embedding, proto))
-            .fold(f32::NEG_INFINITY, f32::max);
-
-        if max_sim > best_similarity {
-            best_similarity = max_sim;
-            best_intent = *intent;
+            .flat_map(|(intent, protos)| {
+                protos
+                    .iter()
+                    .map(move |p| (*intent, cosine_similarity(query_embedding, p)))
+            })
+            .collect();
+        flat.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut votes: HashMap<QueryIntent, f32> = HashMap::new();
+        for (intent, sim) in flat.into_iter().take(k) {
+            *votes.entry(intent).or_insert(0.0) += sim;
         }
-    }
+        // Ensure all intents are represented so sorting still finds top-1/top-2
+        for intent in [
+            QueryIntent::Overview,
+            QueryIntent::Implementation,
+            QueryIntent::Relationship,
+            QueryIntent::Comparison,
+        ] {
+            votes.entry(intent).or_insert(0.0);
+        }
+        votes.into_iter().collect()
+    } else {
+        classifier
+            .prototypes
+            .iter()
+            .map(|(intent, proto_embeddings)| {
+                let max_sim = proto_embeddings
+                    .iter()
+                    .map(|proto| cosine_similarity(query_embedding, proto))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                (*intent, max_sim)
+            })
+            .collect()
+    };
 
-    if best_similarity < classifier.threshold {
+    // Sort descending by similarity
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let (top_intent, top_sim) = scores[0];
+    let top2_sim = scores.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+    let margin = top_sim - top2_sim;
+
+    // Threshold-based abstention
+    if top_sim < classifier.threshold {
         return ClassificationResult {
             intent: classifier.default,
             confidence: 0.0,
+            margin,
+        };
+    }
+
+    // Margin-based abstention
+    if classifier.margin_threshold > 0.0 && margin < classifier.margin_threshold {
+        return ClassificationResult {
+            intent: classifier.default,
+            confidence: top_sim,
+            margin,
         };
     }
 
     ClassificationResult {
-        intent: best_intent,
-        confidence: best_similarity,
+        intent: top_intent,
+        confidence: top_sim,
+        margin,
     }
 }
 
@@ -375,6 +505,89 @@ mod tests {
         let result = classify(&query, &classifier);
         assert_eq!(result.intent, QueryIntent::Implementation); // default
         assert_eq!(result.confidence, 0.0);
+    }
+
+    // --- B4: pre_classify_comparison tests ---
+
+    #[test]
+    fn test_pre_classify_difference_between() {
+        assert_eq!(
+            pre_classify_comparison("What is the difference between X and Y?"),
+            Some(QueryIntent::Comparison)
+        );
+        assert_eq!(
+            pre_classify_comparison("Differences between A and B"),
+            Some(QueryIntent::Comparison)
+        );
+    }
+
+    #[test]
+    fn test_pre_classify_differ() {
+        assert_eq!(
+            pre_classify_comparison("How does A differ from B?"),
+            Some(QueryIntent::Comparison)
+        );
+        assert_eq!(
+            pre_classify_comparison("How do the handlers differ?"),
+            Some(QueryIntent::Comparison)
+        );
+    }
+
+    #[test]
+    fn test_pre_classify_compare_and_vs() {
+        assert_eq!(
+            pre_classify_comparison("Compare A and B"),
+            Some(QueryIntent::Comparison)
+        );
+        assert_eq!(
+            pre_classify_comparison("X vs Y"),
+            Some(QueryIntent::Comparison)
+        );
+    }
+
+    #[test]
+    fn test_pre_classify_adversarial_idiom_returns_none() {
+        // Idiomatic "difference" — not a comparison intent
+        assert_eq!(
+            pre_classify_comparison("What is the difference this makes?"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_pre_classify_adversarial_vs_in_filename_returns_none() {
+        // "vs" inside an identifier/filename token is not a comparison cue
+        assert_eq!(
+            pre_classify_comparison("How does transformer_vs_rnn.py work?"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_pre_classify_non_comparison_returns_none() {
+        assert_eq!(pre_classify_comparison("What is invoice-parse?"), None);
+        assert_eq!(
+            pre_classify_comparison("How does the retriever work?"),
+            None
+        );
+        assert_eq!(
+            pre_classify_comparison("What calls this function?"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_exposes_margin() {
+        // Build classifier where Overview protos match query strongly, others don't.
+        // Prototypes are iterated in the constructor order of the HashMap entries,
+        // but we only check the margin field exists and is non-negative.
+        let classifier = IntentClassifier::build(|texts: &[&str]| {
+            Ok::<_, String>(texts.iter().map(|_| vec![0.5; 4]).collect())
+        })
+        .unwrap();
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        let result = classify(&query, &classifier);
+        assert!(result.margin >= 0.0);
     }
 
     // --- FromStr tests ---

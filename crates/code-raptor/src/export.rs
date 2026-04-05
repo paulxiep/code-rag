@@ -171,6 +171,9 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "What does this do?",
                 "Describe the purpose",
                 "What is the architecture?",
+                "What is the purpose of this module?",
+                "What is the role of this component?",
+                "What is this package?",
             ],
         ),
         (
@@ -179,8 +182,10 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "How does this function work?",
                 "Show me the implementation",
                 "How is this implemented?",
-                "What does this code do?",
                 "Walk me through the logic",
+                "How is this function implemented?",
+                "Walk through this code step by step",
+                "What are the steps of this algorithm?",
             ],
         ),
         (
@@ -191,6 +196,8 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "What depends on this?",
                 "Show me the call chain",
                 "What uses this module?",
+                "What formats does this support?",
+                "How do errors propagate through the system?",
             ],
         ),
         (
@@ -202,6 +209,9 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
                 "A versus B",
                 "Contrast these approaches",
                 "What are the pros and cons?",
+                "What is the difference between X and Y?",
+                "How does X compare to Y?",
+                "Differences between X and Y",
             ],
         ),
     ];
