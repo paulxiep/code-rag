@@ -71,7 +71,7 @@ pub fn bm25_search<T: Clone>(
             let score: f32 = query_tokens
                 .iter()
                 .map(|qt| {
-                    let tf = doc_tokens.iter().filter(|t| t == qt).count() as f32;
+                    let tf = doc_tokens.iter().filter(|t| *t == qt).count() as f32;
                     if tf == 0.0 {
                         return 0.0;
                     }
@@ -123,7 +123,7 @@ pub fn bm25_search_precomputed<T: Clone>(
             let score: f32 = query_tokens
                 .iter()
                 .map(|qt| {
-                    let tf = doc_tokens.iter().filter(|t| t == qt).count() as f32;
+                    let tf = doc_tokens.iter().filter(|t| *t == qt).count() as f32;
                     if tf == 0.0 {
                         return 0.0;
                     }

@@ -46,30 +46,6 @@ fn top_k_signature<T: Clone>(
     scored
 }
 
-/// Search all chunk types and return raw (chunk, distance) tuples.
-/// Caller uses `code_rag_engine::retriever::to_retrieval_result` to convert.
-pub fn brute_force_search(
-    query_embedding: &[f32],
-    index: &ChunkIndex,
-    config: &RetrievalConfig,
-) -> (
-    Vec<(code_rag_types::CodeChunk, f32)>,
-    Vec<(code_rag_types::ReadmeChunk, f32)>,
-    Vec<(code_rag_types::CrateChunk, f32)>,
-    Vec<(code_rag_types::ModuleDocChunk, f32)>,
-) {
-    (
-        top_k(query_embedding, &index.code_chunks, config.code_limit),
-        top_k(query_embedding, &index.readme_chunks, config.readme_limit),
-        top_k(query_embedding, &index.crate_chunks, config.crate_limit),
-        top_k(
-            query_embedding,
-            &index.module_doc_chunks,
-            config.module_doc_limit,
-        ),
-    )
-}
-
 /// Search the CODE arm, respecting hybrid + dual-embedding toggles.
 /// Returns (chunk, score) tuples where scores are higher=better when any
 /// arm is active, and L2 distances (lower=better) when only body-vec runs.
