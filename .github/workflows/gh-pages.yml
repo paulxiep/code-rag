@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     env:
       FASTEMBED_CACHE_DIR: /home/runner/.cache/models
@@ -60,6 +60,11 @@ jobs:
             git clone "$repo" "$dir"
             cargo run --release -p code-raptor -- ingest "$dir" --db-path /tmp/demo.lance --project-name "$name"
           done
+
+      - name: Ingest old portfolio projects
+        run: |
+          git clone https://github.com/paulxiep/portfolio.git /tmp/targets/portfolio
+          cargo run --release -p code-raptor -- ingest /tmp/targets/portfolio --db-path /tmp/demo.lance
 
       - name: Export to static JSON
         run: cargo run --release -p code-raptor -- export --db-path /tmp/demo.lance --output crates/code-rag-ui/static/index.json
