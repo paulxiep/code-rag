@@ -109,7 +109,12 @@ User Query
           JSON/HTML Response { answer, sources, intent }
 ```
 
-## Vector Schema (4 Tables)
+**Two query-side branches compose on top of the diagram above** (Track C):
+
+- **Comparison pre-branch** (`code-rag-engine::comparison`, `extract_comparators` in `code-rag-engine::intent`): if `intent == Comparison` and ≥ 2 comparators are extractable via regex (`compare X and Y`, `X vs Y`, `differences between X and Y`, etc.), the retriever runs one body-vec sub-search per comparator (with the comparator name prepended to the original query), votes the dominant `project_name` across the original-query top-5, post-filters all results to that project, then RRF-fuses via `fuse_comparator_lists` and rewrites each surviving chunk's score to its **max-of-natural** body-vec relevance from any source list. Without max-of-natural, RRF outputs (~0.02–0.05) sink below distance-converted non-code arms (0.4–0.7) and crash comparison recall.
+- **Graph augmentation + protection** (`code-rag-engine::graph`): on Relationship and Implementation intents, `graph_augment` resolves the query target against the call-graph identifier index (exact → graph index → partial), traverses callers/callees, and `merge_graph_chunks` returns the merged result list plus a `HashSet<String>` of graph-resolved chunk IDs. `detect_direction` then chooses a protection path: explicit direction ("what calls X / called by") → **SOTA routing** (graph chunks partitioned **out** of the rerank pipeline entirely, sorted by tier score, prepended to the reranked semantic chunks); ambiguous direction → **soft reserve** (`reserve_graph_slots` over-retains the code arm by `+5` and swaps demoted graph chunks back in). Both paths mirror line-for-line in the WASM standalone (`crates/code-rag-ui/src/standalone_api.rs`).
+
+## Vector Schema (4 Vector Tables + 1 Scalar Table)
 
 | Table | Content | Embedding Input | FTS / BM25 Target |
 |-------|---------|-----------------|-------------------|
@@ -117,6 +122,9 @@ User Query
 | `readme_chunks` | README.md files | `Project: name + content` | `content` |
 | `crate_chunks` | Cargo.toml metadata | `Crate: name + description + dependencies` | natural text |
 | `module_doc_chunks` | Module-level docs (`//!`) | `Module: name + doc_content` | natural text |
+| `call_edges` | Caller→callee call relationships | (none — first scalar-only LanceDB table) | (none) |
+
+`call_edges` schema: deterministic `edge_id`, caller/callee `chunk_id` + identifier + file, `project_name`, `resolution_tier: u8` (1=same_file, 2=import_based, 3=unique_global). Validated against LanceDB with a dedicated integration test before building the API. Queried directly by the graph traversal helpers in `code-rag-engine::graph` — no vector search.
 
 ## Ingestion Pipeline
 
@@ -145,7 +153,7 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 └────────┬────────┘
          │
          ▼
-    LanceDB (4 tables)
+    LanceDB (4 vector tables + call_edges)
 ```
 
 ## Docstring Extraction
@@ -185,6 +193,10 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 25. **Dual-vector schema shipped OFF**: `signature_vector` column populated but disabled. 8-config space sweep showed signature arm regressed every intent — short-text geometry mismatch with BGE-small (trained on passages) + sparse-arm RRF penalty (sig_vec null on ~25% of chunks). Column retained for future experiments
 26. **k-NN prototype voting (k=3)**: classifier flattens all prototypes, takes top-k by similarity, similarity-weighted votes per intent. Robust to imbalanced prototype counts
 27. **Comparison keyword pre-filter with adversarial guards**: hard-overrides to Comparison on `"difference between"`, `" vs "`, `compare`, etc., but rejects idioms (`"difference this makes"`) and identifier-embedded `_vs_` tokens (`transformer_vs_rnn.py`)
+28. **Persistent call graph as scalar-only LanceDB table**: 3-tier resolver (same-file → import-based → unique-global) runs at ingest; queries hit `call_edges` directly via `code-rag-engine::graph`, not vector search. Self-edges and unresolvable ambiguous calls are skipped — no LLM-extracted noise. First LanceDB table without a vector column; validated with a dedicated integration test before building the API. AST-derived call graphs outperform LLM-extracted knowledge graphs for code (arXiv:2601.08773)
+29. **Graph result protection — SOTA routing vs soft reserve**: explicit direction (`detect_direction` finds "what calls X / called by / depends on") → graph chunks partitioned **out** of the rerank pipeline entirely and prepended to reranked semantic results; ambiguous direction → graph chunks stay in the rerank pool, code arm over-retained by `+5`, `reserve_graph_slots` swaps demoted graph chunks back in. The browser-bundled `ms-marco-MiniLM` cross-encoder cannot be retrained for structural priors, so routing is structural, not score-based (matches Cody / LocAgent / GraphCoder; formal version in arXiv:2509.05980 GRACE)
+30. **Comparison query decomposition with max-of-natural rescoring**: regex extracts comparators → per-comparator augmented sub-queries → vote-based dominant-project filter (top-1 was too brittle: `pre_classify_comparison`-style false positives) → RRF fuse → rewrite each chunk's score to its max natural body-vec relevance from any source list. Without max-of-natural, RRF outputs (~0.02–0.05) sink below distance-converted non-code arms (0.4–0.7) and crash comparison recall@5 from 0.65 to 0.31. SOTA bare-comparator sub-queries (LlamaIndex SubQuestionQueryEngine, RAG-Fusion) and per-sub-search BM25 (CodeRAG-Bench) **both regressed** on BGE-small + this corpus and are recorded as code comments to prevent re-running without measuring (re-test if the embedder is upgraded to BGE-base or jina-code)
+31. **Test code exclusion at ingest (3-level)**: directory `tests/`, filename `test_*.py` / `*.test.ts`, and AST-walked `#[cfg(test)]` enclosing-mod detection via tree-sitter parent walk. Test functions containing query-like text (canonical case: `test_extract_target_term_what_calls` containing "What calls retrieve?" in its body) dominated both vector search and reranking before exclusion. Removed ~24% of chunks (3772 → 2861)
 
 ## Quality Harness (V3)
 
@@ -230,16 +242,18 @@ data/test_queries.json (43 cases)
 
 Matching: substring for file paths (survives directory restructuring), exact for identifiers/projects/chunk types. Recall excludes coverage checks — `expected_chunk_types`, `expected_projects`, `min_relevant_results`, and `excluded_files` are boolean checks alongside recall.
 
-### Baseline (V3.3 → B5)
+### Baseline (V3.3 → C3)
 
-**Dual-run mode:** Full pipeline (real classifier) vs. ground-truth intent (bypassed classifier) isolates classifier-induced recall loss. Current numbers measured on the 81-case cleaned dataset with composite per-intent `ArmPolicy`:
+**Dual-run mode:** Full pipeline (real classifier) vs. ground-truth intent (bypassed classifier) isolates classifier-induced recall loss. Current numbers measured on the 81-case cleaned dataset with composite per-intent `ArmPolicy` + Track C (commit ee22398, label `c3_post8`):
 
 | Metric | Classifier |
 |--------|:---------:|
-| recall@5 (aggregate) | 0.674 |
-| Intent accuracy (97-case corpus) | 74% |
+| recall@5 (aggregate) | 0.72 |
+| recall@10 (aggregate) | 0.76 |
+| MRR | 0.71 |
+| Intent accuracy (97-case held-out corpus) | 74% |
 
-Per-intent recall@5: overview 0.787, implementation 0.740, relationship 0.500, comparison 0.597. Post-B4 the classifier→GT recall gap is ~2pp — classification is no longer the dominant bottleneck. Comparison and Relationship remain the weakest intents (short-text / structural queries). Report metadata (`label`, `completed_tracks`, `hybrid_enabled`, `rerank_enabled`, `dual_embedding_enabled`) enables comparison across parallel Track improvements and ArmPolicy sweeps.
+Per-intent recall@5: overview 0.80, implementation 0.76, relationship 0.60, comparison 0.65. Track C closed most of the relationship gap (graph augmentation in C1 + result protection in C2: 0.50 → 0.60) and lifted comparison via per-comparator decomposition (C3: 0.62 → 0.65). Two stubborn comparison failures remain (`comp-retriever-generator`, `b4-comp-retriever-api`) that share a root cause — BGE-small produces noisy vectors for bare hyphenated identifiers; gated on a future embedder upgrade. Post-B4 the classifier→GT recall gap is ~2pp — classification is no longer the dominant bottleneck. Report metadata (`label`, `completed_tracks`, `hybrid_enabled`, `rerank_enabled`, `dual_embedding_enabled`) enables comparison across parallel Track improvements and ArmPolicy sweeps.
 
 ## Intent-Aware Retrieval
 
@@ -251,6 +265,11 @@ Per-intent recall@5: overview 0.787, implementation 0.740, relationship 0.500, c
 | Comparison | 5 | 2 | 3 | 2 | ✗ | ✗ | ✗ |
 
 `ArmPolicy` (right 3 columns) was derived empirically from a B5 8-config × per-intent space sweep — each gate is the arg-max of that intent's recall@5 curve.
+
+Two Track-C query-side mechanisms compose on top of the policy without changing the gate values:
+
+- **Graph augmentation** fires on **Relationship + Implementation** intents only (44% Relationship classification accuracy means most relationship queries arrive misclassified as Implementation). Routing vs soft-reserve is selected per-query by `detect_direction`.
+- **Comparison decomposition** fires on **Comparison** intent only, conditional on `extract_comparators(query).len() >= 2`. Extraction failure falls through to the unchanged single-arm Comparison path.
 
 ## Build & Run
 

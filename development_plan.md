@@ -111,8 +111,6 @@ Cross-encoder reranking ────────── independent (Track B, que
 Hybrid search ─────────────────── independent (query-side)
 
 Graph query interface ─────────── requires call graph data
-
-Graph embeddings research ──────── requires C5 (call graph data + retrieval gap fixes)
 ```
 
 ### Parallelization Opportunities
@@ -148,7 +146,7 @@ V3 (Quality Harness) ─── quantitative testing infrastructure
  │       B1 → B2 → B3 → B4 → B5
  │
  ├──► Track C: Relationship Graph
- │       C1 → C2 → C3 → C4 → C5
+ │       C1 → C2 → C3
  │
  ├──► Track D: Enrichment Pipeline
  │       D1: Docstring Generation → D2: Type Inference
@@ -168,7 +166,7 @@ V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3.
 | **V3** (Testing) | 1 week | 3.5-4 weeks |
 | **Track A** (A1→A5) | 1.5-2 weeks | — |
 | **Track B** (B1→B2→B3→B4→B5) | 3-4 weeks | — |
-| **Track C** (C1→C2→C3→C4→C5) | 3-5 weeks | — |
+| **Track C** (C1→C2→C3) | 2-3 weeks | — |
 | **Track D** (D1→D2) | 1-1.5 weeks | — |
 | **Track R** (R1→R5, after D) | 2 weeks | — |
 
@@ -769,34 +767,6 @@ See [C3.md](C3.md) for full design.
 
 ---
 
-## C4: Path-Aware Embeddings
-
-**Prerequisite:** C1 (Graph RAG)
-
-**Estimated effort:** 1-2 days
-
-BM25 path injection (no re-embedding) + embedding path prepend. Fixes path-blind queries ("What is shared-py?").
-
-- **Crates:** code-rag-store (embedding format, BM25 searchable_text), code-raptor (ingestion), code-rag-ui (WASM searchable_text parity)
-
-See [C4.md](C4.md) for full design.
-
----
-
-## C5: Graph Embeddings Research (Time-Boxed, Optional)
-
-**Prerequisite:** C2, C3, C4 (retrieval gap fixes)
-
-**Estimated effort:** 3-5 days (TIME-BOXED)
-
-**Goal:** Evaluate whether structural graph embeddings (Node2Vec or similar) improve relationship query recall beyond what C1 graph traversal + retrieval gap fixes (C2, C3, C4) achieve.
-
-- Fuse with semantic embeddings via RRF (new channel, not replacement for graph traversal)
-- **Success criteria:** Relationship recall improves by >0.05 over the post-C4 baseline, OR documented findings on why graph embeddings don't add value for code.
-- **Crates:** code-rag-engine (fusion logic), code-raptor (graph embedding generation)
-
----
-
 # Track D: Enrichment Pipeline
 
 Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is V1.5 (docstring extraction, complete).
@@ -936,7 +906,6 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | Graph RAG (C1) | code-rag-types, code-rag-store, code-raptor, code-rag-engine, code-rag-chat, code-rag-ui |
 | Graph result protection (C2) | code-rag-engine, code-rag-chat, code-rag-ui |
 | Comparison query decomposition (C3) | code-rag-engine |
-| Path-aware embeddings (C4) | code-rag-store, code-raptor, code-rag-ui |
 | Type generation | code-raptor |
 | RAPTOR clustering | code-raptor |
 | Repo summaries | code-raptor |
@@ -944,7 +913,7 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | Hybrid search | code-rag-chat |
 | Graph query interface | code-rag-chat |
 | Code embedding evaluation (V3.4) | code-rag-store |
-| Graph embeddings research (C5) | code-rag-engine, code-raptor |
+| Graph embeddings research (hypothetical) | code-rag-engine, code-raptor |
 | HyDE query transformation (hypothetical) | code-rag-engine, code-rag-chat |
 
 ---
@@ -964,8 +933,6 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | B2-B3 | "Show me UserService" finds exact match |
 | C1+C2 | "What calls X?" returns accurate results via graph traversal + slot routing |
 | C3 | Comparison queries cover both sides (per-entity fetch + RRF merge) |
-| C4 | Path-based queries ("What is shared-py?") find the right files |
-| C5 | Graph embeddings evaluated; decision documented |
 
 ---
 
@@ -1046,6 +1013,30 @@ Ideas informed by 2025-2026 RAG advancements. Not scheduled — evaluate after T
 **When NOT to use HyDE:**
 - Exact identifier queries ("show me Retriever") — B2 hybrid search handles these better
 - Gate on intent: only apply for `Overview` and `Relationship` intents, skip for `Implementation` with exact identifiers
+
+## Hypothetical: Graph Embeddings (Node2Vec / Structural)
+
+**Status:** Idea — was originally scoped as C5 in Track C, now extracted to research because Track C (C1+C2+C3) already closed the relationship-recall gap to 0.60 and the comparison gap to 0.65 without it. No track number assigned.
+
+**Prerequisite:** C1 (call graph data already populated in `call_edges`). No dependency on a "C4" path-aware embeddings step — that work was dropped.
+
+**Estimated effort:** 3-5 days (TIME-BOXED if revived)
+
+**Goal:** Evaluate whether structural graph embeddings (Node2Vec, GraphSAGE, or similar) improve relationship query recall beyond what C1 graph traversal + C2 result protection already deliver. Fuse with semantic embeddings via RRF as a *new arm* in the existing N-ary fusion, not a replacement for graph traversal.
+
+**Why it might help:**
+- Graph traversal answers "what calls X" exactly but cannot answer fuzzy structural questions ("functions that look like they coordinate I/O", "modules with similar fan-in shape").
+- Node2Vec encodes structural neighborhood into a vector — chunks with similar call-graph context end up close even when their text/identifiers differ.
+- Could rescue the two stubborn pre-C3 comparison failures (`comp-retriever-generator`, `b4-comp-retriever-api`) if their call-graph context is more discriminative than their BGE-small text embeddings.
+
+**Why it was deferred from main Track C:**
+- C1+C2 already lifted relationship recall from 0.50 → 0.60 without any embedding work, so the marginal value of a third arm is uncertain.
+- Adds a second embedding model (graph) to the ingestion pipeline, plus a new arm in `code-rag-engine::fusion`, plus a WASM port — non-trivial scope for an unproven gain.
+- Should only be revived if a future measurement shows residual relationship/comparison failures that graph traversal cannot reach.
+
+**Success criteria when revived:** Relationship recall improves by >0.05 over the post-C3 baseline (currently 0.60), OR documented findings on why structural graph embeddings don't add value for code on top of AST-derived call-graph traversal.
+
+**Crates:** code-rag-engine (fusion logic + new graph-embedding arm), code-raptor (graph embedding generation at ingest)
 
 ## Hypothetical: MMR Diversity Re-ranking
 
