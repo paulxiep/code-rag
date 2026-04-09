@@ -244,7 +244,10 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
         writeln!(md, "**Hybrid search:** BM25 + semantic (RRF fusion)")?;
     }
     if report.system.dual_embedding_enabled {
-        writeln!(md, "**Dual embedding:** body_vector + signature_vector (app-level RRF)")?;
+        writeln!(
+            md,
+            "**Dual embedding:** body_vector + signature_vector (app-level RRF)"
+        )?;
     }
     writeln!(
         md,

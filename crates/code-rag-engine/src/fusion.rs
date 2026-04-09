@@ -24,10 +24,7 @@ where
         for (rank, (chunk, _)) in list.iter().enumerate() {
             let id = id_fn(chunk).to_string();
             let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
-            scores
-                .entry(id)
-                .or_insert_with(|| (chunk.clone(), 0.0))
-                .1 += rrf_score;
+            scores.entry(id).or_insert_with(|| (chunk.clone(), 0.0)).1 += rrf_score;
         }
     }
 

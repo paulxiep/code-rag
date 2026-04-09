@@ -1,4 +1,4 @@
-use super::super::language::LanguageHandler;
+use super::super::language::{ImportInfo, LanguageHandler};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct TypeScriptHandler;
@@ -132,12 +132,7 @@ impl LanguageHandler for TypeScriptHandler {
         calls
     }
 
-    fn extract_signature(
-        &self,
-        source: &str,
-        node: &Node,
-        _source_bytes: &[u8],
-    ) -> Option<String> {
+    fn extract_signature(&self, source: &str, node: &Node, _source_bytes: &[u8]) -> Option<String> {
         let kind = node.kind();
         match kind {
             // Named functions and class methods
@@ -184,6 +179,89 @@ impl LanguageHandler for TypeScriptHandler {
                 if sig.is_empty() { None } else { Some(sig) }
             }
             _ => None,
+        }
+    }
+
+    fn extract_file_imports(
+        &self,
+        _source: &str,
+        root: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<ImportInfo> {
+        let mut imports = Vec::new();
+        let mut cursor = root.walk();
+
+        for child in root.children(&mut cursor) {
+            if child.kind() == "import_statement" {
+                // `import { foo, bar } from './module'`
+                let source_path = child
+                    .child_by_field_name("source")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("")
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string();
+
+                if source_path.is_empty() {
+                    continue;
+                }
+
+                let mut child_cursor = child.walk();
+                for import_child in child.children(&mut child_cursor) {
+                    if import_child.kind() == "import_clause" {
+                        extract_ts_import_names(
+                            &import_child,
+                            source_bytes,
+                            &source_path,
+                            &mut imports,
+                        );
+                    }
+                }
+            }
+        }
+
+        imports
+    }
+}
+
+/// Extract imported names from an import_clause node.
+fn extract_ts_import_names(
+    node: &Node,
+    source_bytes: &[u8],
+    source_path: &str,
+    imports: &mut Vec<ImportInfo>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "named_imports" => {
+                // `{ foo, bar as baz }`
+                let mut inner_cursor = child.walk();
+                for spec in child.children(&mut inner_cursor) {
+                    if spec.kind() == "import_specifier" {
+                        // Use the local name (alias if present, else original)
+                        let name = spec
+                            .child_by_field_name("alias")
+                            .or_else(|| spec.child_by_field_name("name"))
+                            .and_then(|n| n.utf8_text(source_bytes).ok());
+                        if let Some(name) = name {
+                            imports.push(ImportInfo {
+                                imported_name: name.to_string(),
+                                source_path: source_path.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            "identifier" => {
+                // Default import: `import Foo from './module'`
+                if let Ok(name) = child.utf8_text(source_bytes) {
+                    imports.push(ImportInfo {
+                        imported_name: name.to_string(),
+                        source_path: source_path.to_string(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -618,5 +696,40 @@ class Service {
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].docstring, None);
+    }
+
+    // C1: Import extraction tests
+
+    fn extract_imports_from(source: &str) -> Vec<ImportInfo> {
+        let handler = TypeScriptHandler;
+        let mut parser = tree_sitter::Parser::new();
+        let grammar = handler.grammar();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        handler.extract_file_imports(source, &tree.root_node(), source.as_bytes())
+    }
+
+    #[test]
+    fn test_ts_import_named() {
+        let imports =
+            extract_imports_from("import { foo, bar } from './module';\nfunction baz() {}");
+        assert_eq!(imports.len(), 2);
+        assert!(imports.iter().any(|i| i.imported_name == "foo"));
+        assert!(imports.iter().any(|i| i.imported_name == "bar"));
+        assert!(imports.iter().all(|i| i.source_path == "./module"));
+    }
+
+    #[test]
+    fn test_ts_import_default() {
+        let imports = extract_imports_from("import Foo from './module';\nfunction bar() {}");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].imported_name, "Foo");
+        assert_eq!(imports[0].source_path, "./module");
+    }
+
+    #[test]
+    fn test_ts_no_imports() {
+        let imports = extract_imports_from("function foo() { return 1; }");
+        assert!(imports.is_empty());
     }
 }

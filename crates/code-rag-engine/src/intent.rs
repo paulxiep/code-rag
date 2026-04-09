@@ -186,7 +186,8 @@ pub fn pre_classify_comparison(query: &str) -> Option<QueryIntent> {
 
     // Positive cues
     // Match "differ" as a standalone token (not inside "different" idioms covered above).
-    let has_differ = q.split(|c: char| !c.is_alphanumeric())
+    let has_differ = q
+        .split(|c: char| !c.is_alphanumeric())
         .any(|tok| tok == "differ" || tok == "differs");
     let strong_cue = q.contains("difference between")
         || q.contains("differences between")
@@ -630,10 +631,7 @@ mod tests {
             pre_classify_comparison("How does the retriever work?"),
             None
         );
-        assert_eq!(
-            pre_classify_comparison("What calls this function?"),
-            None
-        );
+        assert_eq!(pre_classify_comparison("What calls this function?"), None);
     }
 
     #[test]
@@ -693,7 +691,10 @@ mod tests {
             QueryIntent::Relationship,
             QueryIntent::Comparison,
         ] {
-            assert!(!arm_policy(intent).sig_vec, "{intent:?} sig_vec should be off");
+            assert!(
+                !arm_policy(intent).sig_vec,
+                "{intent:?} sig_vec should be off"
+            );
         }
     }
 

@@ -107,11 +107,8 @@ pub fn bm25_search_precomputed<T: Clone>(
     let k1 = 1.2_f32;
     let b = 0.75_f32;
 
-    let avg_dl: f32 = texts
-        .iter()
-        .map(|t| tokenize(t).len() as f32)
-        .sum::<f32>()
-        / texts.len() as f32;
+    let avg_dl: f32 =
+        texts.iter().map(|t| tokenize(t).len() as f32).sum::<f32>() / texts.len() as f32;
 
     let mut scored: Vec<(T, f32)> = chunks
         .iter()

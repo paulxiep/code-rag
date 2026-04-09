@@ -3,7 +3,7 @@ pub mod languages;
 pub mod parser;
 pub mod reconcile;
 
-pub use language::LanguageHandler;
+pub use language::{ImportInfo, LanguageHandler};
 pub use languages::{handler_by_name, handler_for_path, supported_extensions};
 pub use reconcile::{
     DeletionsByTable, ExistingFileIndex, IngestionStats, ReconcileResult, reconcile,
@@ -174,35 +174,59 @@ fn process_module_docs(
 }
 
 /// Process a single code file.
-/// Returns (chunks, calls_map) where calls_map is keyed by chunk_id.
+/// Returns (chunks, calls_map, file_imports) where calls_map is keyed by chunk_id
+/// and file_imports is the list of imports from this file (for edge resolution).
+#[allow(clippy::type_complexity)]
 fn process_code_file(
     entry: &DirEntry,
     repo_root: &Path,
     analyzer: &mut CodeAnalyzer,
     project_name_override: Option<&str>,
-) -> (Vec<CodeChunk>, HashMap<String, Vec<String>>) {
+) -> (Vec<CodeChunk>, CallsMap, Option<(String, Vec<ImportInfo>)>) {
     // Skip files with unsupported extensions before reading (avoids UTF-8 errors on binary files)
-    if handler_for_path(entry.path()).is_none() {
-        return (Vec::new(), HashMap::new());
-    }
+    let handler = match handler_for_path(entry.path()) {
+        Some(h) => h,
+        None => return (Vec::new(), HashMap::new(), None),
+    };
 
     let content = match std::fs::read_to_string(entry.path()) {
         Ok(c) => c,
         Err(e) => {
             warn!(path = %entry.path().display(), error = %e, "Failed to read file");
-            return (Vec::new(), HashMap::new());
+            return (Vec::new(), HashMap::new(), None);
         }
     };
 
     let pairs = analyzer.analyze_file(entry.path(), &content);
 
     if pairs.is_empty() {
-        return (Vec::new(), HashMap::new());
+        return (Vec::new(), HashMap::new(), None);
     }
 
     let path_str = normalize_path(entry.path(), repo_root);
     let project_name = resolve_project_name(entry.path(), repo_root, project_name_override);
     let file_hash = content_hash(&content);
+
+    // C1: Extract file-level imports for edge resolution
+    let file_imports = {
+        let mut parser = tree_sitter::Parser::new();
+        let grammar = handler.grammar();
+        if parser.set_language(&grammar).is_ok() {
+            if let Some(tree) = parser.parse(&content, None) {
+                let imports =
+                    handler.extract_file_imports(&content, &tree.root_node(), content.as_bytes());
+                if !imports.is_empty() {
+                    Some((path_str.clone(), imports))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
 
     // Enrich metadata, then split into chunks and calls map
     let enriched: Vec<_> = pairs
@@ -226,7 +250,7 @@ fn process_code_file(
 
     let calls_map: HashMap<String, Vec<String>> = call_entries.into_iter().flatten().collect();
 
-    (chunks, calls_map)
+    (chunks, calls_map, file_imports)
 }
 
 /// Directories to skip during ingestion
@@ -241,6 +265,8 @@ const IGNORED_DIRS: &[&str] = &[
     ".vscode",
     "dist",
     "build",
+    "tests", // Rust integration tests, Python test dirs
+    "test",  // Common test directory name
 ];
 
 /// Check if path contains any ignored directory (relative to repo root)
@@ -251,12 +277,38 @@ fn should_skip(entry: &DirEntry, repo_root: &Path) -> bool {
         Err(_) => return false,
     };
 
-    relative.components().any(|c| {
+    // Directory-level: skip ignored dirs and hidden dirs
+    if relative.components().any(|c| {
         c.as_os_str()
             .to_str()
             .map(|s| IGNORED_DIRS.contains(&s) || s.starts_with('.'))
             .unwrap_or(false)
-    })
+    }) {
+        return true;
+    }
+
+    // File-level: skip test files by naming convention
+    if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
+        let name_lower = name.to_lowercase();
+        // Python: test_*.py, *_test.py
+        if name_lower.ends_with(".py")
+            && (name_lower.starts_with("test_") || name_lower.ends_with("_test.py"))
+        {
+            return true;
+        }
+        // TypeScript/JavaScript: *.test.ts, *.spec.ts, *.test.tsx, *.spec.tsx
+        if name_lower.ends_with(".test.ts")
+            || name_lower.ends_with(".spec.ts")
+            || name_lower.ends_with(".test.tsx")
+            || name_lower.ends_with(".spec.tsx")
+            || name_lower.ends_with(".test.js")
+            || name_lower.ends_with(".spec.js")
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Result of running ingestion on a repository
@@ -268,16 +320,21 @@ pub struct IngestionResult {
     pub module_doc_chunks: Vec<ModuleDocChunk>,
 }
 
+/// Type aliases for ingestion side-channels.
+pub type CallsMap = HashMap<String, Vec<String>>;
+pub type ImportsMap = HashMap<String, Vec<ImportInfo>>;
+
 /// This orchestrates the flow from Disk -> Parser -> Data.
 /// `project_name_override`: if Some, all chunks get this project name.
 /// If None, project name is inferred from directory structure.
 ///
-/// Returns `(IngestionResult, calls_map)` where `calls_map` is an ephemeral
-/// side-channel mapping `chunk_id → call identifiers` for embedding enrichment.
+/// Returns `(IngestionResult, calls_map, imports_map)` where:
+/// - `calls_map` maps `chunk_id → call identifiers` (for embedding enrichment)
+/// - `imports_map` maps `file_path → imports` (for C1 edge resolution)
 pub fn run_ingestion(
     repo_path: &str,
     project_name_override: Option<&str>,
-) -> (IngestionResult, HashMap<String, Vec<String>>) {
+) -> (IngestionResult, CallsMap, ImportsMap) {
     let repo_root = PathBuf::from(repo_path);
     let mut analyzer = CodeAnalyzer::new();
 
@@ -295,14 +352,19 @@ pub fn run_ingestion(
         .filter_map(|e| process_readme(e, &repo_root, project_name_override))
         .collect();
 
-    type CallsMap = HashMap<String, Vec<String>>;
-    let (chunk_vecs, call_maps): (Vec<Vec<CodeChunk>>, Vec<CallsMap>) = entries
-        .iter()
-        .map(|e| process_code_file(e, &repo_root, &mut analyzer, project_name_override))
-        .unzip();
+    let mut all_chunks: Vec<CodeChunk> = Vec::new();
+    let mut all_calls: CallsMap = HashMap::new();
+    let mut all_imports: ImportsMap = HashMap::new();
 
-    let code_chunks: Vec<CodeChunk> = chunk_vecs.into_iter().flatten().collect();
-    let all_calls: CallsMap = call_maps.into_iter().flatten().collect();
+    for e in &entries {
+        let (chunks, calls, file_imports) =
+            process_code_file(e, &repo_root, &mut analyzer, project_name_override);
+        all_chunks.extend(chunks);
+        all_calls.extend(calls);
+        if let Some((path, imports)) = file_imports {
+            all_imports.insert(path, imports);
+        }
+    }
 
     let crate_chunks: Vec<CrateChunk> = entries
         .iter()
@@ -318,12 +380,13 @@ pub fn run_ingestion(
 
     (
         IngestionResult {
-            code_chunks,
+            code_chunks: all_chunks,
             readme_chunks,
             crate_chunks,
             module_doc_chunks,
         },
         all_calls,
+        all_imports,
     )
 }
 
@@ -411,7 +474,7 @@ mod tests {
         let temp_dir = create_test_workspace();
         let path = temp_dir.path().to_str().unwrap();
 
-        let (result, _calls_map) = run_ingestion(path, None);
+        let (result, _calls_map, _imports_map) = run_ingestion(path, None);
 
         // Should find 2 code files (main.py and lib.rs)
         assert_eq!(result.code_chunks.len(), 2);
@@ -478,7 +541,7 @@ mod tests {
             .unwrap();
 
         let mut analyzer = CodeAnalyzer::new();
-        let (chunks, _calls_map) = process_code_file(&entry, base, &mut analyzer, None);
+        let (chunks, _calls_map, _imports) = process_code_file(&entry, base, &mut analyzer, None);
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].file_path, "myproj/code.py");
@@ -537,7 +600,7 @@ mod tests {
         .unwrap();
 
         let path = base.to_str().unwrap();
-        let (result, _calls_map) = run_ingestion(path, None);
+        let (result, _calls_map, _imports_map) = run_ingestion(path, None);
 
         // All three files should produce chunks
         assert!(
@@ -573,7 +636,7 @@ mod tests {
         let temp_dir = create_test_workspace();
         let path = temp_dir.path().to_str().unwrap();
 
-        let (result, _calls_map) = run_ingestion(path, Some("my-app"));
+        let (result, _calls_map, _imports_map) = run_ingestion(path, Some("my-app"));
 
         // All chunks should have the override name
         assert!(

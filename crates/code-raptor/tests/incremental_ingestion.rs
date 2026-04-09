@@ -77,7 +77,7 @@ fn roundtrip_no_changes() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
     assert!(
         !result.code_chunks.is_empty(),
         "sanity: should parse some code"
@@ -86,7 +86,7 @@ fn roundtrip_no_changes() {
     let existing = simulate_stored_index(&result);
 
     // Re-ingest same files — nothing changed
-    let (result2, _) = run_ingestion(path, None);
+    let (result2, _, _) = run_ingestion(path, None);
     let diff = reconcile(&result2, &existing);
 
     assert_eq!(diff.stats.chunks_to_insert, 0);
@@ -106,7 +106,7 @@ fn detects_modified_file() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
     let existing = simulate_stored_index(&result);
 
     // Modify project1/main.py (adds a new function)
@@ -116,7 +116,7 @@ fn detects_modified_file() {
     )
     .unwrap();
 
-    let (result2, _) = run_ingestion(path, None);
+    let (result2, _, _) = run_ingestion(path, None);
     let diff = reconcile(&result2, &existing);
 
     // The modified file should show as changed
@@ -155,7 +155,7 @@ fn detects_deleted_file() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
     let existing = simulate_stored_index(&result);
 
     // Count how many chunks came from project2/lib.rs
@@ -170,7 +170,7 @@ fn detects_deleted_file() {
     // Delete the file
     fs::remove_file(workspace.path().join("project2/lib.rs")).unwrap();
 
-    let (result2, _) = run_ingestion(path, None);
+    let (result2, _, _) = run_ingestion(path, None);
     let diff = reconcile(&result2, &existing);
 
     assert!(diff.stats.files_deleted >= 1);
@@ -200,7 +200,7 @@ fn detects_new_file() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
     let existing = simulate_stored_index(&result);
 
     // Add a new file
@@ -210,7 +210,7 @@ fn detects_new_file() {
     )
     .unwrap();
 
-    let (result2, _) = run_ingestion(path, None);
+    let (result2, _, _) = run_ingestion(path, None);
     let diff = reconcile(&result2, &existing);
 
     assert!(diff.stats.files_new >= 1);
@@ -234,7 +234,7 @@ fn mixed_changes() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
     let existing = simulate_stored_index(&result);
 
     // Modify project1/main.py
@@ -254,7 +254,7 @@ fn mixed_changes() {
     )
     .unwrap();
 
-    let (result2, _) = run_ingestion(path, None);
+    let (result2, _, _) = run_ingestion(path, None);
     let diff = reconcile(&result2, &existing);
 
     assert!(diff.stats.files_changed >= 1, "main.py was modified");
@@ -276,7 +276,7 @@ fn project_name_override_stable_reconcile() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, Some("my-portfolio"));
+    let (result, _, _) = run_ingestion(path, Some("my-portfolio"));
 
     // All chunks should have the override name
     assert!(
@@ -294,7 +294,7 @@ fn project_name_override_stable_reconcile() {
 
     // Reconcile should show no changes
     let existing = simulate_stored_index(&result);
-    let (result2, _) = run_ingestion(path, Some("my-portfolio"));
+    let (result2, _, _) = run_ingestion(path, Some("my-portfolio"));
     let diff = reconcile(&result2, &existing);
 
     assert_eq!(diff.stats.chunks_to_insert, 0);
@@ -310,7 +310,7 @@ fn paths_normalized() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
 
     for chunk in &result.code_chunks {
         assert!(
@@ -343,7 +343,7 @@ fn file_level_content_hash() {
     .unwrap();
 
     let path = base.to_str().unwrap();
-    let (result, _) = run_ingestion(path, None);
+    let (result, _, _) = run_ingestion(path, None);
 
     let multi_chunks: Vec<_> = result
         .code_chunks
@@ -373,8 +373,8 @@ fn deterministic_ids_stable_across_runs() {
     let workspace = create_workspace();
     let path = workspace.path().to_str().unwrap();
 
-    let (result1, _) = run_ingestion(path, None);
-    let (result2, _) = run_ingestion(path, None);
+    let (result1, _, _) = run_ingestion(path, None);
+    let (result2, _, _) = run_ingestion(path, None);
 
     // Same number of chunks
     assert_eq!(result1.code_chunks.len(), result2.code_chunks.len());

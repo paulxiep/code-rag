@@ -2,7 +2,7 @@
 
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt64Array};
 use code_rag_store::build_searchable_text;
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, ModuleDocChunk, ReadmeChunk};
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use serde::Serialize;
@@ -71,6 +71,9 @@ pub struct ExportIndex {
     pub crate_idf: Option<IdfTable>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_doc_idf: Option<IdfTable>,
+    /// C1: Call graph edges for browser-side graph traversal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_edges: Vec<ExportEdge>,
 }
 
 #[derive(Serialize)]
@@ -129,14 +132,20 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
     let readme_idf = Some(IdfTable::build(
         readme_chunks.iter().map(|ec| ec.chunk.content.clone()),
     ));
-    let crate_idf = Some(IdfTable::build(crate_chunks.iter().filter_map(|ec| {
-        ec.chunk.description.clone()
-    })));
+    let crate_idf = Some(IdfTable::build(
+        crate_chunks
+            .iter()
+            .filter_map(|ec| ec.chunk.description.clone()),
+    ));
     let module_doc_idf = Some(IdfTable::build(
         module_doc_chunks
             .iter()
             .map(|ec| ec.chunk.doc_content.clone()),
     ));
+
+    // C1: Export call edges for browser-side graph traversal
+    let call_edges = export_call_edges(&conn).await.unwrap_or_default();
+    info!("Exported {} call edges", call_edges.len());
 
     let index = ExportIndex {
         code_chunks,
@@ -149,6 +158,7 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         readme_idf,
         crate_idf,
         module_doc_idf,
+        call_edges,
     };
 
     if let Some(parent) = std::path::Path::new(output_path).parent() {
@@ -444,6 +454,32 @@ async fn export_module_doc_chunks(
                 chunk,
                 embedding: get_embedding(batch, i),
                 signature_embedding: None,
+            });
+        }
+    }
+    Ok(result)
+}
+
+/// C1: Export call edges as compact ExportEdge structs.
+async fn export_call_edges(conn: &lancedb::Connection) -> anyhow::Result<Vec<ExportEdge>> {
+    let batches = match query_all(conn, "call_edges").await {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()), // Table doesn't exist yet
+    };
+
+    let mut result = Vec::new();
+    for batch in &batches {
+        let caller_ids = str_col(batch, "caller_chunk_id")?;
+        let callee_ids = str_col(batch, "callee_chunk_id")?;
+        let tiers = batch
+            .column_by_name("resolution_tier")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::UInt8Array>());
+
+        for i in 0..batch.num_rows() {
+            result.push(ExportEdge {
+                caller: caller_ids.value(i).to_string(),
+                callee: callee_ids.value(i).to_string(),
+                tier: tiers.map(|t| t.value(i)).unwrap_or(3),
             });
         }
     }

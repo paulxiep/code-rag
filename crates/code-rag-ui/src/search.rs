@@ -79,11 +79,7 @@ pub fn search_code_arm(
     };
 
     let sig_vec = if use_sig_vec {
-        Some(top_k_signature(
-            query_embedding,
-            &index.code_chunks,
-            limit,
-        ))
+        Some(top_k_signature(query_embedding, &index.code_chunks, limit))
     } else {
         None
     };
@@ -112,6 +108,7 @@ pub fn search_code_arm(
 ///
 /// This helper handles README / Crate / ModuleDoc tables uniformly. The CODE
 /// table is handled by `search_code_arm` because it has an extra sig-vec arm.
+#[allow(clippy::type_complexity)]
 pub fn hybrid_search_non_code(
     query: &str,
     query_embedding: &[f32],
@@ -178,6 +175,7 @@ pub fn hybrid_search_non_code(
 }
 
 /// Brute-force vector search for non-code chunk types.
+#[allow(clippy::type_complexity)]
 pub fn brute_force_non_code(
     query_embedding: &[f32],
     index: &ChunkIndex,

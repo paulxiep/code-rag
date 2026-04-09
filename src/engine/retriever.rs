@@ -6,6 +6,7 @@ use code_rag_engine::config::{
     DualEmbeddingConfig, HybridConfig, RerankConfig, RetrievalConfig, fetch_limits,
 };
 use code_rag_engine::fusion::rrf_fuse;
+use code_rag_engine::graph;
 use code_rag_engine::intent::{QueryIntent, arm_policy};
 use code_rag_engine::retriever::{
     RerankText, ScoredChunk, sigmoid, to_scored, to_scored_relevance,
@@ -27,7 +28,9 @@ async fn fetch_code_arm(
     // Body arm: either hybrid (body-vec + BM25 fused inside LanceDB) or pure body-vec.
     // Normalize to higher=better relevance scores.
     let body: Vec<(code_rag_types::CodeChunk, f32)> = if use_hybrid {
-        store.hybrid_search_code(query, query_embedding, limit).await?
+        store
+            .hybrid_search_code(query, query_embedding, limit)
+            .await?
     } else {
         store
             .search_code(query_embedding, limit)
@@ -50,9 +53,109 @@ async fn fetch_code_arm(
         .collect();
 
     // App-level RRF fusion. rrf_fuse ignores the input scores and fuses by rank.
-    Ok(rrf_fuse(&[body, sig], 60, |c: &code_rag_types::CodeChunk| {
-        c.chunk_id.as_str()
-    }))
+    Ok(rrf_fuse(
+        &[body, sig],
+        60,
+        |c: &code_rag_types::CodeChunk| c.chunk_id.as_str(),
+    ))
+}
+
+/// C1: Augment code search results with graph-resolved chunks for Relationship intent.
+/// Uses shared `graph::graph_augment` and `graph::merge_graph_chunks` from code-rag-engine.
+async fn augment_with_graph(
+    query: &str,
+    code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    store: &VectorStore,
+) -> Vec<ScoredChunk<code_rag_types::CodeChunk>> {
+    // Extract top-5 candidates as (chunk_id, identifier) pairs
+    let candidates: Vec<(String, String)> = code_scored
+        .iter()
+        .take(5)
+        .map(|sc| (sc.chunk.chunk_id.clone(), sc.chunk.identifier.clone()))
+        .collect();
+
+    if candidates.is_empty() {
+        return code_scored;
+    }
+
+    // Infer project from top-1 result
+    let project = &code_scored[0].chunk.project_name;
+
+    // Load all edges for this project and build CallGraph
+    let edges = match store.get_all_edges(project).await {
+        Ok(e) => e,
+        Err(_) => return code_scored,
+    };
+
+    if edges.is_empty() {
+        return code_scored;
+    }
+
+    // Build a tier lookup for scoring
+    let tier_by_edge: std::collections::HashMap<(String, String), u8> = edges
+        .iter()
+        .map(|e| {
+            (
+                (e.caller_chunk_id.clone(), e.callee_chunk_id.clone()),
+                e.resolution_tier,
+            )
+        })
+        .collect();
+
+    // Build identifier → chunk_id pairs from edges for graph target lookup
+    let id_pairs: Vec<(String, String)> = edges
+        .iter()
+        .flat_map(|e| {
+            vec![
+                (e.caller_identifier.clone(), e.caller_chunk_id.clone()),
+                (e.callee_identifier.clone(), e.callee_chunk_id.clone()),
+            ]
+        })
+        .collect();
+
+    let mut call_graph = graph::CallGraph::from_edges(
+        edges
+            .into_iter()
+            .map(|e| (e.caller_chunk_id, e.callee_chunk_id)),
+    );
+    call_graph.register_identifiers(id_pairs);
+
+    // Run shared graph augmentation logic
+    let augment_result = match graph::graph_augment(query, &candidates, &call_graph) {
+        Some(r) => r,
+        None => return code_scored,
+    };
+
+    // Fetch full CodeChunks for graph-resolved IDs
+    let graph_chunks = match store
+        .get_chunks_by_ids(&augment_result.resolved_chunk_ids)
+        .await
+    {
+        Ok(chunks) => chunks,
+        Err(_) => return code_scored,
+    };
+
+    // Wrap as ScoredChunks with tier-based scores
+    let graph_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>> = graph_chunks
+        .into_iter()
+        .map(|chunk| {
+            // Look up tier from the edge that resolved this chunk
+            let tier = tier_by_edge
+                .iter()
+                .find(|((caller, callee), _)| {
+                    *caller == chunk.chunk_id || *callee == chunk.chunk_id
+                })
+                .map(|(_, &t)| t)
+                .unwrap_or(3);
+            ScoredChunk {
+                chunk,
+                score: graph::tier_score(tier),
+            }
+        })
+        .collect();
+
+    // Merge using shared dedup logic
+    graph::merge_graph_chunks(code_scored, graph_scored)
 }
 
 /// Rerank a vec of scored chunks using the cross-encoder.
@@ -142,28 +245,34 @@ pub async fn retrieve(
     };
 
     // Code arm is orchestrated at the app level to support dual-vector fusion.
-    let code_raw =
-        fetch_code_arm(
-            store,
-            query,
-            query_embedding,
-            fetch_config.code_limit,
-            use_hybrid,
-            use_sig_vec,
-        )
-        .await?;
+    let code_raw = fetch_code_arm(
+        store,
+        query,
+        query_embedding,
+        fetch_config.code_limit,
+        use_hybrid,
+        use_sig_vec,
+    )
+    .await?;
     let code_scored = to_scored_relevance(code_raw);
+
+    // C1: Graph augmentation for Relationship intent. Also fires on Implementation
+    // because intent classifier has 44% accuracy on Relationship — most relationship
+    // queries arrive misclassified as Implementation. graph_augment returns None
+    // quickly when no target term is found or no edges match.
+    let code_scored =
+        if intent == QueryIntent::Relationship || intent == QueryIntent::Implementation {
+            augment_with_graph(query, code_scored, store).await
+        } else {
+            code_scored
+        };
 
     // Non-code tables are untouched by B5 — they follow the hybrid toggle only.
     let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
         let (readme_raw, crate_raw, module_doc_raw) = tokio::try_join!(
             store.hybrid_search_readme(query, query_embedding, fetch_config.readme_limit),
             store.hybrid_search_crates(query, query_embedding, fetch_config.crate_limit),
-            store.hybrid_search_module_docs(
-                query,
-                query_embedding,
-                fetch_config.module_doc_limit
-            ),
+            store.hybrid_search_module_docs(query, query_embedding, fetch_config.module_doc_limit),
         )?;
         (
             to_scored_relevance(readme_raw),
@@ -213,16 +322,8 @@ pub async fn retrieve(
                     .await?;
                     let (readme_raw, crate_raw, module_doc_raw, code_chunks) = if use_hybrid {
                         let (r, cr, m) = tokio::try_join!(
-                            store.hybrid_search_readme(
-                                query,
-                                query_embedding,
-                                config.readme_limit
-                            ),
-                            store.hybrid_search_crates(
-                                query,
-                                query_embedding,
-                                config.crate_limit
-                            ),
+                            store.hybrid_search_readme(query, query_embedding, config.readme_limit),
+                            store.hybrid_search_crates(query, query_embedding, config.crate_limit),
                             store.hybrid_search_module_docs(
                                 query,
                                 query_embedding,

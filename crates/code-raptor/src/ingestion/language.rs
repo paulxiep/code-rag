@@ -1,5 +1,15 @@
 use tree_sitter::{Language, Node};
 
+/// An import found in a source file. Used for tier-2 (import-based) edge resolution.
+/// Local to code-raptor; not stored in LanceDB.
+#[derive(Debug, Clone)]
+pub struct ImportInfo {
+    /// The imported symbol name, e.g. "normalize_path"
+    pub imported_name: String,
+    /// The source module path, e.g. "crate::ingestion::mod" or "./utils"
+    pub source_path: String,
+}
+
 /// Trait for language-specific parsing behavior.
 ///
 /// Implement this trait to add support for a new programming language.
@@ -39,6 +49,20 @@ pub trait LanguageHandler: Send + Sync {
     /// Walks the AST subtree of the body node to find call expressions.
     /// Returns deduplicated, sorted identifiers. Default returns empty vec.
     fn extract_calls(&self, _source: &str, _node: &Node, _source_bytes: &[u8]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Extract import declarations from the file's root AST node (C1).
+    ///
+    /// Returns imported symbol names with their source module paths.
+    /// Used for tier-2 (import-based) call edge resolution.
+    /// Default returns empty vec.
+    fn extract_file_imports(
+        &self,
+        _source: &str,
+        _root: &Node,
+        _source_bytes: &[u8],
+    ) -> Vec<ImportInfo> {
         Vec::new()
     }
 

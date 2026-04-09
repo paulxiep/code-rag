@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use code_rag_engine::config::{RerankConfig, fetch_limits};
 use code_rag_engine::context;
+use code_rag_engine::graph;
 use code_rag_engine::intent::{
     self, ClassificationResult, IntentClassifier, QueryIntent, RoutingTable, arm_policy,
 };
@@ -145,6 +146,17 @@ async fn run_retrieval(
     } else {
         retriever::to_scored(code_raw)
     };
+
+    // C1: Graph augmentation for Relationship + Implementation intents
+    let code_scored = if !index.call_edges.is_empty()
+        && (classification.intent == QueryIntent::Relationship
+            || classification.intent == QueryIntent::Implementation)
+    {
+        augment_with_graph_wasm(query, code_scored, index)
+    } else {
+        code_scored
+    };
+
     let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
         (
             retriever::to_scored_relevance(readme_raw),
@@ -225,6 +237,70 @@ async fn run_retrieval(
     };
 
     (result, classification)
+}
+
+/// C1: Graph augmentation for Relationship intent (WASM path).
+/// Uses the same shared `graph::graph_augment` and `graph::merge_graph_chunks` as the server.
+fn augment_with_graph_wasm(
+    query: &str,
+    code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    index: &ChunkIndex,
+) -> Vec<ScoredChunk<code_rag_types::CodeChunk>> {
+    // Extract top-5 candidates
+    let candidates: Vec<(String, String)> = code_scored
+        .iter()
+        .take(5)
+        .map(|sc| (sc.chunk.chunk_id.clone(), sc.chunk.identifier.clone()))
+        .collect();
+
+    if candidates.is_empty() {
+        return code_scored;
+    }
+
+    // Build CallGraph from ExportEdge data + register identifiers from chunk index
+    let mut call_graph = graph::CallGraph::from_edges(
+        index
+            .call_edges
+            .iter()
+            .map(|e| (e.caller.clone(), e.callee.clone())),
+    );
+    // Register identifier → chunk_id pairs from all code chunks that appear in edges
+    call_graph.register_identifiers(
+        index
+            .code_chunks
+            .iter()
+            .map(|ec| (ec.chunk.identifier.clone(), ec.chunk.chunk_id.clone())),
+    );
+
+    // Run shared graph augmentation logic (same as server)
+    let augment_result = match graph::graph_augment(query, &candidates, &call_graph) {
+        Some(r) => r,
+        None => return code_scored,
+    };
+
+    // Look up full chunks via chunk_id index (WASM-specific: in-memory lookup)
+    let graph_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>> = augment_result
+        .resolved_chunk_ids
+        .iter()
+        .filter_map(|cid| {
+            let idx = index.chunk_id_index.get(cid)?;
+            let ec = index.code_chunks.get(*idx)?;
+            // Find the tier for this edge
+            let tier = index
+                .call_edges
+                .iter()
+                .find(|e| e.caller == *cid || e.callee == *cid)
+                .map(|e| e.tier)
+                .unwrap_or(3);
+            Some(ScoredChunk {
+                chunk: ec.chunk.clone(),
+                score: graph::tier_score(tier),
+            })
+        })
+        .collect();
+
+    // Merge using shared dedup logic (same as server)
+    graph::merge_graph_chunks(code_scored, graph_scored)
 }
 
 async fn rerank_chunks<T: RerankText + Clone>(

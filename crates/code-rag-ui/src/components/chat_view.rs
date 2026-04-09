@@ -95,8 +95,8 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
         }
     };
 
-    let on_submit_click = on_submit.clone();
-    let on_submit_key = on_submit.clone();
+    let on_submit_click = on_submit;
+    let on_submit_key = on_submit;
 
     view! {
         <div class="chat-container">

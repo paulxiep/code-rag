@@ -1,4 +1,4 @@
-use super::super::language::LanguageHandler;
+use super::super::language::{ImportInfo, LanguageHandler};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct PythonHandler;
@@ -48,12 +48,7 @@ impl LanguageHandler for PythonHandler {
         calls
     }
 
-    fn extract_signature(
-        &self,
-        source: &str,
-        node: &Node,
-        _source_bytes: &[u8],
-    ) -> Option<String> {
+    fn extract_signature(&self, source: &str, node: &Node, _source_bytes: &[u8]) -> Option<String> {
         match node.kind() {
             "function_definition" | "class_definition" => {
                 let body = node.child_by_field_name("body")?;
@@ -69,6 +64,48 @@ impl LanguageHandler for PythonHandler {
             }
             _ => None,
         }
+    }
+
+    fn extract_file_imports(
+        &self,
+        _source: &str,
+        root: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<ImportInfo> {
+        let mut imports = Vec::new();
+        let mut cursor = root.walk();
+
+        for child in root.children(&mut cursor) {
+            if child.kind() == "import_from_statement" {
+                // `from foo.bar import baz, qux`
+                let module_name = child
+                    .child_by_field_name("module_name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+
+                let module_end = child
+                    .child_by_field_name("module_name")
+                    .map(|n| n.end_byte())
+                    .unwrap_or(0);
+
+                let mut name_cursor = child.walk();
+                for name_child in child.children(&mut name_cursor) {
+                    if (name_child.kind() == "dotted_name" || name_child.kind() == "identifier")
+                        && name_child.start_byte() > module_end
+                        && let Ok(name) = name_child.utf8_text(source_bytes)
+                    {
+                        // For dotted_name like `bar.baz`, take the last part
+                        let imported = name.rsplit('.').next().unwrap_or(name);
+                        imports.push(ImportInfo {
+                            imported_name: imported.to_string(),
+                            source_path: module_name.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        imports
     }
 }
 
@@ -309,6 +346,39 @@ mod tests {
     fn test_python_extract_calls_dedup() {
         let calls = extract_calls_from("def foo():\n    bar()\n    bar()");
         assert_eq!(calls, vec!["bar"]);
+    }
+
+    // C1: Import extraction tests
+
+    fn extract_imports_from(source: &str) -> Vec<ImportInfo> {
+        let handler = PythonHandler;
+        let mut parser = tree_sitter::Parser::new();
+        let grammar = handler.grammar();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        handler.extract_file_imports(source, &tree.root_node(), source.as_bytes())
+    }
+
+    #[test]
+    fn test_python_import_from() {
+        let imports = extract_imports_from("from utils import normalize_path\ndef foo(): pass");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].imported_name, "normalize_path");
+        assert_eq!(imports[0].source_path, "utils");
+    }
+
+    #[test]
+    fn test_python_import_from_multiple() {
+        let imports = extract_imports_from("from os.path import join, dirname\ndef foo(): pass");
+        assert_eq!(imports.len(), 2);
+        assert!(imports.iter().any(|i| i.imported_name == "join"));
+        assert!(imports.iter().any(|i| i.imported_name == "dirname"));
+    }
+
+    #[test]
+    fn test_python_no_imports() {
+        let imports = extract_imports_from("def foo():\n    pass");
+        assert!(imports.is_empty());
     }
 
     #[test]
