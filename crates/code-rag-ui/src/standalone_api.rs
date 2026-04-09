@@ -134,108 +134,95 @@ async fn run_retrieval(
     // augmented sub-queries can never pull chunks from a sibling project (the
     // demo bundle is multi-project; cross-project comparisons are nonsense).
     // Falls through to the standard single-arm path when extraction fails.
-    let comparison_fused: Option<Vec<(code_rag_types::CodeChunk, f32)>> =
-        if classification.intent == QueryIntent::Comparison {
-            let comparators = intent::extract_comparators(query);
-            if comparators.len() >= 2 {
-                // 1. Original-query search — establishes target project AND
-                //    contributes its own ranking to the fused result.
-                // SOTA NOTE: see server retriever for the empirical record on
-                // bare-comparator + BM25 sub-searches. Both regressed on this
-                // BGE-small + multi-project corpus; sticking with body-vec-only
-                // sub-searches.
-                let (original_hits, _) =
-                    search::search_code_arm(query, query_embedding, index, 12, false, false);
-                // Vote-based project detection across the top-5 of the
-                // original results: top-1 alone is too brittle when the query
-                // matches a comparison-shaped function in an unrelated project.
-                let target_project: Option<String> = {
-                    let mut counts: std::collections::HashMap<&str, usize> =
-                        std::collections::HashMap::new();
-                    for (c, _) in original_hits.iter().take(5) {
-                        *counts.entry(c.project_name.as_str()).or_insert(0) += 1;
-                    }
-                    counts
-                        .into_iter()
-                        .max_by_key(|(_, n)| *n)
-                        .map(|(p, _)| p.to_string())
-                };
-
-                // 2. Per-comparator: await embed_query, then sync search.
-                let mut lists: Vec<Vec<(code_rag_types::CodeChunk, f32)>> =
-                    Vec::with_capacity(comparators.len() + 1);
-                for comp in &comparators {
-                    // Concatenated augmentation `{comparator} {original query}`
-                    // — bare comparators embed poorly with BGE-small. Keep
-                    // the full query as context and let the leading
-                    // comparator token steer the embedding.
-                    let sub_query = format!("{} {}", comp, query);
-                    let emb = match embed_query(&sub_query).await {
-                        Ok(e) if !e.is_empty() => e,
-                        _ => continue,
-                    };
-                    let (raw, _is_rel) = search::search_code_arm(
-                        &sub_query,
-                        &emb,
-                        index,
-                        12,
-                        false,
-                        false,
-                    );
-                    let filtered: Vec<_> = raw
-                        .into_iter()
-                        .filter(|(c, _)| {
-                            target_project
-                                .as_ref()
-                                .is_none_or(|p| &c.project_name == p)
-                        })
-                        .take(8)
-                        .collect();
-                    lists.push(filtered);
+    let comparison_fused: Option<Vec<(code_rag_types::CodeChunk, f32)>> = if classification.intent
+        == QueryIntent::Comparison
+    {
+        let comparators = intent::extract_comparators(query);
+        if comparators.len() >= 2 {
+            // 1. Original-query search — establishes target project AND
+            //    contributes its own ranking to the fused result.
+            // SOTA NOTE: see server retriever for the empirical record on
+            // bare-comparator + BM25 sub-searches. Both regressed on this
+            // BGE-small + multi-project corpus; sticking with body-vec-only
+            // sub-searches.
+            let (original_hits, _) =
+                search::search_code_arm(query, query_embedding, index, 12, false, false);
+            // Vote-based project detection across the top-5 of the
+            // original results: top-1 alone is too brittle when the query
+            // matches a comparison-shaped function in an unrelated project.
+            let target_project: Option<String> = {
+                let mut counts: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for (c, _) in original_hits.iter().take(5) {
+                    *counts.entry(c.project_name.as_str()).or_insert(0) += 1;
                 }
-                let original_filtered: Vec<_> = original_hits
+                counts
                     .into_iter()
-                    .filter(|(c, _)| {
-                        target_project
-                            .as_ref()
-                            .is_none_or(|p| &c.project_name == p)
-                    })
+                    .max_by_key(|(_, n)| *n)
+                    .map(|(p, _)| p.to_string())
+            };
+
+            // 2. Per-comparator: await embed_query, then sync search.
+            let mut lists: Vec<Vec<(code_rag_types::CodeChunk, f32)>> =
+                Vec::with_capacity(comparators.len() + 1);
+            for comp in &comparators {
+                // Concatenated augmentation `{comparator} {original query}`
+                // — bare comparators embed poorly with BGE-small. Keep
+                // the full query as context and let the leading
+                // comparator token steer the embedding.
+                let sub_query = format!("{} {}", comp, query);
+                let emb = match embed_query(&sub_query).await {
+                    Ok(e) if !e.is_empty() => e,
+                    _ => continue,
+                };
+                let (raw, _is_rel) =
+                    search::search_code_arm(&sub_query, &emb, index, 12, false, false);
+                let filtered: Vec<_> = raw
+                    .into_iter()
+                    .filter(|(c, _)| target_project.as_ref().is_none_or(|p| &c.project_name == p))
                     .take(8)
                     .collect();
-                lists.push(original_filtered);
+                lists.push(filtered);
+            }
+            let original_filtered: Vec<_> = original_hits
+                .into_iter()
+                .filter(|(c, _)| target_project.as_ref().is_none_or(|p| &c.project_name == p))
+                .take(8)
+                .collect();
+            lists.push(original_filtered);
 
-                // Build a max-score lookup from the natural per-list scores,
-                // then assign each fused survivor its best natural score so
-                // the global flatten/sort across code+readme+crate+module_doc
-                // remains score-comparable. RRF decides ordering; max-of-
-                // natural keeps the magnitude in the same range as the
-                // distance-converted non-code arms. See server retriever for
-                // the full rationale.
-                let mut max_score: std::collections::HashMap<String, f32> =
-                    std::collections::HashMap::new();
-                for list in &lists {
-                    for (c, s) in list {
-                        let entry = max_score.entry(c.chunk_id.clone()).or_insert(f32::MIN);
-                        if *s > *entry {
-                            *entry = *s;
-                        }
+            // Build a max-score lookup from the natural per-list scores,
+            // then assign each fused survivor its best natural score so
+            // the global flatten/sort across code+readme+crate+module_doc
+            // remains score-comparable. RRF decides ordering; max-of-
+            // natural keeps the magnitude in the same range as the
+            // distance-converted non-code arms. See server retriever for
+            // the full rationale.
+            let mut max_score: std::collections::HashMap<String, f32> =
+                std::collections::HashMap::new();
+            for list in &lists {
+                for (c, s) in list {
+                    let entry = max_score.entry(c.chunk_id.clone()).or_insert(f32::MIN);
+                    if *s > *entry {
+                        *entry = *s;
                     }
                 }
-                let fused = fuse_comparator_lists(lists, final_config.code_limit);
-                let rescored: Vec<(code_rag_types::CodeChunk, f32)> = fused
-                    .into_iter()
-                    .map(|(c, _rrf)| {
-                        let s = max_score.get(&c.chunk_id).copied().unwrap_or(0.5);
-                        (c, s)
-                    })
-                    .collect();
-                Some(rescored)
-            } else {
-                None
             }
+            let fused = fuse_comparator_lists(lists, final_config.code_limit);
+            let rescored: Vec<(code_rag_types::CodeChunk, f32)> = fused
+                .into_iter()
+                .map(|(c, _rrf)| {
+                    let s = max_score.get(&c.chunk_id).copied().unwrap_or(0.5);
+                    (c, s)
+                })
+                .collect();
+            Some(rescored)
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let (code_raw, code_is_relevance) = if let Some(fused) = comparison_fused.as_ref() {
         // Synthetic rank-based scores (higher = better) — caller must use
@@ -251,11 +238,13 @@ async fn run_retrieval(
             use_sig_vec,
         )
     };
-    let (readme_raw, crate_raw, module_doc_raw) = if use_hybrid {
+    let non_code = if use_hybrid {
         search::hybrid_search_non_code(query, query_embedding, index, &search_config)
     } else {
         search::brute_force_non_code(query_embedding, index, &search_config)
     };
+    let (readme_raw, crate_raw, module_doc_raw) =
+        (non_code.readme, non_code.crates, non_code.module_docs);
 
     // Normalize all four arms to ScoredChunk. Code uses relevance or distance
     // based on whether fusion happened; non-code uses relevance (hybrid) or
@@ -300,8 +289,7 @@ async fn run_retrieval(
     // chunks. The reranker never had authority over structural hits, so
     // they cannot be demoted. Matches Cody/LocAgent/GraphCoder routing.
     let direction = graph::detect_direction(query);
-    let explicit_structural =
-        !graph_ids.is_empty() && direction != graph::GraphDirection::Both;
+    let explicit_structural = !graph_ids.is_empty() && direction != graph::GraphDirection::Both;
 
     let (graph_reserved, code_for_rerank): (
         Vec<ScoredChunk<code_rag_types::CodeChunk>>,
@@ -335,18 +323,14 @@ async fn run_retrieval(
     };
 
     let mut result = if should_rerank {
-        match rerank_all(
-            query,
-            code_for_rerank.clone(),
-            readme_scored.clone(),
-            crate_scored.clone(),
-            module_doc_scored.clone(),
-            &final_config,
-            classification.intent,
-            code_keep_override,
-        )
-        .await
-        {
+        let bundle = RetrievalResult {
+            code_chunks: code_for_rerank.clone(),
+            readme_chunks: readme_scored.clone(),
+            crate_chunks: crate_scored.clone(),
+            module_doc_chunks: module_doc_scored.clone(),
+            intent: classification.intent,
+        };
+        match rerank_all(query, bundle, &final_config, code_keep_override).await {
             Ok(result) => result,
             Err(e) => {
                 web_sys::console::warn_1(
@@ -361,7 +345,7 @@ async fn run_retrieval(
                     use_hybrid,
                     use_sig_vec,
                 );
-                let (r, cr, m) = if use_hybrid {
+                let nc = if use_hybrid {
                     search::hybrid_search_non_code(query, query_embedding, index, &final_config)
                 } else {
                     search::brute_force_non_code(query_embedding, index, &final_config)
@@ -374,17 +358,17 @@ async fn run_retrieval(
                 if use_hybrid {
                     RetrievalResult {
                         code_chunks,
-                        readme_chunks: retriever::to_scored_relevance(r),
-                        crate_chunks: retriever::to_scored_relevance(cr),
-                        module_doc_chunks: retriever::to_scored_relevance(m),
+                        readme_chunks: retriever::to_scored_relevance(nc.readme),
+                        crate_chunks: retriever::to_scored_relevance(nc.crates),
+                        module_doc_chunks: retriever::to_scored_relevance(nc.module_docs),
                         intent: classification.intent,
                     }
                 } else {
                     RetrievalResult {
                         code_chunks,
-                        readme_chunks: retriever::to_scored(r),
-                        crate_chunks: retriever::to_scored(cr),
-                        module_doc_chunks: retriever::to_scored(m),
+                        readme_chunks: retriever::to_scored(nc.readme),
+                        crate_chunks: retriever::to_scored(nc.crates),
+                        module_doc_chunks: retriever::to_scored(nc.module_docs),
                         intent: classification.intent,
                     }
                 }
@@ -527,21 +511,18 @@ async fn rerank_chunks<T: RerankText + Clone>(
 
 async fn rerank_all(
     query: &str,
-    code: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
-    readme: Vec<ScoredChunk<code_rag_types::ReadmeChunk>>,
-    crates: Vec<ScoredChunk<code_rag_types::CrateChunk>>,
-    module_doc: Vec<ScoredChunk<code_rag_types::ModuleDocChunk>>,
+    bundle: RetrievalResult,
     config: &code_rag_engine::config::RetrievalConfig,
-    intent: QueryIntent,
     code_keep_override: Option<usize>,
 ) -> Result<RetrievalResult, String> {
     let code_limit = code_keep_override.unwrap_or(config.code_limit);
     Ok(RetrievalResult {
-        code_chunks: rerank_chunks(query, code, code_limit).await?,
-        readme_chunks: rerank_chunks(query, readme, config.readme_limit).await?,
-        crate_chunks: rerank_chunks(query, crates, config.crate_limit).await?,
-        module_doc_chunks: rerank_chunks(query, module_doc, config.module_doc_limit).await?,
-        intent,
+        code_chunks: rerank_chunks(query, bundle.code_chunks, code_limit).await?,
+        readme_chunks: rerank_chunks(query, bundle.readme_chunks, config.readme_limit).await?,
+        crate_chunks: rerank_chunks(query, bundle.crate_chunks, config.crate_limit).await?,
+        module_doc_chunks: rerank_chunks(query, bundle.module_doc_chunks, config.module_doc_limit)
+            .await?,
+        intent: bundle.intent,
     })
 }
 

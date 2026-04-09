@@ -40,16 +40,16 @@ pub async fn chat(
         None => None,
     };
     let result = retriever::retrieve(
-        query,
-        &query_embedding,
+        retriever::QueryContext {
+            query,
+            embedding: &query_embedding,
+            intent,
+        },
         &state.store,
         &mut embedder_guard,
         &retrieval_config,
-        &state.config.rerank,
-        &state.config.hybrid,
-        &state.config.dual_embedding,
+        &state.config,
         reranker_guard.as_deref_mut(),
-        intent,
     )
     .await?;
     drop(reranker_guard); // Release lock before LLM call

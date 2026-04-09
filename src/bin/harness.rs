@@ -162,8 +162,10 @@ async fn main() -> anyhow::Result<()> {
         reranker.as_mut(),
         &store,
         &config,
-        cli.ground_truth_intent,
-        cli.verbose,
+        runner::RunOptions {
+            ground_truth: cli.ground_truth_intent,
+            verbose: cli.verbose,
+        },
     )
     .await?;
 

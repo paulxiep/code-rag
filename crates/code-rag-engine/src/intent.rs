@@ -280,10 +280,10 @@ pub fn extract_comparators(query: &str) -> Vec<String> {
             let b = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let ca = canonicalize_comparator(a);
             let cb = canonicalize_comparator(b);
-            if let (Some(ca), Some(cb)) = (ca, cb) {
-                if ca != cb {
-                    return vec![ca, cb];
-                }
+            if let (Some(ca), Some(cb)) = (ca, cb)
+                && ca != cb
+            {
+                return vec![ca, cb];
             }
         }
     }

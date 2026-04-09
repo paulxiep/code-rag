@@ -173,34 +173,53 @@ fn process_module_docs(
     })
 }
 
+/// File-level imports keyed by file path; emitted by `process_code_file` so
+/// the caller can fold many files into a single `ImportsMap`.
+struct FileImports {
+    path: String,
+    imports: Vec<ImportInfo>,
+}
+
+/// Result of processing a single code file: extracted chunks, the call graph
+/// keyed by chunk_id, and (optionally) the file's imports for later edge
+/// resolution.
+struct ProcessedCodeFile {
+    chunks: Vec<CodeChunk>,
+    calls: CallsMap,
+    file_imports: Option<FileImports>,
+}
+
 /// Process a single code file.
-/// Returns (chunks, calls_map, file_imports) where calls_map is keyed by chunk_id
-/// and file_imports is the list of imports from this file (for edge resolution).
-#[allow(clippy::type_complexity)]
 fn process_code_file(
     entry: &DirEntry,
     repo_root: &Path,
     analyzer: &mut CodeAnalyzer,
     project_name_override: Option<&str>,
-) -> (Vec<CodeChunk>, CallsMap, Option<(String, Vec<ImportInfo>)>) {
+) -> ProcessedCodeFile {
+    let empty = || ProcessedCodeFile {
+        chunks: Vec::new(),
+        calls: HashMap::new(),
+        file_imports: None,
+    };
+
     // Skip files with unsupported extensions before reading (avoids UTF-8 errors on binary files)
     let handler = match handler_for_path(entry.path()) {
         Some(h) => h,
-        None => return (Vec::new(), HashMap::new(), None),
+        None => return empty(),
     };
 
     let content = match std::fs::read_to_string(entry.path()) {
         Ok(c) => c,
         Err(e) => {
             warn!(path = %entry.path().display(), error = %e, "Failed to read file");
-            return (Vec::new(), HashMap::new(), None);
+            return empty();
         }
     };
 
     let pairs = analyzer.analyze_file(entry.path(), &content);
 
     if pairs.is_empty() {
-        return (Vec::new(), HashMap::new(), None);
+        return empty();
     }
 
     let path_str = normalize_path(entry.path(), repo_root);
@@ -211,15 +230,16 @@ fn process_code_file(
     let file_imports = {
         let mut parser = tree_sitter::Parser::new();
         let grammar = handler.grammar();
-        if parser.set_language(&grammar).is_ok() {
-            if let Some(tree) = parser.parse(&content, None) {
-                let imports =
-                    handler.extract_file_imports(&content, &tree.root_node(), content.as_bytes());
-                if !imports.is_empty() {
-                    Some((path_str.clone(), imports))
-                } else {
-                    None
-                }
+        if parser.set_language(&grammar).is_ok()
+            && let Some(tree) = parser.parse(&content, None)
+        {
+            let imports =
+                handler.extract_file_imports(&content, &tree.root_node(), content.as_bytes());
+            if !imports.is_empty() {
+                Some(FileImports {
+                    path: path_str.clone(),
+                    imports,
+                })
             } else {
                 None
             }
@@ -250,7 +270,11 @@ fn process_code_file(
 
     let calls_map: HashMap<String, Vec<String>> = call_entries.into_iter().flatten().collect();
 
-    (chunks, calls_map, file_imports)
+    ProcessedCodeFile {
+        chunks,
+        calls: calls_map,
+        file_imports,
+    }
 }
 
 /// Directories to skip during ingestion
@@ -357,12 +381,11 @@ pub fn run_ingestion(
     let mut all_imports: ImportsMap = HashMap::new();
 
     for e in &entries {
-        let (chunks, calls, file_imports) =
-            process_code_file(e, &repo_root, &mut analyzer, project_name_override);
-        all_chunks.extend(chunks);
-        all_calls.extend(calls);
-        if let Some((path, imports)) = file_imports {
-            all_imports.insert(path, imports);
+        let processed = process_code_file(e, &repo_root, &mut analyzer, project_name_override);
+        all_chunks.extend(processed.chunks);
+        all_calls.extend(processed.calls);
+        if let Some(fi) = processed.file_imports {
+            all_imports.insert(fi.path, fi.imports);
         }
     }
 
@@ -541,11 +564,11 @@ mod tests {
             .unwrap();
 
         let mut analyzer = CodeAnalyzer::new();
-        let (chunks, _calls_map, _imports) = process_code_file(&entry, base, &mut analyzer, None);
+        let processed = process_code_file(&entry, base, &mut analyzer, None);
 
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].file_path, "myproj/code.py");
-        assert_eq!(chunks[0].project_name, "myproj");
+        assert_eq!(processed.chunks.len(), 1);
+        assert_eq!(processed.chunks[0].file_path, "myproj/code.py");
+        assert_eq!(processed.chunks[0].project_name, "myproj");
     }
 
     #[test]

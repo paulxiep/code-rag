@@ -3,9 +3,7 @@ pub use code_rag_engine::retriever::{RetrievalResult, to_retrieval_result};
 
 use crate::store::{Embedder, Reranker, VectorStore};
 use code_rag_engine::comparison::fuse_comparator_lists;
-use code_rag_engine::config::{
-    DualEmbeddingConfig, HybridConfig, RerankConfig, RetrievalConfig, fetch_limits,
-};
+use code_rag_engine::config::{EngineConfig, RetrievalConfig, fetch_limits};
 use code_rag_engine::fusion::rrf_fuse;
 use code_rag_engine::graph;
 use code_rag_engine::intent::{self, QueryIntent, arm_policy};
@@ -205,45 +203,57 @@ fn rerank_chunks<T: RerankText + Clone>(
 /// truncated to `n` chunks instead of `config.code_limit`. C2 uses this to
 /// over-retain the code arm before `reserve_graph_slots` runs so the
 /// promotion step has a below-cutoff buffer to rescue graph-confirmed chunks
-/// from. Non-code arms always use their config limits.
-#[allow(clippy::too_many_arguments)]
+/// from. Non-code arms always use their config limits. The `bundle.intent`
+/// field is propagated to the returned `RetrievalResult` unchanged.
 fn rerank_all(
     query: &str,
-    code: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
-    readme: Vec<ScoredChunk<code_rag_types::ReadmeChunk>>,
-    crates: Vec<ScoredChunk<code_rag_types::CrateChunk>>,
-    module_doc: Vec<ScoredChunk<code_rag_types::ModuleDocChunk>>,
+    bundle: RetrievalResult,
     reranker: &mut Reranker,
     config: &RetrievalConfig,
-    intent: QueryIntent,
     code_keep_override: Option<usize>,
 ) -> Result<RetrievalResult, EngineError> {
     let code_limit = code_keep_override.unwrap_or(config.code_limit);
     Ok(RetrievalResult {
-        code_chunks: rerank_chunks(query, code, reranker, code_limit)?,
-        readme_chunks: rerank_chunks(query, readme, reranker, config.readme_limit)?,
-        crate_chunks: rerank_chunks(query, crates, reranker, config.crate_limit)?,
-        module_doc_chunks: rerank_chunks(query, module_doc, reranker, config.module_doc_limit)?,
-        intent,
+        code_chunks: rerank_chunks(query, bundle.code_chunks, reranker, code_limit)?,
+        readme_chunks: rerank_chunks(query, bundle.readme_chunks, reranker, config.readme_limit)?,
+        crate_chunks: rerank_chunks(query, bundle.crate_chunks, reranker, config.crate_limit)?,
+        module_doc_chunks: rerank_chunks(
+            query,
+            bundle.module_doc_chunks,
+            reranker,
+            config.module_doc_limit,
+        )?,
+        intent: bundle.intent,
     })
+}
+
+/// Per-query inputs that travel together through the retrieval pipeline.
+pub struct QueryContext<'a> {
+    pub query: &'a str,
+    pub embedding: &'a [f32],
+    pub intent: QueryIntent,
 }
 
 /// Search vector store for similar chunks using a pre-computed query embedding.
 /// When reranking is enabled, over-retrieves then re-scores with the cross-encoder.
 /// When hybrid is enabled, uses BM25+semantic via RRF fusion (scores are higher=better).
-#[allow(clippy::too_many_arguments)]
 pub async fn retrieve(
-    query: &str,
-    query_embedding: &[f32],
+    qctx: QueryContext<'_>,
     store: &VectorStore,
     embedder: &mut Embedder,
     config: &RetrievalConfig,
-    rerank_config: &RerankConfig,
-    hybrid_config: &HybridConfig,
-    dual_embedding_config: &DualEmbeddingConfig,
+    engine_config: &EngineConfig,
     reranker: Option<&mut Reranker>,
-    intent: QueryIntent,
 ) -> Result<RetrievalResult, EngineError> {
+    let QueryContext {
+        query,
+        embedding: query_embedding,
+        intent,
+    } = qctx;
+    let rerank_config = &engine_config.rerank;
+    let hybrid_config = &engine_config.hybrid;
+    let dual_embedding_config = &engine_config.dual_embedding;
+
     // B5: per-intent arm policy is combined with global config toggles.
     // The policy captures intent-specific empirical findings; the config
     // flags capture the global feature toggle.
@@ -334,22 +344,11 @@ pub async fn retrieve(
                 // literal-token side independently.
                 let sub_query = format!("{} {}", comp, query);
                 let emb = embedder.embed_one(&sub_query)?;
-                let raw = fetch_code_arm(
-                    store,
-                    &sub_query,
-                    &emb,
-                    /* limit */ 12,
-                    false,
-                    false,
-                )
-                .await?;
+                let raw =
+                    fetch_code_arm(store, &sub_query, &emb, /* limit */ 12, false, false).await?;
                 let filtered: Vec<_> = raw
                     .into_iter()
-                    .filter(|(c, _)| {
-                        target_project
-                            .as_ref()
-                            .is_none_or(|p| &c.project_name == p)
-                    })
+                    .filter(|(c, _)| target_project.as_ref().is_none_or(|p| &c.project_name == p))
                     .take(8)
                     .collect();
                 lists.push(filtered);
@@ -358,11 +357,7 @@ pub async fn retrieve(
             // a single comparator failing to extract cleanly.
             let original_filtered: Vec<_> = original_hits
                 .into_iter()
-                .filter(|(c, _)| {
-                    target_project
-                        .as_ref()
-                        .is_none_or(|p| &c.project_name == p)
-                })
+                .filter(|(c, _)| target_project.as_ref().is_none_or(|p| &c.project_name == p))
                 .take(8)
                 .collect();
             lists.push(original_filtered);
@@ -392,10 +387,7 @@ pub async fn retrieve(
             let rescored: Vec<(code_rag_types::CodeChunk, f32)> = fused
                 .into_iter()
                 .map(|(c, _rrf)| {
-                    let s = max_score
-                        .get(&c.chunk_id)
-                        .copied()
-                        .unwrap_or(0.5);
+                    let s = max_score.get(&c.chunk_id).copied().unwrap_or(0.5);
                     (c, s)
                 })
                 .collect();
@@ -487,8 +479,7 @@ pub async fn retrieve(
     // `reserve_graph_slots` has a buffer to rescue demoted chunks with soft
     // min_slots (1 for Implementation, 2 for Relationship).
     let direction = graph::detect_direction(query);
-    let explicit_structural =
-        !graph_ids.is_empty() && direction != graph::GraphDirection::Both;
+    let explicit_structural = !graph_ids.is_empty() && direction != graph::GraphDirection::Both;
 
     // Split graph chunks out before rerank for explicit-direction queries.
     // `graph_reserved` is pre-sorted by tier score (highest confidence first)
@@ -535,17 +526,14 @@ pub async fn retrieve(
     let mut result = if should_rerank {
         if let Some(reranker) = reranker {
             // Attempt reranking; on failure, fall back to current scores
-            match rerank_all(
-                query,
-                code_for_pipeline,
-                readme_scored,
-                crate_scored,
-                module_doc_scored,
-                reranker,
-                config,
+            let bundle = RetrievalResult {
+                code_chunks: code_for_pipeline,
+                readme_chunks: readme_scored,
+                crate_chunks: crate_scored,
+                module_doc_chunks: module_doc_scored,
                 intent,
-                code_keep_override,
-            ) {
+            };
+            match rerank_all(query, bundle, reranker, config, code_keep_override) {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::warn!("reranking failed, falling back to search scores: {e}");

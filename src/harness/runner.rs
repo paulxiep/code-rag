@@ -4,7 +4,7 @@ use code_rag_engine::config::EngineConfig;
 use code_rag_engine::intent::{self, IntentClassifier, QueryIntent};
 use code_rag_engine::retriever::{FlatChunk, RetrievalResult};
 
-use crate::engine::retriever::retrieve;
+use crate::engine::retriever::{QueryContext, retrieve};
 use crate::store::{Embedder, Reranker, VectorStore};
 
 use super::dataset::TestCase;
@@ -55,11 +55,21 @@ pub fn to_retrieved_items(result: &RetrievalResult) -> Vec<RetrievedItem> {
         .collect()
 }
 
+/// Knobs that control how `run_all` iterates the test set, separated from the
+/// engine state so the function signature stays under clippy's argument cap.
+pub struct RunOptions {
+    /// When true, uses each test case's `expected_intent` for routing instead
+    /// of the live classifier; cases without `expected_intent` are skipped.
+    pub ground_truth: bool,
+    /// When true, prints per-case progress to stdout.
+    pub verbose: bool,
+}
+
 /// Run all test cases against the retrieval pipeline.
 ///
-/// If `ground_truth` is true, uses `expected_intent` from each test case for routing
-/// instead of the classifier. Cases without `expected_intent` are skipped with a warning.
-#[allow(clippy::too_many_arguments)]
+/// If `opts.ground_truth` is true, uses `expected_intent` from each test case
+/// for routing instead of the classifier. Cases without `expected_intent` are
+/// skipped with a warning.
 pub async fn run_all(
     cases: &[TestCase],
     embedder: &mut Embedder,
@@ -67,9 +77,12 @@ pub async fn run_all(
     mut reranker: Option<&mut Reranker>,
     store: &VectorStore,
     config: &EngineConfig,
-    ground_truth: bool,
-    verbose: bool,
+    opts: RunOptions,
 ) -> anyhow::Result<Vec<QueryResult>> {
+    let RunOptions {
+        ground_truth,
+        verbose,
+    } = opts;
     let mut results = Vec::with_capacity(cases.len());
 
     for (i, case) in cases.iter().enumerate() {
@@ -122,16 +135,16 @@ pub async fn run_all(
         // Reborrow to allow reuse across loop iterations
         let reranker_ref = reranker.as_deref_mut();
         let retrieval_result = retrieve(
-            &case.query,
-            &embedding,
+            QueryContext {
+                query: &case.query,
+                embedding: &embedding,
+                intent: classified_intent,
+            },
             store,
             embedder,
             &retrieval_config,
-            &config.rerank,
-            &config.hybrid,
-            &config.dual_embedding,
+            config,
             reranker_ref,
-            classified_intent,
         )
         .await?;
 

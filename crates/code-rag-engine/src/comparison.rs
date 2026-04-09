@@ -91,9 +91,6 @@ mod tests {
         let out = fuse_comparator_lists(lists, 5);
         assert_eq!(out[0].0.chunk_id, "a");
         // Output should dedupe — "a" appears once.
-        assert_eq!(
-            out.iter().filter(|(c, _)| c.chunk_id == "a").count(),
-            1
-        );
+        assert_eq!(out.iter().filter(|(c, _)| c.chunk_id == "a").count(), 1);
     }
 }
