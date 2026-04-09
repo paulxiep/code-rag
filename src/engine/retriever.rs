@@ -62,11 +62,19 @@ async fn fetch_code_arm(
 
 /// C1: Augment code search results with graph-resolved chunks for Relationship intent.
 /// Uses shared `graph::graph_augment` and `graph::merge_graph_chunks` from code-rag-engine.
+///
+/// Returns `(merged_chunks, graph_ids)`. `graph_ids` is the set of every
+/// chunk_id that the graph resolved — including ones already present in the
+/// vector results. Callers pass it to `graph::reserve_graph_slots` after
+/// reranking to protect structurally confirmed chunks from demotion (C2).
 async fn augment_with_graph(
     query: &str,
     code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
     store: &VectorStore,
-) -> Vec<ScoredChunk<code_rag_types::CodeChunk>> {
+) -> (
+    Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    std::collections::HashSet<String>,
+) {
     // Extract top-5 candidates as (chunk_id, identifier) pairs
     let candidates: Vec<(String, String)> = code_scored
         .iter()
@@ -75,7 +83,7 @@ async fn augment_with_graph(
         .collect();
 
     if candidates.is_empty() {
-        return code_scored;
+        return (code_scored, std::collections::HashSet::new());
     }
 
     // Infer project from top-1 result
@@ -84,11 +92,11 @@ async fn augment_with_graph(
     // Load all edges for this project and build CallGraph
     let edges = match store.get_all_edges(project).await {
         Ok(e) => e,
-        Err(_) => return code_scored,
+        Err(_) => return (code_scored, std::collections::HashSet::new()),
     };
 
     if edges.is_empty() {
-        return code_scored;
+        return (code_scored, std::collections::HashSet::new());
     }
 
     // Build a tier lookup for scoring
@@ -123,7 +131,7 @@ async fn augment_with_graph(
     // Run shared graph augmentation logic
     let augment_result = match graph::graph_augment(query, &candidates, &call_graph) {
         Some(r) => r,
-        None => return code_scored,
+        None => return (code_scored, std::collections::HashSet::new()),
     };
 
     // Fetch full CodeChunks for graph-resolved IDs
@@ -132,7 +140,7 @@ async fn augment_with_graph(
         .await
     {
         Ok(chunks) => chunks,
-        Err(_) => return code_scored,
+        Err(_) => return (code_scored, std::collections::HashSet::new()),
     };
 
     // Wrap as ScoredChunks with tier-based scores
@@ -191,6 +199,12 @@ fn rerank_chunks<T: RerankText + Clone>(
 }
 
 /// Rerank all chunk types and build a RetrievalResult.
+///
+/// `code_keep_override` — when `Some(n)`, the code arm is reranked and
+/// truncated to `n` chunks instead of `config.code_limit`. C2 uses this to
+/// over-retain the code arm before `reserve_graph_slots` runs so the
+/// promotion step has a below-cutoff buffer to rescue graph-confirmed chunks
+/// from. Non-code arms always use their config limits.
 #[allow(clippy::too_many_arguments)]
 fn rerank_all(
     query: &str,
@@ -201,9 +215,11 @@ fn rerank_all(
     reranker: &mut Reranker,
     config: &RetrievalConfig,
     intent: QueryIntent,
+    code_keep_override: Option<usize>,
 ) -> Result<RetrievalResult, EngineError> {
+    let code_limit = code_keep_override.unwrap_or(config.code_limit);
     Ok(RetrievalResult {
-        code_chunks: rerank_chunks(query, code, reranker, config.code_limit)?,
+        code_chunks: rerank_chunks(query, code, reranker, code_limit)?,
         readme_chunks: rerank_chunks(query, readme, reranker, config.readme_limit)?,
         crate_chunks: rerank_chunks(query, crates, reranker, config.crate_limit)?,
         module_doc_chunks: rerank_chunks(query, module_doc, reranker, config.module_doc_limit)?,
@@ -260,11 +276,14 @@ pub async fn retrieve(
     // because intent classifier has 44% accuracy on Relationship — most relationship
     // queries arrive misclassified as Implementation. graph_augment returns None
     // quickly when no target term is found or no edges match.
-    let code_scored =
+    // C2: augment_with_graph now returns (merged_chunks, graph_ids). graph_ids
+    // tracks every structurally-confirmed chunk_id (including vector/graph
+    // collisions) and is threaded to reserve_graph_slots post-rerank.
+    let (code_scored, graph_ids) =
         if intent == QueryIntent::Relationship || intent == QueryIntent::Implementation {
             augment_with_graph(query, code_scored, store).await
         } else {
-            code_scored
+            (code_scored, std::collections::HashSet::new())
         };
 
     // Non-code tables are untouched by B5 — they follow the hybrid toggle only.
@@ -292,18 +311,81 @@ pub async fn retrieve(
         )
     };
 
-    let result = if should_rerank {
+    // C2: SOTA routing for structural queries. When the query has explicit
+    // direction keywords ("what calls X", "called by", "depends on", etc.),
+    // partition graph-confirmed chunks OUT of the rerank pipeline entirely.
+    // They carry tier-score confidence (0.75-0.85) representing an actual
+    // AST call edge — the cross-encoder (ms-marco-MiniLM) has no way to
+    // "see" that and routinely demotes structural hits in favor of textually
+    // similar but structurally wrong chunks. Cody / LocAgent / GraphCoder
+    // all handle this by routing structural queries to the graph track
+    // separately from the semantic reranker. See arXiv:2509.05980 (GRACE)
+    // for the formal version; we use slot reservation because we can't
+    // retrain the browser-compatible reranker.
+    //
+    // For ambiguous queries (direction = Both, e.g. "How does X work?"),
+    // we keep graph chunks in the rerank pool but over-retain so
+    // `reserve_graph_slots` has a buffer to rescue demoted chunks with soft
+    // min_slots (1 for Implementation, 2 for Relationship).
+    let direction = graph::detect_direction(query);
+    let explicit_structural =
+        !graph_ids.is_empty() && direction != graph::GraphDirection::Both;
+
+    // Split graph chunks out before rerank for explicit-direction queries.
+    // `graph_reserved` is pre-sorted by tier score (highest confidence first)
+    // and capped at (code_limit - 1) to leave at least one slot for the
+    // top semantic match (typically the function being asked about).
+    //
+    // Routing only applies when rerank is active — without rerank there's
+    // no demotion to protect against, and the no-rerank and rerank-fallback
+    // paths need code_scored intact.
+    let (graph_reserved, code_for_rerank): (
+        Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+        Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    ) = if explicit_structural && should_rerank {
+        let (mut g, c): (Vec<_>, Vec<_>) = code_scored
+            .iter()
+            .cloned()
+            .partition(|sc| graph_ids.contains(&sc.chunk.chunk_id));
+        g.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let max_graph_slots = config.code_limit.saturating_sub(1);
+        g.truncate(max_graph_slots);
+        (g, c)
+    } else {
+        (Vec::new(), code_scored.clone())
+    };
+
+    // Ambiguous-direction soft reserve: over-retain so reserve_graph_slots
+    // has a below-cutoff buffer to rescue demoted chunks from.
+    let soft_reserve_active = !explicit_structural
+        && !graph_ids.is_empty()
+        && (intent == QueryIntent::Relationship || intent == QueryIntent::Implementation);
+    let code_keep_override = if soft_reserve_active {
+        Some(config.code_limit + 5)
+    } else {
+        None
+    };
+
+    // Rerank only the non-graph portion when routing is active. The
+    // `graph_reserved` list is stitched back in after rerank.
+    let code_for_pipeline = code_for_rerank;
+    let mut result = if should_rerank {
         if let Some(reranker) = reranker {
             // Attempt reranking; on failure, fall back to current scores
             match rerank_all(
                 query,
-                code_scored,
+                code_for_pipeline,
                 readme_scored,
                 crate_scored,
                 module_doc_scored,
                 reranker,
                 config,
                 intent,
+                code_keep_override,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -377,6 +459,42 @@ pub async fn retrieve(
             intent,
         }
     };
+
+    // C2: stitch graph_reserved back into the result.
+    //
+    // Explicit-structural path (SOTA routing, matches Cody/LocAgent):
+    //   Prepend graph_reserved (which was held out of rerank entirely) in
+    //   front of the reranked non-graph chunks. Graph chunks keep their
+    //   tier_score, reranked chunks keep their cross-encoder score, truncate
+    //   to code_limit. The reranker never had authority over structural
+    //   hits, so they cannot be demoted.
+    //
+    // Soft-reserve path (ambiguous direction, e.g. "How does X work?"):
+    //   Graph chunks went through rerank with over-retention; use
+    //   reserve_graph_slots to swap demoted graph chunks back up from the
+    //   below-cutoff buffer. min_slots strength depends on classified intent.
+    if explicit_structural {
+        let semantic_slots = config.code_limit.saturating_sub(graph_reserved.len());
+        let mut combined: Vec<ScoredChunk<code_rag_types::CodeChunk>> = graph_reserved;
+        combined.extend(
+            std::mem::take(&mut result.code_chunks)
+                .into_iter()
+                .take(semantic_slots),
+        );
+        result.code_chunks = combined;
+    } else if soft_reserve_active {
+        let min_slots = if intent == QueryIntent::Relationship {
+            2
+        } else {
+            1
+        };
+        result.code_chunks = graph::reserve_graph_slots(
+            std::mem::take(&mut result.code_chunks),
+            &graph_ids,
+            config.code_limit,
+            min_slots,
+        );
+    }
 
     let total = result.code_chunks.len()
         + result.readme_chunks.len()

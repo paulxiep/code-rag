@@ -147,14 +147,16 @@ async fn run_retrieval(
         retriever::to_scored(code_raw)
     };
 
-    // C1: Graph augmentation for Relationship + Implementation intents
-    let code_scored = if !index.call_edges.is_empty()
+    // C1: Graph augmentation for Relationship + Implementation intents.
+    // C2: augment_with_graph_wasm returns (merged, graph_ids). graph_ids is
+    // threaded to reserve_graph_slots post-rerank (Relationship only).
+    let (code_scored, graph_ids) = if !index.call_edges.is_empty()
         && (classification.intent == QueryIntent::Relationship
             || classification.intent == QueryIntent::Implementation)
     {
         augment_with_graph_wasm(query, code_scored, index)
     } else {
-        code_scored
+        (code_scored, std::collections::HashSet::new())
     };
 
     let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
@@ -171,15 +173,58 @@ async fn run_retrieval(
         )
     };
 
-    let result = if should_rerank {
+    // C2: SOTA routing for explicit-direction queries. See the server path
+    // (src/engine/retriever.rs) for the full rationale. Summary: when the
+    // query has explicit "what calls X / called by / uses" keywords, we
+    // partition graph-confirmed chunks OUT of the rerank pipeline entirely
+    // and prepend them (sorted by tier score) to the reranked non-graph
+    // chunks. The reranker never had authority over structural hits, so
+    // they cannot be demoted. Matches Cody/LocAgent/GraphCoder routing.
+    let direction = graph::detect_direction(query);
+    let explicit_structural =
+        !graph_ids.is_empty() && direction != graph::GraphDirection::Both;
+
+    let (graph_reserved, code_for_rerank): (
+        Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+        Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    ) = if explicit_structural && should_rerank {
+        let (mut g, c): (Vec<_>, Vec<_>) = code_scored
+            .iter()
+            .cloned()
+            .partition(|sc| graph_ids.contains(&sc.chunk.chunk_id));
+        g.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let max_graph_slots = final_config.code_limit.saturating_sub(1);
+        g.truncate(max_graph_slots);
+        (g, c)
+    } else {
+        (Vec::new(), code_scored.clone())
+    };
+
+    // Soft-reserve only applies when we're NOT routing (direction == Both).
+    let soft_reserve_active = !explicit_structural
+        && !graph_ids.is_empty()
+        && (classification.intent == QueryIntent::Relationship
+            || classification.intent == QueryIntent::Implementation);
+    let code_keep_override = if soft_reserve_active {
+        Some(final_config.code_limit + 5)
+    } else {
+        None
+    };
+
+    let mut result = if should_rerank {
         match rerank_all(
             query,
-            code_scored.clone(),
+            code_for_rerank.clone(),
             readme_scored.clone(),
             crate_scored.clone(),
             module_doc_scored.clone(),
             &final_config,
             classification.intent,
+            code_keep_override,
         )
         .await
         {
@@ -236,16 +281,48 @@ async fn run_retrieval(
         }
     };
 
+    // C2: stitch graph_reserved back in (explicit routing) or apply soft
+    // reserve (ambiguous direction). Same logic as server path.
+    if explicit_structural {
+        let semantic_slots = final_config.code_limit.saturating_sub(graph_reserved.len());
+        let mut combined: Vec<ScoredChunk<code_rag_types::CodeChunk>> = graph_reserved;
+        combined.extend(
+            std::mem::take(&mut result.code_chunks)
+                .into_iter()
+                .take(semantic_slots),
+        );
+        result.code_chunks = combined;
+    } else if soft_reserve_active {
+        let min_slots = if classification.intent == QueryIntent::Relationship {
+            2
+        } else {
+            1
+        };
+        result.code_chunks = graph::reserve_graph_slots(
+            std::mem::take(&mut result.code_chunks),
+            &graph_ids,
+            final_config.code_limit,
+            min_slots,
+        );
+    }
+
     (result, classification)
 }
 
 /// C1: Graph augmentation for Relationship intent (WASM path).
 /// Uses the same shared `graph::graph_augment` and `graph::merge_graph_chunks` as the server.
+///
+/// Returns `(merged_chunks, graph_ids)` — identical contract to the server-side
+/// `augment_with_graph`. `graph_ids` includes vector/graph collisions so that
+/// `reserve_graph_slots` can protect them post-rerank (C2).
 fn augment_with_graph_wasm(
     query: &str,
     code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
     index: &ChunkIndex,
-) -> Vec<ScoredChunk<code_rag_types::CodeChunk>> {
+) -> (
+    Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    std::collections::HashSet<String>,
+) {
     // Extract top-5 candidates
     let candidates: Vec<(String, String)> = code_scored
         .iter()
@@ -254,7 +331,7 @@ fn augment_with_graph_wasm(
         .collect();
 
     if candidates.is_empty() {
-        return code_scored;
+        return (code_scored, std::collections::HashSet::new());
     }
 
     // Build CallGraph from ExportEdge data + register identifiers from chunk index
@@ -275,7 +352,7 @@ fn augment_with_graph_wasm(
     // Run shared graph augmentation logic (same as server)
     let augment_result = match graph::graph_augment(query, &candidates, &call_graph) {
         Some(r) => r,
-        None => return code_scored,
+        None => return (code_scored, std::collections::HashSet::new()),
     };
 
     // Look up full chunks via chunk_id index (WASM-specific: in-memory lookup)
@@ -299,7 +376,7 @@ fn augment_with_graph_wasm(
         })
         .collect();
 
-    // Merge using shared dedup logic (same as server)
+    // Merge using shared collision-safe logic (same as server)
     graph::merge_graph_chunks(code_scored, graph_scored)
 }
 
@@ -337,9 +414,11 @@ async fn rerank_all(
     module_doc: Vec<ScoredChunk<code_rag_types::ModuleDocChunk>>,
     config: &code_rag_engine::config::RetrievalConfig,
     intent: QueryIntent,
+    code_keep_override: Option<usize>,
 ) -> Result<RetrievalResult, String> {
+    let code_limit = code_keep_override.unwrap_or(config.code_limit);
     Ok(RetrievalResult {
-        code_chunks: rerank_chunks(query, code, config.code_limit).await?,
+        code_chunks: rerank_chunks(query, code, code_limit).await?,
         readme_chunks: rerank_chunks(query, readme, config.readme_limit).await?,
         crate_chunks: rerank_chunks(query, crates, config.crate_limit).await?,
         module_doc_chunks: rerank_chunks(query, module_doc, config.module_doc_limit).await?,

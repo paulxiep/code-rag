@@ -1384,7 +1384,7 @@ pub async fn search_hybrid(
 ) -> Result<Vec<CodeChunk>, StoreError>;
 ```
 
-### 6.5 Call Graph (C1-C3)
+### 6.5 Call Graph (C1-C5)
 
 **Future table schema for `call_edges`:**
 

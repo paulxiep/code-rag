@@ -393,14 +393,26 @@ pub fn graph_augment(
     })
 }
 
-/// Merge graph-resolved ScoredChunks into existing vector results,
-/// deduplicating by chunk_id. Graph chunks that already exist in
-/// `existing` are skipped. Returns the merged, deduplicated list.
+/// Merge graph-resolved ScoredChunks into existing vector results.
+///
+/// C2: collision-safe merge. Graph chunks carry structural proof (an actual
+/// AST call edge) that vector similarity missed — dropping them on chunk_id
+/// collision with an existing vector entry is backwards. Instead we keep the
+/// existing vector entry (its score reflects the semantic rank) but record
+/// *every* graph chunk_id — including collisions — in the returned
+/// `graph_ids` set. Callers use that set to protect graph-confirmed chunks
+/// from rerank demotion via `reserve_graph_slots`.
 pub fn merge_graph_chunks(
     existing: Vec<ScoredChunk<CodeChunk>>,
     graph_chunks: Vec<ScoredChunk<CodeChunk>>,
-) -> Vec<ScoredChunk<CodeChunk>> {
+) -> (Vec<ScoredChunk<CodeChunk>>, HashSet<String>) {
     let existing_ids: HashSet<String> = existing
+        .iter()
+        .map(|sc| sc.chunk.chunk_id.clone())
+        .collect();
+
+    // All graph chunk IDs are "graph-confirmed", including collisions.
+    let graph_ids: HashSet<String> = graph_chunks
         .iter()
         .map(|sc| sc.chunk.chunk_id.clone())
         .collect();
@@ -410,8 +422,11 @@ pub fn merge_graph_chunks(
         if !existing_ids.contains(&gc.chunk.chunk_id) {
             merged.push(gc);
         }
+        // Collision: the vector entry is already in `merged` and stays.
+        // Its chunk_id is in `graph_ids` so rerank-demotion protection
+        // (reserve_graph_slots) can still recognize it as structural.
     }
-    merged
+    (merged, graph_ids)
 }
 
 /// Relevance score priors for graph-resolved chunks, by resolution tier.
@@ -422,6 +437,95 @@ pub fn tier_score(resolution_tier: u8) -> f32 {
         2 => 0.80, // import-based
         _ => 0.75, // unique-global or unknown
     }
+}
+
+/// C2: After reranking, ensure up to `min_slots` graph-confirmed chunks
+/// survive in the top `limit` results. Graph chunks carry structural proof
+/// (an actual AST call edge) that the cross-encoder may demote below the
+/// cutoff even though it's strictly more reliable than semantic similarity
+/// for Relationship queries.
+///
+/// If the top `limit` already contains at least `min_slots` graph-confirmed
+/// chunks, returns the unchanged top-limit list. Otherwise swaps the
+/// lowest-scoring non-graph entries in the top for graph-confirmed chunks
+/// pulled from below the cutoff. Preserves score order among non-displaced
+/// items.
+///
+/// Pure function. No I/O. wasm32-compatible.
+///
+/// **Scope:** callers should gate this to `QueryIntent::Relationship` only.
+/// Forcing graph slots on Implementation regressed recall in space search
+/// because the reranker's semantic scoring is usually correct there.
+pub fn reserve_graph_slots(
+    ranked: Vec<ScoredChunk<CodeChunk>>,
+    graph_ids: &HashSet<String>,
+    limit: usize,
+    min_slots: usize,
+) -> Vec<ScoredChunk<CodeChunk>> {
+    if graph_ids.is_empty() || limit == 0 || min_slots == 0 {
+        let mut out = ranked;
+        out.truncate(limit);
+        return out;
+    }
+
+    let take = limit.min(ranked.len());
+    let top: Vec<ScoredChunk<CodeChunk>> = ranked.iter().take(take).cloned().collect();
+    let top_graph_count = top
+        .iter()
+        .filter(|sc| graph_ids.contains(&sc.chunk.chunk_id))
+        .count();
+
+    if top_graph_count >= min_slots {
+        return top;
+    }
+
+    let need = min_slots - top_graph_count;
+    // Graph-confirmed chunks that fell below the cutoff.
+    let below_cutoff_graph: Vec<ScoredChunk<CodeChunk>> = ranked
+        .iter()
+        .skip(take)
+        .filter(|sc| graph_ids.contains(&sc.chunk.chunk_id))
+        .take(need)
+        .cloned()
+        .collect();
+
+    if below_cutoff_graph.is_empty() {
+        return top;
+    }
+
+    // Replace the lowest-scoring non-graph entries in `top` with the
+    // promoted graph chunks. Preserve score order among the items we keep.
+    let mut kept: Vec<ScoredChunk<CodeChunk>> = top
+        .iter()
+        .filter(|sc| graph_ids.contains(&sc.chunk.chunk_id))
+        .cloned()
+        .collect();
+    let mut non_graph: Vec<ScoredChunk<CodeChunk>> = top
+        .iter()
+        .filter(|sc| !graph_ids.contains(&sc.chunk.chunk_id))
+        .cloned()
+        .collect();
+
+    // Drop the lowest-scoring non-graph entries first.
+    let drop_n = below_cutoff_graph.len().min(non_graph.len());
+    non_graph.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    non_graph.truncate(non_graph.len() - drop_n);
+
+    kept.extend(non_graph);
+    kept.extend(below_cutoff_graph);
+
+    // Final sort by score descending so the displayed order stays monotone.
+    kept.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    kept.truncate(limit);
+    kept
 }
 
 #[cfg(test)]
@@ -648,8 +752,10 @@ mod tests {
             chunk: make_code_chunk("c2", "bar"),
             score: 0.85,
         }];
-        let merged = merge_graph_chunks(existing, graph);
+        let (merged, graph_ids) = merge_graph_chunks(existing, graph);
         assert_eq!(merged.len(), 2);
+        assert_eq!(graph_ids.len(), 1);
+        assert!(graph_ids.contains("c2"));
     }
 
     #[test]
@@ -662,15 +768,128 @@ mod tests {
             chunk: make_code_chunk("c1", "foo"),
             score: 0.85,
         }];
-        let merged = merge_graph_chunks(existing, graph);
+        let (merged, graph_ids) = merge_graph_chunks(existing, graph);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].score, 0.9); // keeps existing score
+        // C2: collision chunk_id is still in graph_ids so reserve_graph_slots
+        // can recognize the kept vector entry as structurally confirmed.
+        assert!(graph_ids.contains("c1"));
     }
 
     #[test]
     fn test_tier_scores() {
         assert!(tier_score(1) > tier_score(2));
         assert!(tier_score(2) > tier_score(3));
+    }
+
+    fn make_scored(id: &str, score: f32) -> ScoredChunk<CodeChunk> {
+        ScoredChunk {
+            chunk: make_code_chunk(id, id),
+            score,
+        }
+    }
+
+    #[test]
+    fn test_reserve_graph_slots_no_action_needed() {
+        // Top-5 already has 2 graph-confirmed chunks → unchanged
+        let ranked = vec![
+            make_scored("g1", 0.9),
+            make_scored("v1", 0.85),
+            make_scored("g2", 0.80),
+            make_scored("v2", 0.75),
+            make_scored("v3", 0.70),
+            make_scored("v4", 0.65),
+        ];
+        let mut graph_ids = HashSet::new();
+        graph_ids.insert("g1".into());
+        graph_ids.insert("g2".into());
+
+        let result = reserve_graph_slots(ranked, &graph_ids, 5, 2);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0].chunk.chunk_id, "g1");
+        assert_eq!(result[2].chunk.chunk_id, "g2");
+    }
+
+    #[test]
+    fn test_reserve_graph_slots_promotes_from_below() {
+        // Top-5 has 0 graph-confirmed, need 2, graph chunks are at positions 6, 7
+        let ranked = vec![
+            make_scored("v1", 0.9),
+            make_scored("v2", 0.85),
+            make_scored("v3", 0.80),
+            make_scored("v4", 0.75),
+            make_scored("v5", 0.70),
+            make_scored("g1", 0.65),
+            make_scored("g2", 0.60),
+        ];
+        let mut graph_ids = HashSet::new();
+        graph_ids.insert("g1".into());
+        graph_ids.insert("g2".into());
+
+        let result = reserve_graph_slots(ranked, &graph_ids, 5, 2);
+        assert_eq!(result.len(), 5);
+        // The two lowest-scoring non-graph entries (v4, v5) should be displaced
+        let ids: Vec<&str> = result.iter().map(|sc| sc.chunk.chunk_id.as_str()).collect();
+        assert!(ids.contains(&"g1"));
+        assert!(ids.contains(&"g2"));
+        assert!(ids.contains(&"v1"));
+        assert!(ids.contains(&"v2"));
+        assert!(ids.contains(&"v3"));
+        assert!(!ids.contains(&"v4"));
+        assert!(!ids.contains(&"v5"));
+    }
+
+    #[test]
+    fn test_reserve_graph_slots_partial_promotion() {
+        // Top-5 has 1 graph-confirmed, need 2, promote just 1
+        let ranked = vec![
+            make_scored("g1", 0.9),
+            make_scored("v1", 0.85),
+            make_scored("v2", 0.80),
+            make_scored("v3", 0.75),
+            make_scored("v4", 0.70),
+            make_scored("g2", 0.65),
+        ];
+        let mut graph_ids = HashSet::new();
+        graph_ids.insert("g1".into());
+        graph_ids.insert("g2".into());
+
+        let result = reserve_graph_slots(ranked, &graph_ids, 5, 2);
+        assert_eq!(result.len(), 5);
+        let ids: Vec<&str> = result.iter().map(|sc| sc.chunk.chunk_id.as_str()).collect();
+        assert!(ids.contains(&"g1"));
+        assert!(ids.contains(&"g2"));
+        assert!(!ids.contains(&"v4")); // lowest non-graph displaced
+    }
+
+    #[test]
+    fn test_reserve_graph_slots_empty_graph_ids() {
+        // Empty graph_ids → plain truncate to limit, no changes
+        let ranked = vec![
+            make_scored("v1", 0.9),
+            make_scored("v2", 0.85),
+            make_scored("v3", 0.80),
+        ];
+        let result = reserve_graph_slots(ranked, &HashSet::new(), 5, 2);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_reserve_graph_slots_no_graph_below_cutoff() {
+        // Top-5 has 0 graph-confirmed, and no graph chunks below cutoff → unchanged
+        let ranked = vec![
+            make_scored("v1", 0.9),
+            make_scored("v2", 0.85),
+            make_scored("v3", 0.80),
+            make_scored("v4", 0.75),
+            make_scored("v5", 0.70),
+        ];
+        let mut graph_ids = HashSet::new();
+        graph_ids.insert("g99".into()); // not in ranked at all
+
+        let result = reserve_graph_slots(ranked, &graph_ids, 5, 2);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0].chunk.chunk_id, "v1");
     }
 
     fn make_code_chunk(chunk_id: &str, identifier: &str) -> CodeChunk {

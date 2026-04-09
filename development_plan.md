@@ -112,7 +112,7 @@ Hybrid search ─────────────────── independ
 
 Graph query interface ─────────── requires call graph data
 
-Graph embeddings research ──────── requires C3 (call graph data + retrieval fixes)
+Graph embeddings research ──────── requires C5 (call graph data + retrieval gap fixes)
 ```
 
 ### Parallelization Opportunities
@@ -148,7 +148,7 @@ V3 (Quality Harness) ─── quantitative testing infrastructure
  │       B1 → B2 → B3 → B4 → B5
  │
  ├──► Track C: Relationship Graph
- │       C1 → C2 → C3
+ │       C1 → C2 → C3 → C4 → C5
  │
  ├──► Track D: Enrichment Pipeline
  │       D1: Docstring Generation → D2: Type Inference
@@ -168,7 +168,7 @@ V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3.
 | **V3** (Testing) | 1 week | 3.5-4 weeks |
 | **Track A** (A1→A5) | 1.5-2 weeks | — |
 | **Track B** (B1→B2→B3→B4→B5) | 3-4 weeks | — |
-| **Track C** (C1→C2→C3) | 3-5 weeks | — |
+| **Track C** (C1→C2→C3→C4→C5) | 3-5 weeks | — |
 | **Track D** (D1→D2) | 1-1.5 weeks | — |
 | **Track R** (R1→R5, after D) | 2 weeks | — |
 
@@ -741,31 +741,58 @@ End-to-end call graph: extract edges (same-file + cross-file), persist in LanceD
 
 ---
 
-## C2: Retrieval Gap Fixes — Comparison Decomposition, Path-Aware Embeddings, Graph Result Protection
+## C2: Graph Result Protection
 
 **Prerequisite:** C1 (Graph RAG)
 
-**Estimated effort:** 5-7 days
+**Estimated effort:** 1-2 days
 
-Three diagnosed retrieval gaps where the pipeline fails to surface known-correct indexed results. Each has a SOTA-validated fix.
+Provenance tagging, collision-safe merge, reserved graph slots / SOTA routing. Fixes graph-resolved chunks being dropped or demoted despite valid call edges.
 
-- **C2a: Comparison query decomposition** — extract comparators, per-entity fetch, RRF merge. Fixes flat `code_limit` letting one side dominate.
-- **C2b: Path-aware embeddings** — BM25 path injection (no re-embedding) + embedding path prepend. Fixes path-blind queries ("What is shared-py?").
-- **C2c: Graph result protection** — provenance tagging, max-score dedup, reserved graph slots. Fixes graph-resolved chunks being dropped despite valid call edges.
-- **Crates:** code-rag-engine (intent, fusion, graph), code-rag-store (embedding format, BM25), code-raptor (ingestion)
+- **Crates:** code-rag-engine (graph), code-rag-chat (server retriever), code-rag-ui (WASM standalone)
+
+See [C2.md](C2.md) for full design.
 
 ---
 
-## C3: Graph Embeddings Research (Time-Boxed, Optional)
+## C3: Comparison Query Decomposition
 
-**Prerequisite:** C2 (Retrieval Gap Fixes)
+**Prerequisite:** C1 (Graph RAG)
+
+**Estimated effort:** 2-3 days
+
+Extract comparators, per-entity fetch, RRF merge. Fixes flat `code_limit` letting one side dominate.
+
+- **Crates:** code-rag-engine (intent, fusion, comparison helper, MMR fallback)
+
+See [C3.md](C3.md) for full design.
+
+---
+
+## C4: Path-Aware Embeddings
+
+**Prerequisite:** C1 (Graph RAG)
+
+**Estimated effort:** 1-2 days
+
+BM25 path injection (no re-embedding) + embedding path prepend. Fixes path-blind queries ("What is shared-py?").
+
+- **Crates:** code-rag-store (embedding format, BM25 searchable_text), code-raptor (ingestion), code-rag-ui (WASM searchable_text parity)
+
+See [C4.md](C4.md) for full design.
+
+---
+
+## C5: Graph Embeddings Research (Time-Boxed, Optional)
+
+**Prerequisite:** C2, C3, C4 (retrieval gap fixes)
 
 **Estimated effort:** 3-5 days (TIME-BOXED)
 
-**Goal:** Evaluate whether structural graph embeddings (Node2Vec or similar) improve relationship query recall beyond what C1 graph traversal + C2 fixes achieve.
+**Goal:** Evaluate whether structural graph embeddings (Node2Vec or similar) improve relationship query recall beyond what C1 graph traversal + retrieval gap fixes (C2, C3, C4) achieve.
 
 - Fuse with semantic embeddings via RRF (new channel, not replacement for graph traversal)
-- **Success criteria:** Relationship recall improves by >0.05 over C2 baseline, OR documented findings on why graph embeddings don't add value for code.
+- **Success criteria:** Relationship recall improves by >0.05 over the post-C4 baseline, OR documented findings on why graph embeddings don't add value for code.
 - **Crates:** code-rag-engine (fusion logic), code-raptor (graph embedding generation)
 
 ---
@@ -907,7 +934,9 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | Docstring generation | code-raptor |
 | Hierarchical embeddings | code-raptor |
 | Graph RAG (C1) | code-rag-types, code-rag-store, code-raptor, code-rag-engine, code-rag-chat, code-rag-ui |
-| Retrieval gap fixes (C2) | code-rag-engine, code-rag-store, code-raptor |
+| Graph result protection (C2) | code-rag-engine, code-rag-chat, code-rag-ui |
+| Comparison query decomposition (C3) | code-rag-engine |
+| Path-aware embeddings (C4) | code-rag-store, code-raptor, code-rag-ui |
 | Type generation | code-raptor |
 | RAPTOR clustering | code-raptor |
 | Repo summaries | code-raptor |
@@ -915,7 +944,7 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | Hybrid search | code-rag-chat |
 | Graph query interface | code-rag-chat |
 | Code embedding evaluation (V3.4) | code-rag-store |
-| Graph embeddings research (C3) | code-rag-engine, code-raptor |
+| Graph embeddings research (C5) | code-rag-engine, code-raptor |
 | HyDE query transformation (hypothetical) | code-rag-engine, code-rag-chat |
 
 ---
@@ -933,8 +962,10 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | R | Clustering produces meaningful emergent structure (or documented why not) |
 | B1 | Reranking improves recall@5 by >10% over baseline |
 | B2-B3 | "Show me UserService" finds exact match |
-| C1-C2 | "What calls X?" returns accurate results; comparison queries cover both sides |
-| C3 | Graph embeddings evaluated; decision documented |
+| C1+C2 | "What calls X?" returns accurate results via graph traversal + slot routing |
+| C3 | Comparison queries cover both sides (per-entity fetch + RRF merge) |
+| C4 | Path-based queries ("What is shared-py?") find the right files |
+| C5 | Graph embeddings evaluated; decision documented |
 
 ---
 

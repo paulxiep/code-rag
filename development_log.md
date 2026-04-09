@@ -1,5 +1,75 @@
 # Development Log
 
+## 2026-04-09: C2 — Graph Result Protection (SOTA Routing + Soft Reserve)
+
+### Summary
+
+Fixed the C1 follow-up gap where structurally-valid graph hits got dropped or demoted. `merge_graph_chunks` was silently dropping graph-resolved chunks on chunk_id collision with vector results — exactly backwards, since graph chunks carry an actual AST call edge that the cross-encoder cannot "see". The fix is structural, not scoring: graph provenance is tracked alongside the result list as a `HashSet<String>`, which then drives two complementary protection paths depending on query phrasing.
+
+**SOTA routing (explicit-direction queries).** When `detect_direction` finds an explicit "what calls X / called by / depends on" keyword AND graph augment returned hits, graph chunks are partitioned **out** of the rerank pipeline entirely, sorted by tier score, and prepended to the reranked semantic chunks. The reranker never has authority over them, so they cannot be demoted. Matches Cody / LocAgent / GraphCoder routing (arXiv:2509.05980 GRACE for the formal version) — used here because the browser-bundled ms-marco-MiniLM cross-encoder cannot be retrained.
+
+**Soft reserve (ambiguous direction).** For `direction == Both` queries on Relationship/Implementation, graph chunks stay in the rerank pool but the code arm is over-retained (`code_limit + 5`) so `reserve_graph_slots` has a below-cutoff buffer to rescue demoted chunks from. `min_slots = 2` for Relationship, `1` for Implementation.
+
+Changes apply identically to server (`src/engine/retriever.rs`) and WASM standalone (`crates/code-rag-ui/src/standalone_api.rs`); shared logic lives in `code-rag-engine::graph`.
+
+**Harness results (81-case dataset, classifier routing, rerank+hybrid, label `c2_sota_full`):**
+
+| Intent | Queries | Pre-C2 recall@5 | Post-C2 recall@5 | Delta |
+|--------|---------|-----------------|-------------------|-------|
+| overview | 23 | 0.80 | 0.80 | 0 |
+| implementation | 27 | 0.76 | 0.76 | 0 |
+| relationship | 18 | 0.57 | **0.60** | **+0.03** |
+| comparison | 12 | 0.62 | 0.62 | 0 |
+| **aggregate** | 81 | **0.71** | **0.71** | 0 |
+
+MRR: 0.69 → 0.70. Warning count 5 → 4: `runner.rs` warning resolved (now surfaces as a caller of `classify` via SOTA routing). `b5-no-regression-relationship` recall 0.50 → 1.00. Hero query "What calls retrieve?" now returns ≥3 callers including `runner.rs::run_all`. No regression on Implementation, Overview, or Comparison.
+
+### Motivation
+
+Diagnosed in the post-C1 harness warning investigation: `runner.rs::run_all → classify` exists in `call_edges` and is correctly returned by graph traversal, but never surfaced to the user. Diagnostic instrumentation in `merge_graph_chunks` showed two failure modes — collision-drop (graph-resolved chunk_id already in vector results, dropped silently) and rerank demotion (graph chunks survived the merge but the cross-encoder ranked them below the `code_limit: 5` cutoff). Both root causes ignored that graph chunks carry structural proof which strictly outranks semantic similarity for relationship queries.
+
+### Implementation
+
+**Engine graph module (`crates/code-rag-engine/src/graph.rs`):**
+- `merge_graph_chunks` now returns `(Vec<ScoredChunk<CodeChunk>>, HashSet<String>)`. Vector entries on collision are kept (semantic rank preserved), but every graph chunk_id — including collisions — is recorded in `graph_ids`. No `ScoredChunk<T>` schema change, so no rebuild of construction sites.
+- `reserve_graph_slots(ranked, graph_ids, limit, min_slots)` — pure helper. If the top-`limit` already has at least `min_slots` graph chunks, it's a no-op. Otherwise it pulls graph-confirmed chunks from below the cutoff and swaps them in for the lowest-scoring non-graph entries, preserving score order among the kept items. wasm32-compatible (no I/O, no atomics, just `HashSet` lookups).
+
+**Server retriever (`src/engine/retriever.rs`):**
+- `augment_with_graph` returns the tuple; `graph_ids` is threaded through the rerank path.
+- `rerank_all` gained a `code_keep_override: Option<usize>` parameter so the soft-reserve path can over-retain the code arm (`code_limit + 5`) before `reserve_graph_slots` runs. Non-code arms always use their config limits.
+- `direction = graph::detect_direction(query)` runs once; `explicit_structural = !graph_ids.is_empty() && direction != Both` selects between the routing and soft-reserve paths.
+- Routing path (`explicit_structural && should_rerank`): partition `code_scored` by `graph_ids`, sort the graph partition by score, cap at `code_limit - 1` (leave one slot for the top semantic match — usually the function being asked about), rerank the non-graph partition, then stitch graph chunks back in front.
+- Soft-reserve path: `code_keep_override = Some(code_limit + 5)`, rerank everything together, then `reserve_graph_slots(_, _, code_limit, min_slots)` with `min_slots = 2` for Relationship, `1` for Implementation.
+- Both paths converge on the same `RetrievalResult.code_chunks` truncation behavior — only the protection mechanism differs.
+
+**WASM standalone (`crates/code-rag-ui/src/standalone_api.rs`):**
+- Identical wiring. `augment_with_graph_wasm` returns the same `(merged, graph_ids)` tuple. `rerank_all` (engine version) takes the same `code_keep_override`. SOTA routing and soft-reserve logic mirror the server line for line.
+- `std::collections::HashSet` is wasm32-available — no special types or feature flags needed.
+
+**Diagnose-first discipline.** Step 0 of the plan added a temporary `eprintln!` in `merge_graph_chunks` to count collisions vs rerank demotions vs tier-floor failures, run against `--filter-tag relationship`. The diagnostic confirmed both (a) and (b) were active for `runner.rs`, justifying Step 1 (collision-safe merge) AND Step 2 (`reserve_graph_slots`). Step 3 (tier score floor) was unnecessary — current 0.75-0.85 priors are already above any post-rerank threshold seen in the data. Instrumentation removed before commit.
+
+**Why two paths.** A single soft-reserve approach doesn't fix `runner.rs`-style cases: even with over-retention and `min_slots = 2`, the cross-encoder demotes structurally-correct chunks far enough below the cutoff that they fall outside the `code_limit + 5` buffer. SOTA routing is the only mechanism that guarantees survival when the query intent is unambiguous. The soft-reserve path remains necessary for ambiguous-direction queries ("How does X work?") where partitioning would be too aggressive.
+
+### Files touched
+
+- `crates/code-rag-engine/src/graph.rs` (+`reserve_graph_slots`, `merge_graph_chunks` returns tuple, +unit tests)
+- `src/engine/retriever.rs` (`augment_with_graph` tuple return, `rerank_all` over-retain param, SOTA routing branch + soft-reserve branch)
+- `crates/code-rag-ui/src/standalone_api.rs` (mirror of server changes for WASM)
+
+### Reports
+
+- `data/reports/c2_sota_full_5aa63f2.{md,json}` — final 81-case run (the metrics quoted above)
+- `data/reports/c2_post_5aa63f2.{md,json}` — Relationship-only filtered run
+- `data/reports/c2_post_full_5aa63f2.{md,json}` — soft-reserve-only intermediate
+- `data/reports/c2_v2_full_5aa63f2.{md,json}`, `c2_v3_full_5aa63f2.{md,json}` — routing iterations
+- `data/reports/c2_diag_5aa63f2.{md,json}`, `c2_diag2_5aa63f2.{md,json}`, `c2_diag3_5aa63f2.{md,json}` — Step 0 diagnostics
+
+### Next
+
+C3 (comparison query decomposition) and C4 (path-aware embeddings) remain in the retrieval gap fix scope. C3 first (pure code, no data migration); C4 second (requires re-ingest + re-export). C5 (graph embeddings research, time-boxed) is gated on all three.
+
+---
+
 ## 2026-04-09: C1 — Graph RAG (Call Graph Edges + Traversal)
 
 ### Summary
@@ -98,11 +168,11 @@ Investigated 8 harness warnings ("expected file never found in any results"). Ro
 - `dataset.rs`: Weak target — harness code, not the best match for "Which function parses JSON configs?". Replaced with `from_json_str` identifier (from quant-trading-gym).
 - `invoice-parse/services/dashboard`: Retriever returns quant-trading-gym dashboard components (60+ chunks) instead of invoice-parse's 2 generic chunks (`get_engine`, `query`). Added QTG dashboard path to expected_files alongside invoice-parse.
 
-**Diagnosed retrieval gaps (remaining 6 warnings → C2 scope):**
-- `rust.rs`: Flat comparison `code_limit: 5` lets PythonHandler dominate all slots; RustHandler never surfaces. Fix: per-comparator fetch (C2a).
+**Diagnosed retrieval gaps (remaining 6 warnings → retrieval gap fix scope C2/C3/C4):**
+- `rust.rs`: Flat comparison `code_limit: 5` lets PythonHandler dominate all slots; RustHandler never surfaces. Fix: per-comparator fetch (C3).
 - `languages/mod.rs`: Small dispatch functions with weak embeddings. LanguageHandler trait in `language.rs` ranks higher.
-- `libs/shared-py`: Path-blindness — embeddings don't contain file path, so "shared-py" has no signal. Fix: path-aware embeddings (C2b).
-- `runner.rs`: Call edge to `classify` EXISTS but graph augmentation drops it during dedup/merge. Fix: graph result protection (C2c).
+- `libs/shared-py`: Path-blindness — embeddings don't contain file path, so "shared-py" has no signal. Fix: path-aware embeddings (C4).
+- `runner.rs`: Call edge to `classify` EXISTS but graph augmentation drops it during dedup/merge. Fix: graph result protection (C2).
 
 **Key finding:** `format_code_for_embedding()` excludes `file_path` and `project_name`. 279 duplicate (identifier, file_path) pairs in the index from overlapping `impl_item` + `function_item` tree-sitter captures.
 
