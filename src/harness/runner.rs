@@ -125,6 +125,7 @@ pub async fn run_all(
             &case.query,
             &embedding,
             store,
+            embedder,
             &retrieval_config,
             &config.rerank,
             &config.hybrid,

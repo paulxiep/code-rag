@@ -1046,3 +1046,36 @@ Ideas informed by 2025-2026 RAG advancements. Not scheduled — evaluate after T
 **When NOT to use HyDE:**
 - Exact identifier queries ("show me Retriever") — B2 hybrid search handles these better
 - Gate on intent: only apply for `Overview` and `Relationship` intents, skip for `Implementation` with exact identifiers
+
+## Hypothetical: MMR Diversity Re-ranking
+
+**Status:** Idea — considered as the C3 fallback for failed comparator extraction, deferred. No track number assigned.
+
+**Prerequisite:** None structurally. To implement on the server, `store.search_code` would need to project the body_vector column into its result (or a separate `fetch_embeddings_by_id` helper would be added). On WASM it's already cheap because `EmbeddedChunk.embedding` is in memory.
+
+**The problem:** When a multi-entity query reaches the Comparison path but doesn't match any of the regex decomposition patterns (`X vs Y`, `difference between X and Y`, `compare X and Y`, `how does X differ from Y`, `how do X and Y differ`), the fallback today is the unchanged single-arm body-vec search with `code_limit = 5`. That can return five near-duplicate chunks of the same function — diversity zero, neither half of the comparison represented.
+
+**Maximal Marginal Relevance (MMR):**
+1. Over-fetch a candidate pool (e.g. top-10) on the original query
+2. Greedily pick the next item to include from the pool by scoring `λ × relevance(i) − (1 − λ) × max_{j ∈ selected} similarity(i, j)`
+3. With λ = 0.7, that's 70% relevance / 30% diversity penalty — the second pick is penalized for being similar to the first, the third for being similar to either, etc.
+4. Stop when `code_limit` items have been selected
+5. Generic anti-redundancy filter — not specific to comparison, also useful for any over-fetched ranked list
+
+**Why it would help comparison queries specifically:**
+- Forces selection of structurally different chunks even when the query doesn't decompose cleanly
+- Cheap insurance against the worst case where one comparator dominates all five slots
+
+**Why it was deferred:**
+- The five regex patterns (after adding `how do X and Y differ`) cover every comparison test case in the current `data/test_queries.json`. The fallback path essentially never fires today, so MMR would be dead code we'd be carrying for a hypothetical future query phrasing.
+- Server-side implementation requires either broadening the `store.search_code` contract (every caller pays a ~15 KB embedding-payload bloat per call) or adding a separate by-id fetch (~5–15 ms extra round trip on Comparison fallback queries). Neither is hard, but neither is justified by current measurement.
+- The current "fallback to single-arm body-vec" path is strictly the same as pre-C3 Comparison behavior — zero regression risk, no diversification, but also no new failure mode.
+
+**Revisit trigger:**
+- Measurement shows the Comparison fallback firing on real queries AND returning redundant top-5 lists, OR
+- A future track introduces a multi-entity intent without clean decomposition patterns (e.g. "list all the X-style modules"), at which point a generic diversity filter starts paying for itself.
+
+**Implementation sketch when revived:**
+- New `crates/code-rag-engine/src/mmr.rs` with a pure `mmr_rerank<T, S>(candidates, lambda, k, similarity)` helper that takes a similarity closure (caller supplies cosine on body embeddings).
+- Server: extend `store.search_code` (or add a parallel `search_code_with_vectors`) to return `Vec<(CodeChunk, f32, Vec<f32>)>`, gated to the Comparison fallback path so other callers don't pay the bloat.
+- WASM: pull the cached `EmbeddedChunk.embedding` for each candidate via `index.chunk_id_index` and pass it into the same `mmr_rerank` helper for parity.

@@ -1,5 +1,104 @@
 # Development Log
 
+## 2026-04-09: C3 — Comparison Query Decomposition (Per-Comparator RRF Fusion)
+
+### Summary
+
+Fixed the post-C2 retrieval gap on Comparison intent. The pre-C3 path collapsed the entire query into one body-vec search with `code_limit = 5`, so one comparator (e.g. `PythonHandler`) could consume all five slots and the other (`RustHandler`) got zero. C3 detects extractable comparators via regex, runs one body-vec sub-search per comparator with the comparator name prepended to the original query, RRF-fuses the per-comparator lists with the original-query list, and post-filters all results to the dominant project of the original-query top-5 (vote-based, not top-1) so multi-project bundles don't leak cross-project pairs. The whole pre-branch lives next to the existing arm-policy / fetch_code_arm logic in `retrieve()` and is mirrored line-for-line in WASM `run_retrieval`.
+
+The flatten-and-sort score-scale issue (RRF outputs ~0.02–0.05, distance-converted non-code arms 0.4–0.7) is handled by **max-of-natural rescoring**: RRF still decides ordering, but each surviving chunk reports the highest natural body-vec relevance it had across the source lists. Code and non-code arms then compete on equal terms in the global flatten().
+
+**Harness results (81-case dataset, classifier routing, rerank+hybrid, label `c3_post8`):**
+
+| Intent | Queries | Pre-C3 recall@5 | Post-C3 recall@5 | Delta |
+|--------|---------|-----------------|-------------------|-------|
+| overview | 23 | 0.80 | 0.80 | 0 |
+| implementation | 27 | 0.76 | 0.76 | 0 |
+| relationship | 18 | 0.60 | 0.60 | 0 |
+| comparison | 12 | 0.62 | **0.65** | **+0.03** |
+| **aggregate** | 81 | **0.71** | **0.72** | **+0.01** |
+
+MRR: 0.70 → 0.71. Warning count 4 → 4. No regression on any intent. `comp-rust-python-handler` (the headline failure) now passes — both `RustHandler` and `PythonHandler` surface in top-5. The two stubborn failures `comp-retriever-generator` and `b4-comp-retriever-api` remain — they were already failing pre-C3 and have a different root cause (the BGE-small embedder produces noisy vectors for the bare identifier "retriever" / "generator", and BM25 is disabled by the Comparison arm policy).
+
+### Motivation
+
+Diagnosed in the post-C2 retrieval-gap investigation. Comparison sat at 0.62 — the weakest intent after Relationship and the only one not fixed by Track B/C work. Inspection of failed comparison test cases (`comp-rust-python-handler`, `b4-comp-shared-py-rs`) showed top-5 dominated by chunks of one comparator, with the other half completely missing. The arm policy already disables rerank/hybrid/sig-vec for Comparison (B3 finding: those signals over-rank one half of a pair), but body-vec alone has no mechanism to balance the two halves either.
+
+### Implementation
+
+**Engine comparison module (`crates/code-rag-engine/src/comparison.rs`, NEW):**
+- `fuse_comparator_lists(lists, final_limit)` — pure sync helper, ~20 lines. Wraps `fusion::rrf_fuse` over the per-comparator lists with `k=60` and truncates. No closures, no `ScoredChunk`, no async, no embeddings — trivially wasm-compatible. Five unit tests cover empty input, single-list passthrough, disjoint fusion, overlap deduplication, and truncation.
+
+**Engine intent module (`crates/code-rag-engine/src/intent.rs`):**
+- `extract_comparators(query)` — regex-based, five patterns compiled once via `OnceLock<Vec<Regex>>`:
+  1. `how (does|do) X and Y (differ|compare)` — needed for `comp-rust-python-handler` ("How do the Rust and Python language handlers differ?"); the original draft missed this case.
+  2. `how (does|do) X differ from Y`
+  3. `differences? between X and Y`
+  4. `compare X (and|with|to) Y`
+  5. `X (vs|versus) Y` (last because it's the loosest)
+- `canonicalize_comparator` strips leading articles (`the`/`a`/`an`), trims trailing punctuation, lowercases, rejects len < 2 or > 60. Identical-after-canonicalization pairs are rejected as degenerate. 11 unit tests cover every pattern + every canonicalization edge case + the two headline test cases by name.
+- Engine crate gains `regex = "1"` as a direct dep — already in `Cargo.lock` transitively (via lance/tokio), so zero marginal binary cost.
+
+**Server retriever (`src/engine/retriever.rs`):**
+- `retrieve()` gains an `embedder: &mut Embedder` parameter so it can embed augmented sub-queries inline. Single signature change at one call site (mirrored in `src/api/handlers.rs` and `src/harness/runner.rs`).
+- New pre-branch immediately after policy resolution, before the main `fetch_code_arm` call: if `intent == Comparison && extract_comparators(query).len() >= 2`, run the original-query search (limit 12, body-vec only — same arm policy as fall-through), vote-detect the dominant `project_name` across the top-5, then for each comparator embed `format!("{} {}", comp, query)`, fetch body-vec results (limit 12), filter to the target project, take 8. Push the original-query results in as one more list. Fuse via `fuse_comparator_lists` to `code_limit` (5).
+- After fusion, build a `HashMap<chunk_id, max_natural_score>` from the union of all per-list pre-fusion scores and rewrite each surviving chunk's score to its max-of-natural value. This keeps the global flatten/sort across code+readme+crate+module_doc score-comparable. Without it, the tiny RRF outputs sink every code chunk below every non-code chunk, killing comparison recall@5 entirely (we measured 0.31 with raw RRF, vs 0.65 with max-of-natural).
+- Extraction failure (`comparators.len() < 2`) falls through to the unchanged single-arm Comparison path. No new fallback.
+
+**WASM standalone (`crates/code-rag-ui/src/standalone_api.rs`):**
+- Mirror wiring in `run_retrieval`. WASM `embed_query` is async but `search::search_code_arm` is sync, so the loop awaits embedding then calls search synchronously per comparator. Same vote-based project filter, same max-of-natural rescoring, same fall-through.
+- Imports `embedder::embed_query` (file-level import). No new wasm-specific types.
+
+**Cross-project enforcement.** Both server and WASM rely on `CodeChunk.project_name` being populated by ingest (`crates/code-raptor/src/ingestion/mod.rs::resolve_project_name` — CLI override → top-level path component → repo dir name → "unknown"). No new LanceDB plumbing, no `project` parameter on `store.search_code` — the filter is a pure post-search predicate. The WASM demo bundle is multi-project (`gh-pages.yml` ingests every entry of `config/targets.json` plus the portfolio's nested projects into one `index.json`), so this guard is load-bearing for the demo, not just the server.
+
+### SOTA exploration that did NOT pan out
+
+Tested two recommendations from the code-RAG literature on this corpus + embedder combo, both regressed:
+
+| Configuration | Comparison recall@5 |
+|---|---|
+| Bare comparator + body-vec only (LlamaIndex SubQuestion convention) | 0.31 |
+| Bare comparator + hybrid + rank-norm (LlamaIndex + CodeRAG-Bench) | 0.54 |
+| Concatenated + hybrid + rank-norm (CodeRAG-Bench) | 0.44 |
+| **Concatenated + body-vec only + max-of-natural (chosen)** | **0.65** |
+
+- **Bare-entity sub-queries** (LlamaIndex SubQuestionQueryEngine, RAG-Fusion, LocAgent — all 2024–2025) recommend embedding just the comparator name without the original query as context. On BGE-small-en-v1.5 (384d), single hyphenated identifiers like `shared-py` and `retriever.rs` produce noisy embeddings that match surface-noise functions (`is_lib_rs`, `matches_file`) instead of the intended targets. The papers were validated on larger embedders (BGE-base/large, jina-code, OpenAI text-embedding-3) — the conclusion doesn't generalize down to BGE-small.
+- **BM25 enabled per-sub-search** (CodeRAG-Bench, Sourcegraph multi-symbol) recommends running each sub-search through hybrid BM25+dense. The B3 "BM25 over-ranks one half of a pair" finding turns out to generalize to per-comparator searches on this corpus too: hyphenated identifiers tokenize poorly and BM25 latches onto surface-noise function names. BM25 disabled (matching the pre-C3 arm policy) is empirically better.
+
+Recorded these in code comments above the `comp_use_hybrid` removal so the next person doesn't repeat the experiment without measuring. Both knobs should be re-tested if the embedder is upgraded to BGE-base or jina-code.
+
+### Diagnose-first (forced by metric)
+
+The first three iterations regressed comparison recall@5 in three different ways before the final config landed. Score-scale was the dominant trap (raw RRF dwarfed by distance-converted non-code arms; "rescale to fixed 0.7–1.0" over-dominated and bumped expected crate/readme chunks out of top-5). Vote-based project detection was the second trap (top-1 is too brittle when the query contains tokens that match a comparison-shaped function in an unrelated project — `pre_classify_comparison` in code-rag was the canonical false positive). Each iteration's per-intent breakdown is in the c3_post* report files; the failing-case "Got" columns made each root cause obvious.
+
+### Files touched
+
+- `crates/code-rag-engine/src/comparison.rs` (NEW, +`fuse_comparator_lists` + 5 unit tests)
+- `crates/code-rag-engine/src/lib.rs` (+`pub mod comparison;`)
+- `crates/code-rag-engine/Cargo.toml` (+`regex = "1"` direct dep)
+- `crates/code-rag-engine/src/intent.rs` (+`extract_comparators` + `canonicalize_comparator` + `comparator_patterns` + 11 unit tests)
+- `src/engine/retriever.rs` (+`embedder: &mut Embedder` param, +Comparison pre-branch with vote-based project filter and max-of-natural rescoring)
+- `src/api/handlers.rs` (hold embedder lock through retrieve, pass through)
+- `src/harness/runner.rs` (pass embedder through to retrieve)
+- `crates/code-rag-ui/src/standalone_api.rs` (mirror of server changes for WASM)
+- `crates/code-rag-ui/src/components/chat_view.rs` (drive-by fix: `on_submit_click = on_submit.clone()` — non-standalone build was broken by a pre-existing `use of moved value` on a non-Copy closure)
+- `development_plan.md` (+ "Hypothetical: MMR Diversity Re-ranking" deferred-idea section)
+
+### Reports
+
+- `data/reports/c3_post8_ee22398.{md,json}` — final 81-case run (the metrics quoted above)
+- `data/reports/c3_post4_ee22398.{md,json}` — first iteration with vote-based project filter (also 0.65, same config)
+- `data/reports/c3_post5_ee22398.{md,json}`, `c3_post6_ee22398.{md,json}`, `c3_post7_ee22398.{md,json}` — bare-comparator + hybrid SOTA experiments that regressed
+- `data/reports/c3_post3_ee22398.{md,json}` — max-of-natural rescoring lands but project filter still top-1-only
+- `data/reports/c3_post2_ee22398.{md,json}` — fixed-rescaling failure (over-dominated non-code chunks)
+- `data/reports/c3_post_ee22398.{md,json}` — initial raw-RRF regression (comparison crashed to 0.31)
+
+### Next
+
+C4 (path-aware embeddings) — diagnosed retrieval gap, requires re-ingest + re-export. C5 (graph embeddings research) is gated on C4. The two stubborn comparison failures (`comp-retriever-generator`, `b4-comp-retriever-api`) need a different fix — they're pre-existing pre-C3 failures and would benefit from either a larger embedder or the deferred MMR fallback if the regex extraction misses them in a future query phrasing.
+
+---
+
 ## 2026-04-09: C2 — Graph Result Protection (SOTA Routing + Soft Reserve)
 
 ### Summary

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use code_rag_engine::comparison::fuse_comparator_lists;
 use code_rag_engine::config::{RerankConfig, fetch_limits};
 use code_rag_engine::context;
 use code_rag_engine::graph;
@@ -13,6 +14,7 @@ use code_rag_engine::retriever::{self, RerankText, RetrievalResult, ScoredChunk,
 use crate::api::{ChatResponse, SourceInfo};
 use crate::auth::AuthMethod;
 use crate::data::ChunkIndex;
+use crate::embedder::embed_query;
 use crate::gemini;
 use crate::reranker;
 use crate::search;
@@ -124,14 +126,131 @@ async fn run_retrieval(
         final_config.clone()
     };
 
-    let (code_raw, code_is_relevance) = search::search_code_arm(
-        query,
-        query_embedding,
-        index,
-        search_config.code_limit,
-        use_hybrid,
-        use_sig_vec,
-    );
+    // C3: For Comparison intent with extractable comparators, run one search per
+    // comparator (with the comparator name prepended to the original query) and
+    // RRF-fuse the results so both halves of the comparison get representation in
+    // the final top-K. Project enforcement: post-filter every comparator's
+    // candidate list on the project_name of the original-query top-1 result, so
+    // augmented sub-queries can never pull chunks from a sibling project (the
+    // demo bundle is multi-project; cross-project comparisons are nonsense).
+    // Falls through to the standard single-arm path when extraction fails.
+    let comparison_fused: Option<Vec<(code_rag_types::CodeChunk, f32)>> =
+        if classification.intent == QueryIntent::Comparison {
+            let comparators = intent::extract_comparators(query);
+            if comparators.len() >= 2 {
+                // 1. Original-query search — establishes target project AND
+                //    contributes its own ranking to the fused result.
+                // SOTA NOTE: see server retriever for the empirical record on
+                // bare-comparator + BM25 sub-searches. Both regressed on this
+                // BGE-small + multi-project corpus; sticking with body-vec-only
+                // sub-searches.
+                let (original_hits, _) =
+                    search::search_code_arm(query, query_embedding, index, 12, false, false);
+                // Vote-based project detection across the top-5 of the
+                // original results: top-1 alone is too brittle when the query
+                // matches a comparison-shaped function in an unrelated project.
+                let target_project: Option<String> = {
+                    let mut counts: std::collections::HashMap<&str, usize> =
+                        std::collections::HashMap::new();
+                    for (c, _) in original_hits.iter().take(5) {
+                        *counts.entry(c.project_name.as_str()).or_insert(0) += 1;
+                    }
+                    counts
+                        .into_iter()
+                        .max_by_key(|(_, n)| *n)
+                        .map(|(p, _)| p.to_string())
+                };
+
+                // 2. Per-comparator: await embed_query, then sync search.
+                let mut lists: Vec<Vec<(code_rag_types::CodeChunk, f32)>> =
+                    Vec::with_capacity(comparators.len() + 1);
+                for comp in &comparators {
+                    // Concatenated augmentation `{comparator} {original query}`
+                    // — bare comparators embed poorly with BGE-small. Keep
+                    // the full query as context and let the leading
+                    // comparator token steer the embedding.
+                    let sub_query = format!("{} {}", comp, query);
+                    let emb = match embed_query(&sub_query).await {
+                        Ok(e) if !e.is_empty() => e,
+                        _ => continue,
+                    };
+                    let (raw, _is_rel) = search::search_code_arm(
+                        &sub_query,
+                        &emb,
+                        index,
+                        12,
+                        false,
+                        false,
+                    );
+                    let filtered: Vec<_> = raw
+                        .into_iter()
+                        .filter(|(c, _)| {
+                            target_project
+                                .as_ref()
+                                .is_none_or(|p| &c.project_name == p)
+                        })
+                        .take(8)
+                        .collect();
+                    lists.push(filtered);
+                }
+                let original_filtered: Vec<_> = original_hits
+                    .into_iter()
+                    .filter(|(c, _)| {
+                        target_project
+                            .as_ref()
+                            .is_none_or(|p| &c.project_name == p)
+                    })
+                    .take(8)
+                    .collect();
+                lists.push(original_filtered);
+
+                // Build a max-score lookup from the natural per-list scores,
+                // then assign each fused survivor its best natural score so
+                // the global flatten/sort across code+readme+crate+module_doc
+                // remains score-comparable. RRF decides ordering; max-of-
+                // natural keeps the magnitude in the same range as the
+                // distance-converted non-code arms. See server retriever for
+                // the full rationale.
+                let mut max_score: std::collections::HashMap<String, f32> =
+                    std::collections::HashMap::new();
+                for list in &lists {
+                    for (c, s) in list {
+                        let entry = max_score.entry(c.chunk_id.clone()).or_insert(f32::MIN);
+                        if *s > *entry {
+                            *entry = *s;
+                        }
+                    }
+                }
+                let fused = fuse_comparator_lists(lists, final_config.code_limit);
+                let rescored: Vec<(code_rag_types::CodeChunk, f32)> = fused
+                    .into_iter()
+                    .map(|(c, _rrf)| {
+                        let s = max_score.get(&c.chunk_id).copied().unwrap_or(0.5);
+                        (c, s)
+                    })
+                    .collect();
+                Some(rescored)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    let (code_raw, code_is_relevance) = if let Some(fused) = comparison_fused.as_ref() {
+        // Synthetic rank-based scores (higher = better) — caller must use
+        // `to_scored_relevance`, not the distance-converting `to_scored`.
+        (fused.clone(), true)
+    } else {
+        search::search_code_arm(
+            query,
+            query_embedding,
+            index,
+            search_config.code_limit,
+            use_hybrid,
+            use_sig_vec,
+        )
+    };
     let (readme_raw, crate_raw, module_doc_raw) = if use_hybrid {
         search::hybrid_search_non_code(query, query_embedding, index, &search_config)
     } else {

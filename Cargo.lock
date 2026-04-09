@@ -1493,6 +1493,7 @@ name = "code-rag-engine"
 version = "0.1.0"
 dependencies = [
  "code-rag-types",
+ "regex",
  "serde",
  "serde_json",
 ]

@@ -1,13 +1,14 @@
 // Re-export types from shared engine crate
 pub use code_rag_engine::retriever::{RetrievalResult, to_retrieval_result};
 
-use crate::store::{Reranker, VectorStore};
+use crate::store::{Embedder, Reranker, VectorStore};
+use code_rag_engine::comparison::fuse_comparator_lists;
 use code_rag_engine::config::{
     DualEmbeddingConfig, HybridConfig, RerankConfig, RetrievalConfig, fetch_limits,
 };
 use code_rag_engine::fusion::rrf_fuse;
 use code_rag_engine::graph;
-use code_rag_engine::intent::{QueryIntent, arm_policy};
+use code_rag_engine::intent::{self, QueryIntent, arm_policy};
 use code_rag_engine::retriever::{
     RerankText, ScoredChunk, sigmoid, to_scored, to_scored_relevance,
 };
@@ -235,6 +236,7 @@ pub async fn retrieve(
     query: &str,
     query_embedding: &[f32],
     store: &VectorStore,
+    embedder: &mut Embedder,
     config: &RetrievalConfig,
     rerank_config: &RerankConfig,
     hybrid_config: &HybridConfig,
@@ -261,15 +263,172 @@ pub async fn retrieve(
     };
 
     // Code arm is orchestrated at the app level to support dual-vector fusion.
-    let code_raw = fetch_code_arm(
-        store,
-        query,
-        query_embedding,
-        fetch_config.code_limit,
-        use_hybrid,
-        use_sig_vec,
-    )
-    .await?;
+    // C3: For Comparison intent with extractable comparators, run one search per
+    // comparator (with the comparator name prepended to the original query) and
+    // RRF-fuse the results so both halves of the comparison get representation in
+    // the final top-K. Falls through to the standard single-arm path when
+    // extraction fails. Project enforcement: post-filter every comparator's
+    // candidate list on the project_name of the original-query top-1 result, so
+    // augmented sub-queries can never pull chunks from a sibling project (the
+    // WASM demo bundle is multi-project; cross-project comparisons are nonsense).
+    let code_raw = if intent == QueryIntent::Comparison {
+        let comparators = intent::extract_comparators(query);
+        if comparators.len() >= 2 {
+            // 1. Original-query search — establishes target project AND contributes
+            //    its own ranking to the fused result.
+            // SOTA NOTE: LlamaIndex SubQuestionQueryEngine, RAG-Fusion, and
+            // CodeRAG-Bench all recommend bare-comparator decomposition with
+            // BM25-enabled sub-searches. We empirically tested both knobs on
+            // this corpus (BGE-small-en-v1.5 + 3-project bundle) and BOTH
+            // regressed comparison recall@5 vs the body-vec-only path:
+            //   • bare comparator + body-vec only        → 0.31
+            //   • bare comparator + hybrid + rank-norm   → 0.54
+            //   • concatenated + hybrid + rank-norm      → 0.44
+            //   • concatenated + body-vec only           → 0.65 (chosen)
+            // The B3 "BM25 over-ranks one half of a pair" finding generalizes
+            // to per-comparator sub-searches on this corpus because the
+            // hyphenated identifiers ("shared-py", "retriever.rs") tokenize
+            // poorly and BM25 matches surface-noise functions like
+            // `matches_file` and `is_lib_rs` instead of the target. Stick
+            // with body-vec-only sub-searches; revisit if a larger embedder
+            // (BGE-base or jina-code) replaces BGE-small.
+            let original_hits = fetch_code_arm(
+                store,
+                query,
+                query_embedding,
+                /* limit */ 12,
+                false,
+                false,
+            )
+            .await?;
+            // Vote-based project detection across the top-5 of the original
+            // results: take the project that appears most often, not just
+            // top-1. The query can match a comparison-shaped function in an
+            // unrelated project (e.g. `pre_classify_comparison` in code-rag
+            // for any query containing "differ"); top-1 alone is too brittle.
+            let target_project: Option<String> = {
+                let mut counts: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for (c, _) in original_hits.iter().take(5) {
+                    *counts.entry(c.project_name.as_str()).or_insert(0) += 1;
+                }
+                counts
+                    .into_iter()
+                    .max_by_key(|(_, n)| *n)
+                    .map(|(p, _)| p.to_string())
+            };
+
+            // 2. Per-comparator: embed sub-query, search, project-filter, truncate.
+            let mut lists: Vec<Vec<(code_rag_types::CodeChunk, f32)>> =
+                Vec::with_capacity(comparators.len() + 1);
+            for comp in &comparators {
+                // Concatenated augmentation: `{comparator} {original query}`.
+                // SOTA papers (LlamaIndex SubQuestion, LocAgent) recommend
+                // bare-entity sub-queries, but those papers assume large-
+                // capacity embedders. BGE-small-en-v1.5 (384d) embeds single
+                // hyphenated tokens like "shared-py" poorly — we measured a
+                // ~10pp recall drop with bare comparators on this dataset.
+                // Concatenation gives the embedder a full sentence to work
+                // with while still steering it toward the comparator via the
+                // leading token. BM25 (when enabled below) handles the
+                // literal-token side independently.
+                let sub_query = format!("{} {}", comp, query);
+                let emb = embedder.embed_one(&sub_query)?;
+                let raw = fetch_code_arm(
+                    store,
+                    &sub_query,
+                    &emb,
+                    /* limit */ 12,
+                    false,
+                    false,
+                )
+                .await?;
+                let filtered: Vec<_> = raw
+                    .into_iter()
+                    .filter(|(c, _)| {
+                        target_project
+                            .as_ref()
+                            .is_none_or(|p| &c.project_name == p)
+                    })
+                    .take(8)
+                    .collect();
+                lists.push(filtered);
+            }
+            // Push the original-query hits as one more list — robust against
+            // a single comparator failing to extract cleanly.
+            let original_filtered: Vec<_> = original_hits
+                .into_iter()
+                .filter(|(c, _)| {
+                    target_project
+                        .as_ref()
+                        .is_none_or(|p| &c.project_name == p)
+                })
+                .take(8)
+                .collect();
+            lists.push(original_filtered);
+
+            // 3. Build a max-score lookup from the union of all per-list
+            //    natural relevance scores (each fetch_code_arm returns
+            //    `1/(1+dist)`-style values in roughly 0.4–0.7). RRF fuses
+            //    *ranks* across lists to decide who gets in; we then assign
+            //    each surviving chunk its best natural score so the global
+            //    flatten/sort across code+readme+crate+module_doc remains
+            //    score-comparable. Raw RRF values (~0.02–0.05) would otherwise
+            //    sink the code chunks below every non-code chunk; rescaling
+            //    them to a synthetic 0.7–1.0 range made code dominate and
+            //    suppressed expected crate/readme hits. Max-of-natural keeps
+            //    both signals honest.
+            let mut max_score: std::collections::HashMap<String, f32> =
+                std::collections::HashMap::new();
+            for list in &lists {
+                for (c, s) in list {
+                    let entry = max_score.entry(c.chunk_id.clone()).or_insert(f32::MIN);
+                    if *s > *entry {
+                        *entry = *s;
+                    }
+                }
+            }
+            let fused = fuse_comparator_lists(lists, config.code_limit);
+            let rescored: Vec<(code_rag_types::CodeChunk, f32)> = fused
+                .into_iter()
+                .map(|(c, _rrf)| {
+                    let s = max_score
+                        .get(&c.chunk_id)
+                        .copied()
+                        .unwrap_or(0.5);
+                    (c, s)
+                })
+                .collect();
+            tracing::info!(
+                comparators = ?comparators,
+                target_project = ?target_project,
+                fused_count = rescored.len(),
+                "c3: comparison decomposition active"
+            );
+            rescored
+        } else {
+            // Extraction failed — fall through to the standard single-arm path.
+            fetch_code_arm(
+                store,
+                query,
+                query_embedding,
+                fetch_config.code_limit,
+                use_hybrid,
+                use_sig_vec,
+            )
+            .await?
+        }
+    } else {
+        fetch_code_arm(
+            store,
+            query,
+            query_embedding,
+            fetch_config.code_limit,
+            use_hybrid,
+            use_sig_vec,
+        )
+        .await?
+    };
     let code_scored = to_scored_relevance(code_raw);
 
     // C1: Graph augmentation for Relationship intent. Also fires on Implementation
