@@ -58,7 +58,10 @@ fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 impl RerankText for ReadmeChunk {
     fn rerank_text(&self) -> String {
         let content = if self.content.len() > RERANK_README_CHAR_LIMIT {
-            format!("{}...", truncate_at_char_boundary(&self.content, RERANK_README_CHAR_LIMIT))
+            format!(
+                "{}...",
+                truncate_at_char_boundary(&self.content, RERANK_README_CHAR_LIMIT)
+            )
         } else {
             self.content.clone()
         };

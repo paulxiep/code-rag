@@ -16,11 +16,12 @@ pub async fn chat(
         return Err(ApiError::BadRequest("Query cannot be empty".into()));
     }
 
-    // Embed query once (lock held ~5ms only)
-    let query_embedding = {
-        let mut embedder = state.embedder.lock().await;
-        embedder.embed_one(query)?
-    };
+    // C3: hold the embedder lock through retrieve() — Comparison decomposition
+    // needs to embed augmented per-comparator sub-queries inside the retriever.
+    // Lock window grows from ~5ms to retrieve()-duration but the embedder is
+    // process-local and contention is low.
+    let mut embedder_guard = state.embedder.lock().await;
+    let query_embedding = embedder_guard.embed_one(query)?;
 
     // Keyword pre-filter for unambiguous comparison cues, else embedding classification.
     let intent = if let Some(pre) = intent::pre_classify_comparison(query) {
@@ -39,18 +40,20 @@ pub async fn chat(
         None => None,
     };
     let result = retriever::retrieve(
-        query,
-        &query_embedding,
+        retriever::QueryContext {
+            query,
+            embedding: &query_embedding,
+            intent,
+        },
         &state.store,
+        &mut embedder_guard,
         &retrieval_config,
-        &state.config.rerank,
-        &state.config.hybrid,
-        &state.config.dual_embedding,
+        &state.config,
         reranker_guard.as_deref_mut(),
-        intent,
     )
     .await?;
     drop(reranker_guard); // Release lock before LLM call
+    drop(embedder_guard); // Release embedder lock before LLM call
 
     // Build context (pure function)
     let context = context::build_context(&result);

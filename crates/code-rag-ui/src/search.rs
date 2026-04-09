@@ -4,6 +4,16 @@ use code_rag_engine::config::RetrievalConfig;
 
 use crate::data::{ChunkIndex, EmbeddedChunk};
 
+/// Bundled search results for the three non-code chunk arms (README, crate,
+/// module-doc). Each `Vec` is a list of `(chunk, score)` pairs where the score
+/// is either an RRF rank (hybrid path) or an L2 distance (brute-force path);
+/// the caller decides how to interpret it via the matching `to_scored*` helper.
+pub struct NonCodeResults {
+    pub readme: Vec<(code_rag_types::ReadmeChunk, f32)>,
+    pub crates: Vec<(code_rag_types::CrateChunk, f32)>,
+    pub module_docs: Vec<(code_rag_types::ModuleDocChunk, f32)>,
+}
+
 /// Compute L2 (Euclidean) distance between two vectors.
 fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
@@ -79,11 +89,7 @@ pub fn search_code_arm(
     };
 
     let sig_vec = if use_sig_vec {
-        Some(top_k_signature(
-            query_embedding,
-            &index.code_chunks,
-            limit,
-        ))
+        Some(top_k_signature(query_embedding, &index.code_chunks, limit))
     } else {
         None
     };
@@ -117,11 +123,7 @@ pub fn hybrid_search_non_code(
     query_embedding: &[f32],
     index: &ChunkIndex,
     config: &RetrievalConfig,
-) -> (
-    Vec<(code_rag_types::ReadmeChunk, f32)>,
-    Vec<(code_rag_types::CrateChunk, f32)>,
-    Vec<(code_rag_types::ModuleDocChunk, f32)>,
-) {
+) -> NonCodeResults {
     use crate::text_search::{bm25_search, rrf_fuse};
 
     let readme = if let Some(ref idf) = index.readme_idf {
@@ -174,7 +176,11 @@ pub fn hybrid_search_non_code(
         )
     };
 
-    (readme, crates, module_docs)
+    NonCodeResults {
+        readme,
+        crates,
+        module_docs,
+    }
 }
 
 /// Brute-force vector search for non-code chunk types.
@@ -182,18 +188,14 @@ pub fn brute_force_non_code(
     query_embedding: &[f32],
     index: &ChunkIndex,
     config: &RetrievalConfig,
-) -> (
-    Vec<(code_rag_types::ReadmeChunk, f32)>,
-    Vec<(code_rag_types::CrateChunk, f32)>,
-    Vec<(code_rag_types::ModuleDocChunk, f32)>,
-) {
-    (
-        top_k(query_embedding, &index.readme_chunks, config.readme_limit),
-        top_k(query_embedding, &index.crate_chunks, config.crate_limit),
-        top_k(
+) -> NonCodeResults {
+    NonCodeResults {
+        readme: top_k(query_embedding, &index.readme_chunks, config.readme_limit),
+        crates: top_k(query_embedding, &index.crate_chunks, config.crate_limit),
+        module_docs: top_k(
             query_embedding,
             &index.module_doc_chunks,
             config.module_doc_limit,
         ),
-    )
+    }
 }

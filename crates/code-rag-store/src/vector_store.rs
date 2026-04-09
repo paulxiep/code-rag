@@ -11,7 +11,7 @@ use lancedb::{
 use std::sync::Arc;
 use thiserror::Error;
 
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CallEdge, CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -32,6 +32,7 @@ const CODE_TABLE: &str = "code_chunks";
 const README_TABLE: &str = "readme_chunks";
 const CRATE_TABLE: &str = "crate_chunks";
 const MODULE_DOC_TABLE: &str = "module_doc_chunks";
+const CALL_EDGES_TABLE: &str = "call_edges";
 
 /// LanceDB-backed vector store for code and readme chunks.
 pub struct VectorStore {
@@ -76,8 +77,7 @@ impl VectorStore {
             return Ok(0);
         }
 
-        let batch =
-            code_chunks_to_batch(chunks, embeddings, signature_embeddings, self.dimension)?;
+        let batch = code_chunks_to_batch(chunks, embeddings, signature_embeddings, self.dimension)?;
         let count = batch.num_rows();
 
         self.upsert_batch(CODE_TABLE, batch).await?;
@@ -771,11 +771,288 @@ impl VectorStore {
             .await
             .map_err(|_| StoreError::TableNotFound(name.to_string()))
     }
+
+    // ========================================================================
+    // Call edges (C1: Graph RAG)
+    // ========================================================================
+
+    /// Insert call graph edges. Creates the call_edges table if needed.
+    /// No vector column — pure scalar table.
+    pub async fn upsert_call_edges(&self, edges: &[CallEdge]) -> Result<usize, StoreError> {
+        if edges.is_empty() {
+            return Ok(0);
+        }
+
+        let batch = call_edges_to_batch(edges)?;
+        let count = batch.num_rows();
+        self.upsert_batch(CALL_EDGES_TABLE, batch).await?;
+        Ok(count)
+    }
+
+    /// Get all edges where callee_chunk_id matches (i.e., callers of the given chunk).
+    pub async fn get_callers(
+        &self,
+        callee_chunk_id: &str,
+        project: Option<&str>,
+    ) -> Result<Vec<CallEdge>, StoreError> {
+        let mut filter = format!("callee_chunk_id = '{}'", callee_chunk_id.replace("'", "''"));
+        if let Some(p) = project {
+            filter.push_str(&format!(" AND project_name = '{}'", p.replace("'", "''")));
+        }
+        self.query_call_edges(&filter).await
+    }
+
+    /// Get all edges where caller_chunk_id matches (i.e., callees of the given chunk).
+    pub async fn get_callees(
+        &self,
+        caller_chunk_id: &str,
+        project: Option<&str>,
+    ) -> Result<Vec<CallEdge>, StoreError> {
+        let mut filter = format!("caller_chunk_id = '{}'", caller_chunk_id.replace("'", "''"));
+        if let Some(p) = project {
+            filter.push_str(&format!(" AND project_name = '{}'", p.replace("'", "''")));
+        }
+        self.query_call_edges(&filter).await
+    }
+
+    /// Get all edges for a project (for building a full CallGraph).
+    pub async fn get_all_edges(&self, project_name: &str) -> Result<Vec<CallEdge>, StoreError> {
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        self.query_call_edges(&filter).await
+    }
+
+    /// Delete all edges for a project (before re-resolving).
+    pub async fn delete_edges_by_project(&self, project_name: &str) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(CALL_EDGES_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
+
+    /// Helper: query call_edges table with a filter predicate.
+    async fn query_call_edges(&self, filter: &str) -> Result<Vec<CallEdge>, StoreError> {
+        let table = match self.conn.open_table(CALL_EDGES_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()), // Table doesn't exist yet
+        };
+
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut edges = Vec::new();
+        for batch in &results {
+            edges.extend(extract_call_edges_from_batch(batch)?);
+        }
+        Ok(edges)
+    }
+
+    /// Fetch full CodeChunks by their chunk IDs (for graph-resolved lookups).
+    pub async fn get_chunks_by_ids(
+        &self,
+        chunk_ids: &[String],
+    ) -> Result<Vec<CodeChunk>, StoreError> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let table = self.get_table(CODE_TABLE).await?;
+        let mut all_chunks = Vec::new();
+
+        // Batch queries to avoid overly-long SQL predicates
+        for batch_ids in chunk_ids.chunks(100) {
+            let ids_str: String = batch_ids
+                .iter()
+                .map(|id| format!("'{}'", id.replace("'", "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let results: Vec<RecordBatch> = table
+                .query()
+                .only_if(format!("chunk_id IN ({})", ids_str))
+                .execute()
+                .await?
+                .try_collect()
+                .await?;
+
+            for batch in &results {
+                let chunks = extract_code_chunks_from_batch_with_score(batch, "_distance");
+                // If _distance column doesn't exist (no vector search), try without score
+                let chunks = match chunks {
+                    Ok(c) => c.into_iter().map(|(chunk, _)| chunk).collect(),
+                    Err(_) => extract_code_chunks_no_score(batch)?,
+                };
+                all_chunks.extend(chunks);
+            }
+        }
+        Ok(all_chunks)
+    }
 }
 
 // ============================================================================
 // Arrow conversion functions (pure, no side effects)
 // ============================================================================
+
+fn call_edges_to_batch(edges: &[CallEdge]) -> Result<RecordBatch, StoreError> {
+    use arrow_array::UInt8Array;
+
+    let edge_ids: StringArray = edges.iter().map(|e| Some(e.edge_id.as_str())).collect();
+    let caller_chunk_ids: StringArray = edges
+        .iter()
+        .map(|e| Some(e.caller_chunk_id.as_str()))
+        .collect();
+    let callee_chunk_ids: StringArray = edges
+        .iter()
+        .map(|e| Some(e.callee_chunk_id.as_str()))
+        .collect();
+    let caller_identifiers: StringArray = edges
+        .iter()
+        .map(|e| Some(e.caller_identifier.as_str()))
+        .collect();
+    let callee_identifiers: StringArray = edges
+        .iter()
+        .map(|e| Some(e.callee_identifier.as_str()))
+        .collect();
+    let caller_files: StringArray = edges.iter().map(|e| Some(e.caller_file.as_str())).collect();
+    let callee_files: StringArray = edges.iter().map(|e| Some(e.callee_file.as_str())).collect();
+    let project_names: StringArray = edges
+        .iter()
+        .map(|e| Some(e.project_name.as_str()))
+        .collect();
+    let resolution_tiers: UInt8Array = edges.iter().map(|e| Some(e.resolution_tier)).collect();
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("edge_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("caller_chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("callee_chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("caller_identifier", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("callee_identifier", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("caller_file", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("callee_file", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("resolution_tier", arrow_schema::DataType::UInt8, false),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(edge_ids),
+            Arc::new(caller_chunk_ids),
+            Arc::new(callee_chunk_ids),
+            Arc::new(caller_identifiers),
+            Arc::new(callee_identifiers),
+            Arc::new(caller_files),
+            Arc::new(callee_files),
+            Arc::new(project_names),
+            Arc::new(resolution_tiers),
+        ],
+    )?)
+}
+
+fn extract_call_edges_from_batch(batch: &RecordBatch) -> Result<Vec<CallEdge>, StoreError> {
+    use arrow_array::UInt8Array;
+
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let edge_ids = col("edge_id")?;
+    let caller_chunk_ids = col("caller_chunk_id")?;
+    let callee_chunk_ids = col("callee_chunk_id")?;
+    let caller_identifiers = col("caller_identifier")?;
+    let callee_identifiers = col("callee_identifier")?;
+    let caller_files = col("caller_file")?;
+    let callee_files = col("callee_file")?;
+    let project_names = col("project_name")?;
+    let resolution_tiers = batch
+        .column_by_name("resolution_tier")
+        .and_then(|c| c.as_any().downcast_ref::<UInt8Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("resolution_tier".into()))?;
+
+    let edges = (0..batch.num_rows())
+        .map(|i| CallEdge {
+            edge_id: edge_ids.value(i).to_string(),
+            caller_chunk_id: caller_chunk_ids.value(i).to_string(),
+            callee_chunk_id: callee_chunk_ids.value(i).to_string(),
+            caller_identifier: caller_identifiers.value(i).to_string(),
+            callee_identifier: callee_identifiers.value(i).to_string(),
+            caller_file: caller_files.value(i).to_string(),
+            callee_file: callee_files.value(i).to_string(),
+            project_name: project_names.value(i).to_string(),
+            resolution_tier: resolution_tiers.value(i),
+        })
+        .collect();
+
+    Ok(edges)
+}
+
+/// Extract CodeChunks from a RecordBatch without requiring a distance/score column.
+/// Used by `get_chunks_by_ids` where we're doing a scalar filter query, not vector search.
+fn extract_code_chunks_no_score(batch: &RecordBatch) -> Result<Vec<CodeChunk>, StoreError> {
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let file_paths = col("file_path")?;
+    let languages = col("language")?;
+    let identifiers = col("identifier")?;
+    let node_types = col("node_type")?;
+    let code_contents = col("code_content")?;
+    let chunk_ids = col("chunk_id")?;
+    let content_hashes = col("content_hash")?;
+    let model_versions = col("embedding_model_version")?;
+    let project_names = col("project_name")?;
+
+    let start_lines = batch
+        .column_by_name("start_line")
+        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("start_line".into()))?;
+
+    let docstrings = batch
+        .column_by_name("docstring")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let signatures = batch
+        .column_by_name("signature")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
+    let nullable_string = |arr: Option<&StringArray>, i: usize| -> Option<String> {
+        arr.filter(|a| !a.is_null(i))
+            .map(|a| a.value(i).to_string())
+    };
+
+    let chunks = (0..batch.num_rows())
+        .map(|i| CodeChunk {
+            file_path: file_paths.value(i).to_string(),
+            language: languages.value(i).to_string(),
+            identifier: identifiers.value(i).to_string(),
+            node_type: node_types.value(i).to_string(),
+            code_content: code_contents.value(i).to_string(),
+            start_line: start_lines.value(i) as usize,
+            project_name: project_names.value(i).to_string(),
+            docstring: nullable_string(docstrings, i),
+            signature: nullable_string(signatures, i),
+            chunk_id: chunk_ids.value(i).to_string(),
+            content_hash: content_hashes.value(i).to_string(),
+            embedding_model_version: model_versions.value(i).to_string(),
+        })
+        .collect();
+
+    Ok(chunks)
+}
 
 fn code_chunks_to_batch(
     chunks: &[CodeChunk],
@@ -1597,10 +1874,10 @@ pub fn build_searchable_text(
     if let Some(sig) = signature {
         parts.push(sig.to_string());
     }
-    if let Some(doc) = docstring {
-        if !doc.is_empty() {
-            parts.push(doc.to_string());
-        }
+    if let Some(doc) = docstring
+        && !doc.is_empty()
+    {
+        parts.push(doc.to_string());
     }
     parts.join("\n")
 }
@@ -1674,8 +1951,7 @@ mod tests {
         let embeddings = vec![fake_embedding(384)];
         let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let batch =
-            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
+        let batch = code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
         // 13 text/int fields + body vector + signature_vector = 15
@@ -1689,8 +1965,7 @@ mod tests {
         let embeddings = vec![fake_embedding(384)];
         let sig_embeddings: Vec<Option<Vec<f32>>> = vec![None];
 
-        let batch =
-            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
+        let batch = code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         let sig_col = batch.column_by_name("signature_vector").unwrap();
         assert!(sig_col.is_null(0));
@@ -1714,8 +1989,7 @@ mod tests {
         let embeddings = vec![fake_embedding(384)];
         let sig_embeddings = vec![Some(fake_embedding(384))];
 
-        let batch =
-            code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
+        let batch = code_chunks_to_batch(&chunks, embeddings, sig_embeddings, 384).unwrap();
 
         let identifiers = batch
             .column_by_name("identifier")
@@ -1750,5 +2024,117 @@ mod tests {
         let results = store.search_code(&fake_embedding(384), 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.identifier, "test_func");
+    }
+
+    #[test]
+    fn test_call_edges_to_batch_roundtrip() {
+        let edge = CallEdge {
+            edge_id: "edge1".into(),
+            caller_chunk_id: "caller1".into(),
+            callee_chunk_id: "callee1".into(),
+            caller_identifier: "foo".into(),
+            callee_identifier: "bar".into(),
+            caller_file: "src/a.rs".into(),
+            callee_file: "src/b.rs".into(),
+            project_name: "test".into(),
+            resolution_tier: 1,
+        };
+
+        let batch = call_edges_to_batch(&[edge]).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 9);
+
+        let edges = extract_call_edges_from_batch(&batch).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].edge_id, "edge1");
+        assert_eq!(edges[0].caller_identifier, "foo");
+        assert_eq!(edges[0].callee_identifier, "bar");
+        assert_eq!(edges[0].resolution_tier, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires filesystem, run with --ignored"]
+    async fn test_call_edges_upsert_and_query() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.lance");
+        let store = VectorStore::new(db_path.to_str().unwrap(), 384)
+            .await
+            .unwrap();
+
+        let edges = vec![
+            CallEdge {
+                edge_id: "e1".into(),
+                caller_chunk_id: "c_foo".into(),
+                callee_chunk_id: "c_bar".into(),
+                caller_identifier: "foo".into(),
+                callee_identifier: "bar".into(),
+                caller_file: "src/a.rs".into(),
+                callee_file: "src/a.rs".into(),
+                project_name: "proj".into(),
+                resolution_tier: 1,
+            },
+            CallEdge {
+                edge_id: "e2".into(),
+                caller_chunk_id: "c_foo".into(),
+                callee_chunk_id: "c_baz".into(),
+                caller_identifier: "foo".into(),
+                callee_identifier: "baz".into(),
+                caller_file: "src/a.rs".into(),
+                callee_file: "src/b.rs".into(),
+                project_name: "proj".into(),
+                resolution_tier: 2,
+            },
+        ];
+
+        let count = store.upsert_call_edges(&edges).await.unwrap();
+        assert_eq!(count, 2);
+
+        // Query callers of bar → foo
+        let callers = store.get_callers("c_bar", Some("proj")).await.unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].caller_identifier, "foo");
+
+        // Query callees of foo → bar, baz
+        let callees = store.get_callees("c_foo", Some("proj")).await.unwrap();
+        assert_eq!(callees.len(), 2);
+
+        // Query all edges for project
+        let all = store.get_all_edges("proj").await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Delete by project
+        store.delete_edges_by_project("proj").await.unwrap();
+        let after_delete = store.get_all_edges("proj").await.unwrap();
+        assert_eq!(after_delete.len(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires filesystem, run with --ignored"]
+    async fn test_get_chunks_by_ids() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.lance");
+        let store = VectorStore::new(db_path.to_str().unwrap(), 384)
+            .await
+            .unwrap();
+
+        let mut chunk = sample_code_chunk();
+        chunk.chunk_id = "known_id".into();
+        let chunks = vec![chunk];
+        let embeddings = vec![fake_embedding(384)];
+        let sig_embeddings = vec![Some(fake_embedding(384))];
+
+        store
+            .upsert_code_chunks(&chunks, embeddings, sig_embeddings)
+            .await
+            .unwrap();
+
+        let found = store.get_chunks_by_ids(&["known_id".into()]).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].chunk_id, "known_id");
+        assert_eq!(found[0].identifier, "test_func");
+
+        // Unknown ID returns empty
+        let not_found = store.get_chunks_by_ids(&["unknown".into()]).await.unwrap();
+        assert_eq!(not_found.len(), 0);
     }
 }

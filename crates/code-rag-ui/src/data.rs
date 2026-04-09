@@ -3,7 +3,7 @@
 use gloo_net::http::Request;
 use serde::Deserialize;
 
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, ModuleDocChunk, ReadmeChunk};
 
 /// A chunk paired with its pre-computed embedding vector.
 #[derive(Debug, Clone, Deserialize)]
@@ -39,15 +39,27 @@ pub struct ChunkIndex {
     #[serde(default)]
     pub module_doc_idf: Option<super::text_search::IdfTable>,
 
+    /// C1: Call graph edges for browser-side graph traversal.
+    #[serde(default)]
+    pub call_edges: Vec<ExportEdge>,
+
     /// Pre-computed searchable_text for code chunks (B3).
     /// Built at load time from identifier + signature + docstring.
     #[serde(skip)]
     pub code_searchable_texts: Vec<String>,
+
+    /// C1: chunk_id → index into code_chunks vec for O(1) graph-resolved lookups.
+    #[serde(skip)]
+    pub chunk_id_index: std::collections::HashMap<String, usize>,
 }
 
 /// Build searchable_text from high-signal fields (mirrors server-side build_searchable_text).
 /// Identifier boosted 2x + camelCase split + signature + docstring.
-fn build_searchable_text(identifier: &str, signature: Option<&str>, docstring: Option<&str>) -> String {
+fn build_searchable_text(
+    identifier: &str,
+    signature: Option<&str>,
+    docstring: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
     let split = split_camel_case(identifier);
     if split != identifier.to_lowercase() {
@@ -58,10 +70,10 @@ fn build_searchable_text(identifier: &str, signature: Option<&str>, docstring: O
     if let Some(sig) = signature {
         parts.push(sig.to_string());
     }
-    if let Some(doc) = docstring {
-        if !doc.is_empty() {
-            parts.push(doc.to_string());
-        }
+    if let Some(doc) = docstring
+        && !doc.is_empty()
+    {
+        parts.push(doc.to_string());
     }
     parts.join("\n")
 }
@@ -116,6 +128,14 @@ pub async fn load_index(url: &str) -> Result<ChunkIndex, String> {
                 ec.chunk.docstring.as_deref(),
             )
         })
+        .collect();
+
+    // C1: Build chunk_id → index lookup for O(1) graph-resolved lookups
+    index.chunk_id_index = index
+        .code_chunks
+        .iter()
+        .enumerate()
+        .map(|(i, ec)| (ec.chunk.chunk_id.clone(), i))
         .collect();
 
     Ok(index)

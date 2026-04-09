@@ -80,6 +80,39 @@ pub struct CrateChunk {
     pub embedding_model_version: String,
 }
 
+/// A directed edge in the call graph: caller → callee.
+/// Stored once per edge. Queried both directions via filter predicates.
+/// No embedding vector — pure scalar table in LanceDB.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CallEdge {
+    /// Deterministic: content_hash("edge:{caller_chunk_id}:{callee_chunk_id}")
+    pub edge_id: String,
+    /// FK to CodeChunk.chunk_id
+    pub caller_chunk_id: String,
+    /// FK to CodeChunk.chunk_id
+    pub callee_chunk_id: String,
+    /// Human-readable caller function name
+    pub caller_identifier: String,
+    /// Human-readable callee function name
+    pub callee_identifier: String,
+    /// Normalized path of caller's file
+    pub caller_file: String,
+    /// Normalized path of callee's file
+    pub callee_file: String,
+    pub project_name: String,
+    /// Resolution confidence: 1=same_file, 2=import_based, 3=unique_global
+    pub resolution_tier: u8,
+}
+
+/// Compact call edge for JSON export (WASM standalone demo).
+/// Browser looks up file/identifier from existing chunk data.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportEdge {
+    pub caller: String,
+    pub callee: String,
+    pub tier: u8,
+}
+
 /// Represents module-level documentation (//! comments at top of lib.rs)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ModuleDocChunk {
@@ -157,6 +190,33 @@ mod tests {
         let id1 = deterministic_chunk_id("src/a.rs", "fn foo() {}");
         let id2 = deterministic_chunk_id("src/b.rs", "fn foo() {}");
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_call_edge_deterministic_edge_id() {
+        let edge_id1 = content_hash(&format!("edge:{}:{}", "chunk_a", "chunk_b"));
+        let edge_id2 = content_hash(&format!("edge:{}:{}", "chunk_a", "chunk_b"));
+        assert_eq!(edge_id1, edge_id2);
+    }
+
+    #[test]
+    fn test_call_edge_different_direction_different_id() {
+        let id_ab = content_hash(&format!("edge:{}:{}", "chunk_a", "chunk_b"));
+        let id_ba = content_hash(&format!("edge:{}:{}", "chunk_b", "chunk_a"));
+        assert_ne!(id_ab, id_ba);
+    }
+
+    #[test]
+    fn test_export_edge_clone() {
+        let edge = ExportEdge {
+            caller: "chunk_a".into(),
+            callee: "chunk_b".into(),
+            tier: 1,
+        };
+        let cloned = edge.clone();
+        assert_eq!(cloned.caller, "chunk_a");
+        assert_eq!(cloned.callee, "chunk_b");
+        assert_eq!(cloned.tier, 1);
     }
 
     #[test]

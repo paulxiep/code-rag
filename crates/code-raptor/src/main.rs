@@ -7,8 +7,8 @@ use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 use code_raptor::{
     DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
     IngestionStats, VectorStore, format_code_for_embedding, format_crate_for_embedding,
-    format_signature_for_embedding,
-    format_module_doc_for_embedding, format_readme_for_embedding, reconcile, run_ingestion,
+    format_module_doc_for_embedding, format_readme_for_embedding, format_signature_for_embedding,
+    reconcile, run_ingestion,
 };
 use std::collections::{HashMap, HashSet};
 use tracing::info;
@@ -99,7 +99,8 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Step 1: Parse code into chunks (sync, no DB)
-            let (result, calls_map) = run_ingestion(&repo_path, project_name.as_deref());
+            let (result, calls_map, imports_map) =
+                run_ingestion(&repo_path, project_name.as_deref());
             info!(
                 "Parsed: {} code, {} readme, {} crate, {} module_doc chunks",
                 result.code_chunks.len(),
@@ -119,6 +120,25 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 run_incremental_ingestion(&result, &store, &mut embedder, dry_run, &calls_map)
                     .await?;
+            }
+
+            // Step 4: C1 — Resolve call edges and persist them
+            if !dry_run {
+                let edges = code_raptor::edge_resolution::resolve_edges(
+                    &result.code_chunks,
+                    &calls_map,
+                    &imports_map,
+                );
+                if !edges.is_empty() {
+                    let project = result
+                        .code_chunks
+                        .first()
+                        .map(|c| c.project_name.as_str())
+                        .unwrap_or("unknown");
+                    store.delete_edges_by_project(project).await?;
+                    let count = store.upsert_call_edges(&edges).await?;
+                    info!("Resolved {} call edges (project: {})", count, project);
+                }
             }
         }
         Commands::Status { db_path } => {
@@ -406,7 +426,10 @@ async fn embed_and_store_code(
         return Ok(0);
     }
 
-    info!("Embedding {} code chunks (body + signature)...", chunks.len());
+    info!(
+        "Embedding {} code chunks (body + signature)...",
+        chunks.len()
+    );
     let empty = Vec::new();
     let mut total = 0;
     for batch in chunks.chunks(EMBEDDING_BATCH_SIZE) {
@@ -447,7 +470,10 @@ async fn embed_and_store_code(
         let sig_texts: Vec<&str> = sig_text_indices.iter().map(|(_, t)| t.as_str()).collect();
         let sig_embeddings_dense = embedder.embed_batch(&sig_texts)?;
         let mut signature_embeddings: Vec<Option<Vec<f32>>> = vec![None; batch.len()];
-        for ((idx, _), emb) in sig_text_indices.iter().zip(sig_embeddings_dense.into_iter()) {
+        for ((idx, _), emb) in sig_text_indices
+            .iter()
+            .zip(sig_embeddings_dense.into_iter())
+        {
             signature_embeddings[*idx] = Some(emb);
         }
 

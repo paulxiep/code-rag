@@ -1,10 +1,46 @@
 use code_rag_types::{CodeChunk, content_hash, new_chunk_id};
 use std::path::Path;
 use tracing::warn;
-use tree_sitter::{Parser, Query, StreamingIterator};
+use tree_sitter::{Node, Parser, Query, StreamingIterator};
 
 use super::language::LanguageHandler;
 use super::languages::{RustHandler, handler_for_path};
+
+/// Check if a tree-sitter node is inside a `#[cfg(test)]` module.
+/// Walks up the tree to find an enclosing `mod_item` with a preceding `#[cfg(test)]` attribute.
+fn is_inside_test_module(node: &Node, source_bytes: &[u8]) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        let mod_node = if parent.kind() == "mod_item" {
+            Some(parent)
+        } else if parent.kind() == "item_list" {
+            parent.parent().filter(|p| p.kind() == "mod_item")
+        } else {
+            None
+        };
+
+        if let Some(mod_node) = mod_node {
+            // Walk backward from mod_item to find preceding #[cfg(test)] attribute
+            let mut prev = mod_node.prev_sibling();
+            while let Some(sib) = prev {
+                if sib.kind() == "attribute_item"
+                    && let Ok(text) = sib.utf8_text(source_bytes)
+                    && (text.contains("cfg(test)") || text.contains("cfg( test )"))
+                {
+                    return true;
+                } else if sib.kind() != "attribute_item"
+                    && sib.kind() != "line_comment"
+                    && sib.kind() != "block_comment"
+                {
+                    break;
+                }
+                prev = sib.prev_sibling();
+            }
+        }
+        current = parent.parent();
+    }
+    false
+}
 
 /// Default embedding model version (matches embedder.rs)
 const DEFAULT_EMBEDDING_MODEL: &str = "BGESmallENV15_384";
@@ -78,6 +114,10 @@ impl CodeAnalyzer {
                 let body = m.captures.iter().find(|c| Some(c.index) == body_idx);
                 let name = m.captures.iter().find(|c| Some(c.index) == name_idx);
                 if let (Some(b), Some(n)) = (body, name) {
+                    // Node-level: skip functions inside #[cfg(test)] modules
+                    if is_inside_test_module(&b.node, source_bytes) {
+                        return acc;
+                    }
                     let docstring = handler.extract_docstring(source, &b.node, source_bytes);
                     let calls = handler.extract_calls(source, &b.node, source_bytes);
                     let signature = handler.extract_signature(source, &b.node, source_bytes);
@@ -403,5 +443,44 @@ impl MyStruct {
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0.identifier, "foo");
         assert_eq!(pairs[0].1, vec!["bar", "baz"]);
+    }
+
+    #[test]
+    fn test_skips_cfg_test_module() {
+        let source = r#"
+fn production_fn() { }
+
+#[cfg(test)]
+mod tests {
+    fn test_helper() { }
+
+    #[test]
+    fn test_something() { assert!(true); }
+}
+"#;
+
+        let mut analyzer = CodeAnalyzer::new();
+        let pairs = analyzer.analyze_with_handler(source, &RustHandler);
+
+        // Only production_fn should be extracted, test functions skipped
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0.identifier, "production_fn");
+    }
+
+    #[test]
+    fn test_keeps_non_test_module() {
+        let source = r#"
+fn foo() { }
+
+mod utils {
+    fn helper() { }
+}
+"#;
+
+        let mut analyzer = CodeAnalyzer::new();
+        let pairs = analyzer.analyze_with_handler(source, &RustHandler);
+
+        // Both foo and helper should be extracted
+        assert_eq!(pairs.len(), 2);
     }
 }

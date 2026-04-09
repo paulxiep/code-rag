@@ -40,8 +40,11 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
     let auth_signal = use_context::<RwSignal<Option<crate::auth::AuthMethod>>>()
         .expect("AuthMethod context missing");
 
+    // Stash api_base in a Copy handle so `on_submit` stays Copy in both
+    // standalone and non-standalone builds (the latter would otherwise
+    // capture a String and need cloning at every call site).
     #[cfg(not(feature = "standalone"))]
-    let api_base_submit = api_base.clone();
+    let api_base_submit = StoredValue::new(api_base.clone());
 
     let on_submit = move || {
         let query = input.get().trim().to_string();
@@ -77,7 +80,7 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
 
         #[cfg(not(feature = "standalone"))]
         {
-            let base = api_base_submit.clone();
+            let base = api_base_submit.get_value();
             spawn_local(async move {
                 match api::send_chat(&base, &query).await {
                     Ok(response) => {
@@ -94,9 +97,6 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
             });
         }
     };
-
-    let on_submit_click = on_submit.clone();
-    let on_submit_key = on_submit.clone();
 
     view! {
         <div class="chat-container">
@@ -188,14 +188,14 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
                     on:keydown=move |ev: web_sys::KeyboardEvent| {
                         if ev.key() == "Enter" && !ev.shift_key() {
                             ev.prevent_default();
-                            on_submit_key();
+                            on_submit();
                         }
                     }
                     disabled=move || loading.get()
                 />
                 <button
                     class="send-btn"
-                    on:click=move |_| on_submit_click()
+                    on:click=move |_| on_submit()
                     disabled=move || loading.get() || input.get().trim().is_empty()
                 >
                     "Send"

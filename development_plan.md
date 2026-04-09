@@ -56,9 +56,9 @@ code-raptor (producer)          code-rag-chat (consumer)
               [LanceDB Schema]
               - CodeChunk (function-level)
               - ReadmeChunk, CrateChunk, ModuleDocChunk
-              - FolderChunk (A1, future)
-              - FileChunk (A1, future)
-              - ClusterChunk (A3, future)
+              - FolderChunk (A, future)
+              - FileChunk (A, future)
+              - ClusterChunk (R, future)
               - CallEdge (C1, future)
 
 code-rag-engine (shared pure algorithms, no I/O)
@@ -78,8 +78,8 @@ code-rag-ui (Leptos WASM frontend)
 
 ```
 Fix docstring extraction
-    └──► Docstring generation [must extract before generate]
-            └──► RAPTOR clustering [clusters on generated summaries]
+    └──► Docstring generation (Track D) [must extract before generate]
+            └──► RAPTOR clustering (Track R) [clusters on generated summaries]
 
 Inline call context
     └──► Same-file call edges
@@ -96,8 +96,8 @@ LanguageHandler refactor ─────── V1.2 (pure refactor, unblocks V1.
     ├──► TypeScript support (V1.4)
     └──► Docstring extraction (V1.5, wires extract_docstring for all handlers)
 
-RAPTOR clustering ─────────────── needs A2 enrichment + A1 hierarchy
-    └──► Architecture comparison [requires A1 hierarchy]
+RAPTOR clustering (Track R) ───── needs Track D enrichment + Track A hierarchy
+    └──► Architecture comparison [requires Track A hierarchy]
 ```
 
 ### code-rag-chat + code-rag-engine (Query) Dependencies
@@ -111,16 +111,15 @@ Cross-encoder reranking ────────── independent (Track B, que
 Hybrid search ─────────────────── independent (query-side)
 
 Graph query interface ─────────── requires call graph data
-
-Graph embeddings research ──────── requires C2 (call graph data)
 ```
 
 ### Parallelization Opportunities
 
 | Can run in parallel | Rationale |
 |---------------------|-----------|
-| Track A + Track B + Track C | Independent after V3 |
-| A1 + B1 + C1 | All can start after V3 completes |
+| Track A + Track B + Track C + Track D | Independent after V3 |
+| Track R after Track D | R clusters on D-generated summaries |
+| A + B1 + C1 + D1 | All can start after V3 completes |
 | V2.2 + V2.3 | All code-rag-chat, no dependencies |
 | Folder/File embeddings + Hybrid search | Indexing vs query |
 
@@ -140,17 +139,23 @@ V2 (Query Intelligence) ─── intent routing + retrieval traces       [COMPL
  ▼
 V3 (Quality Harness) ─── quantitative testing infrastructure
  │
- ├──► Track A: Semantic Understanding (sequential)
- │       A1: Hierarchy → A2: Enrichment → A3: RAPTOR
+ ├──► Track A: Semantic Understanding
+ │       A: Hierarchy (folder/file embeddings + routing)
  │
- ├──► Track B: Search Precision (independent)
- │       B1 → B2 → B3
+ ├──► Track B: Search Precision
+ │       B1 → B2 → B3 → B4 → B5
  │
- └──► Track C: Relationship Graph (independent)
-         C1 → C2 → C3 → C4
+ ├──► Track C: Relationship Graph
+ │       C1 → C2 → C3
+ │
+ ├──► Track D: Enrichment Pipeline
+ │       D1: Docstring Generation → D2: Type Inference
+ │
+ └──► Track R: RAPTOR Research (time-boxed, after Track D)
+         R1 → R2 → R3 → R4 → R5
 ```
 
-V1 → V2 → V3 are sequential. Tracks A, B, C can run in parallel after V3. Prioritize based on user needs.
+V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3. Track R starts after Track D. Prioritize based on user needs.
 
 ### Effort Summary
 
@@ -159,9 +164,11 @@ V1 → V2 → V3 are sequential. Tracks A, B, C can run in parallel after V3. Pr
 | **V1** (Indexing) | 2.5-3 weeks | 2.5-3 weeks |
 | **V2** (Query) | 1 week | 2.5-3 weeks |
 | **V3** (Testing) | 1 week | 3.5-4 weeks |
-| **Track A** (A1→A2→A3) | 4-5 weeks | — |
-| **Track B** (B1→B2→B3) | 2-3 weeks | — |
-| **Track C** (C1→C2→C3→C4) | 3-5 weeks | — |
+| **Track A** (A1→A5) | 1.5-2 weeks | — |
+| **Track B** (B1→B2→B3→B4→B5) | 3-4 weeks | — |
+| **Track C** (C1→C2→C3) | 2-3 weeks | — |
+| **Track D** (D1→D2) | 1-1.5 weeks | — |
+| **Track R** (R1→R5, after D) | 2 weeks | — |
 
 **If running Tracks in parallel:** V1+V2+V3 (~4 weeks) + longest Track (~5 weeks) = **~9-10 weeks to full feature set**
 
@@ -173,12 +180,12 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 | Track | Priority | Rationale |
 |-------|----------|-----------|
-| **A1 (Hierarchy)** | High | "What does this folder do?" is a likely first question |
+| **A (Hierarchy)** | High | "What does this folder do?" is a likely first question |
 | **B1 (Reranking)** | High | Single highest-ROI change; 20-35% recall improvement |
 | **B2 (Hybrid search)** | High | Precision for exact identifier queries |
-| **A2 (Enrichment)** | Medium | Helps with undocumented code |
+| **D1 (Docstring Gen)** | Medium | Helps with undocumented code |
 | **C1 (Same-file edges)** | Medium | Basic relationship queries |
-| **A3 (RAPTOR)** | Research | Impressive if successful, time-boxed |
+| **R (RAPTOR)** | Research | Impressive if successful, time-boxed |
 
 ---
 
@@ -452,13 +459,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 ---
 
-# Track A: Semantic Understanding
-
-Sequential: A1 → A2 → A3
-
----
-
-## A1: Hierarchy (Top-Down Architecture)
+# Track A: Hierarchy (Top-Down Architecture)
 
 **Goal:** Answer architecture-level questions about unfamiliar codebases.
 
@@ -466,166 +467,148 @@ Sequential: A1 → A2 → A3
 
 | Item | Effort | Notes |
 |------|--------|-------|
-| A1.1 Folder Embeddings | 3-4 days | New chunk type, summarization logic |
-| A1.2 File Embeddings | 2-3 days | Similar pattern to A1.1 |
-| A1.3 Repo Summaries | 2-3 days | README/manifest parsing, LLM summarization |
-| A1.4 Hierarchical Routing | 2-3 days | Extend intent classifier |
+| A1 Text Module Consolidation | 1-2 days | Deduplicate WASM/native code into code-rag-engine |
+| A2 Folder Embeddings | 3-4 days | New chunk type, template-based summarization |
+| A3 Collapsed-Tree Routing | 1-2 days | Extend routing table — modular, works with any chunk type combo |
+| A4 File Embeddings | 2-3 days | Similar pattern to A2; lights up in routing automatically |
+| A5 Repo Summaries | 2-3 days | README/manifest parsing, template-based |
 
-### A1.1: Folder-Level Embeddings
-- New `FolderChunk` type
-- Auto-summarize folder contents (file list + inferred purpose)
-- Embed folder summaries
+**Ordering rationale:** Consolidation (A1) first so new chunk types share code from day one. Routing (A3) early so each subsequent chunk type is harness-testable immediately. Routing is modular — missing chunk types produce empty results (limit > 0 but table empty = no-op). Each new type "lights up" without routing changes.
+
+### Design Rationale (SOTA Research)
+
+**Multi-level querying:** RAPTOR (ICLR 2024) proved "collapsed tree" (query all levels simultaneously, fuse results) outperforms single-level routing by ~20%. The current system already does this — searches all chunk types per query with intent-varied limits via RRF. A2 extends this pattern, not replaces it.
+
+**No sub-function chunks:** Functions are natural semantic units. Sub-function blocks (if/else, match arms) lack standalone meaning. MGS3 and cAST show gains but for code completion, not code understanding. Large functions (100+ lines) are a chunking concern, not hierarchy — handle separately if harness shows need.
+
+**Embedding granularity mismatch:** Mitigated by (1) embedding summaries not raw content (~100-300 tokens, comparable to CodeChunk's ~200-500), and (2) per-type search + RRF fusion (rank-based, never compares scores across types). Monitor recall@K per chunk type post-A.
+
+**WASM compatibility:** All summaries are template-based (deterministic, no LLM). Generated at CI ingestion time by code-raptor. Exported to index.json alongside existing chunks. No new CI secrets or dependencies.
+
+**Hierarchy levels:**
+```
+Repo Summary  (CrateChunk / ReadmeChunk — already exist)
+    └── Folder   (FolderChunk — new)
+        └── File     (FileChunk — new)
+            └── Function (CodeChunk — already exists)
+```
+
+### A1: Text Module Consolidation
+- Create `code-rag-engine::text` module (pure, no I/O, compiles to WASM + native)
+- Move into it:
+  - `tokenize()` — from code-rag-ui/text_search.rs and code-raptor/export.rs (3 copies → 1)
+  - `IdfTable` struct + `idf()` + `build()` — from code-rag-ui/text_search.rs and code-raptor/export.rs
+  - `BM25 scoring` algorithm — from code-rag-ui/text_search.rs
+  - `build_searchable_text()` + `split_camel_case()` — from code-rag-store/vector_store.rs
+  - Intent prototype texts — from code-raptor/export.rs (duplicated from intent.rs)
+- Remove dead `build_searchable_text()` copy from code-rag-ui/data.rs
+- Update imports in code-rag-ui, code-raptor, code-rag-store
+- **Crate:** code-rag-engine (new text module), updates to all consumers
+- **Testable:** Existing harness + unit tests must pass unchanged (pure refactor, no behavior change)
+- **Benefit:** A2+ folder/file searchable text and BM25 go into code-rag-engine from day one — zero new duplication
+
+### A2: Folder-Level Embeddings
+- New `FolderChunk` type in code-rag-types
+- Template-based summary (deterministic, no LLM):
+  ```
+  Folder: {path}
+  Contains: {file_count} files ({languages})
+  Key types: {public structs/classes/traits from AST}
+  Key functions: {top public functions by name}
+  Subfolders: {subfolder list}
+  ```
+- Embed template text (~100-200 tokens)
 - **Crate:** code-raptor (types in code-rag-types)
+- **Testable:** Unit tests for template correctness, ingestion roundtrip, export includes folder_chunks
 
-### A1.2: File-Level Embeddings
-- New `FileChunk` type
-- Module-level summary (exports, main responsibilities)
-- Embed file summaries
-- **Crate:** code-raptor
+### A3: Collapsed-Tree Routing
+- **Modular design:** works with any combination of chunk types present
+  - Search arms return empty results when a chunk table has no data
+  - Limits > 0 for missing types are harmless no-ops
+  - Each new chunk type registers once; routing table needs no changes per type
+- Add `folder_limit` and `file_limit` fields to `RetrievalConfig`
+- All queries search all levels; intent controls the mix:
 
-### A1.3: Auto-Generate Repo Summaries
-- Infer purpose from README, package manifests, structure
+| Intent         | code | folder | file | readme | crate | module_doc |
+|----------------|------|--------|------|--------|-------|------------|
+| Overview       | 3    | 4      | 3    | 3      | 3     | 3          |
+| Implementation | 5    | 1      | 2    | 1      | 1     | 2          |
+| Relationship   | 5    | 2      | 2    | 1      | 2     | 2          |
+| Comparison     | 5    | 2      | 2    | 2      | 3     | 2          |
+
+- Add `folder_vec` and `file_vec` boolean arms to `ArmPolicy` (always true initially)
+- BM25 and rerank policies for folder/file TBD after harness evaluation
+- **Crate:** code-rag-engine (routing table), code-rag-chat (retriever), code-rag-ui (WASM search)
+- **Testable after A2+A3:**
+  - Add ~5 folder-level test queries to test_queries.json
+  - Full harness run: folder hero queries should now hit FolderChunks
+  - Regression check: existing recall@5 for Implementation/Relationship should not drop
+  - WASM: `ChunkIndex` loads folder_chunks, search arms produce results
+
+### A4: File-Level Embeddings
+- New `FileChunk` type in code-rag-types
+- Template-based summary (deterministic, no LLM):
+  ```
+  File: {path} ({language})
+  Exports: {public functions, structs, classes}
+  Imports: {external dependencies}
+  Purpose: {inferred from module doc / first docstring / filename}
+  ```
+- Embed template text (~100-200 tokens)
+- **Shared with C1:** `extract_file_imports` on `LanguageHandler` trait is needed by both A1.4 (FileChunk "Imports" template field) and C1 (cross-file call resolution). Whichever track runs first builds it; the other reuses.
+- **Crate:** code-raptor (types in code-rag-types)
+- **Testable immediately (routing already in place):**
+  - Add ~5 file-level test queries to test_queries.json
+  - Harness run: file queries hit FileChunks; folder queries still work; code queries unaffected
+  - Check if Overview recall improves with both folder + file chunks active
+
+### A5: Repo Summaries
+- Template-based only: extract from README + Cargo.toml/package.json + directory structure
 - Extract tech stack from dependencies
 - Identify entry points
-- LLM-summarize repos without good READMEs
+- No LLM summarization (expensive to re-ingest, non-deterministic)
+- LLM enhancement noted as theoretical option but not pursued
 - **Crate:** code-raptor
+- **Testable immediately (routing already in place):**
+  - Add architecture-level test queries (e.g., "What are the main components?")
+  - Harness run: full hierarchy active, compare aggregate metrics vs V3.3 baseline
+  - Final A quality gate: Overview recall target, no Implementation regression
 
-### A1.4: Hierarchical Query Routing
-- Extend intent classifier for granularity
-- `overview` queries → FolderChunk, repo summaries
-- `module` queries → FileChunk
-- `implementation` queries → CodeChunk
-- **Crate:** code-rag-chat
+### WASM/Native Code Sharing
+
+After A1 consolidation, new Track A logic lives in `code-rag-engine` (shared). Platform layers are thin wrappers:
+- `code-rag-store`: wraps engine text/search logic with LanceDB queries (native)
+- `code-rag-ui`: wraps engine text/search logic with brute-force vectors (WASM)
+- `code-raptor export`: uses engine for IDF + searchable text, adds folder/file tables to JSON
+
+**WASM changes distributed across steps (not a separate block):**
+- A2: `ChunkIndex` gains `folder_chunks`, `search_folder_arm()` uses engine's BM25
+- A3: Routing table + ArmPolicy changes (already WASM-compatible via code-rag-engine)
+- A4: `ChunkIndex` gains `file_chunks`, `search_file_arm()` uses engine's BM25
+- A5: No additional WASM changes needed
+- index.json size impact: ~250 extra chunks per repo, minimal
 
 **Deliverable:** "What does the engine/ folder do?" returns meaningful answer.
 
-### A1 Hero Queries
+### A Hero Queries
 - "What does the engine/ folder do?" → Returns folder-level summary
 - "How is code-rag-chat organized?" → Returns architecture overview
 - "What are the main components?" → Lists crates and their purposes
+
+### Key References
+- RAPTOR (ICLR 2024) — collapsed tree > layer traversal
+- cAST (CMU, arXiv 2506.15655) — AST-aware chunking for code
+- Code-Craft (arXiv 2504.08975) — hierarchical graph summarization
+- AI21 query-dependent chunking — multi-scale indexing gains 1-37%
+- HEAL (arXiv 2412.04661) — hierarchical embedding alignment loss
 
 **Maps to Vision:** Improvement #4 (Hierarchical Embedding) + #5 (Repo Summaries)
 
 ---
 
-## A2: Enrichment Pipeline
-
-**Goal:** Make undocumented code searchable through generated descriptions.
-
-**Estimated effort:** ~1-1.5 weeks
-
-| Item | Effort | Notes |
-|------|--------|-------|
-| A2.1 Docstring Generation | 3-4 days | LLM integration, caching, source flags |
-| A2.2 Type Inference | 2-3 days | Similar pattern to A2.1 |
-
-### A2.1: Docstring Generation
-- Generate when: no docstring in store, OR existing is marked `source: generated`
-- Never overwrite docstrings not marked as `source: generated`
-- Content-hash caching (regenerate `source: generated` only on code changes)
-- Tiered models: Haiku for bulk, better model for central functions
-- Store separately (never modify source)
-- **Crate:** code-raptor
-
-**Contextual Preamble (Anthropic's Contextual Retrieval technique):**
-- For each CodeChunk, generate a 50-100 token preamble situating it in the codebase: "This function is part of the ingestion pipeline in code-raptor. It handles..."
-- Preamble prepended to embedding text in `format_code_for_embedding()`, NOT stored on the chunk struct (ephemeral, like V2.1 calls)
-- Same LLM call pattern as docstring generation (Haiku for bulk, batch together)
-- Reduces failed retrievals by up to 49% (67% combined with B1 reranking)
-- Requires `--full` re-index (same as docstring generation)
-
-### A2.2: Type Inference for Python
-- LLM-infer types for untyped Python functions
-- Same pattern as docstring generation
-- Store with `source: generated` flag
-- **Crate:** code-raptor
-
-**Deliverable:** Undocumented third-party code returns useful search results.
-
-### A2 Hero Queries
-- Query undocumented function → Returns generated description
-- "What does [third-party function] do?" → Meaningful answer despite no docstring
-
-**Maps to Vision:** Improvement #7 (Docstring Generation) + #8 (Type Generation)
-
----
-
-## A3: RAPTOR Research (Bottom-Up Architecture)
-
-**Goal:** Validate emergent architecture discovery via clustering. Time-boxed research sprint.
-
-**Estimated effort:** 2 weeks (TIME-BOXED)
-
-| Item | Effort | Notes |
-|------|--------|-------|
-| A3.1 Clustering Experiments | 3-4 days | Algorithm comparison, parameter tuning |
-| A3.2 Cross-Cutting Handling | 2-3 days | Strategy evaluation |
-| A3.3 Cluster Summarization | 2-3 days | LLM summarization, ClusterChunk type |
-| A3.4 Recursive Abstraction | 2-3 days | Only if A3.1-A3.3 succeed |
-| A3.5 Architecture Comparison | 2 days | Query routing to both views |
-
-**Risk:** High variance. May conclude "doesn't work for code" - that's a valid outcome.
-
-**Prerequisites:**
-- A1 (Hierarchy) for architecture comparison
-- A2 (Enrichment) for clustering on generated summaries instead of raw code
-
-### A3.1: Clustering Experiments
-- Cluster on A2-generated summaries (not raw code embeddings)
-- Experiment with algorithms:
-  - HDBSCAN (handles varying density, noise)
-  - Hierarchical clustering
-  - Spectral clustering
-- Evaluate cluster coherence
-- **Crate:** code-raptor
-
-### A3.2: Cross-Cutting Concern Handling
-- **Problem:** Logging, error handling cluster together but aren't a "module"
-- Strategies:
-  - Exclude common patterns
-  - Separate cluster type for cross-cutting
-  - Accept as emergent insight
-- Document findings
-
-### A3.3: Cluster Summarization
-- LLM-summarize each cluster
-- "These N functions handle authentication..."
-- New `ClusterChunk` type
-- **Crate:** code-raptor (types in code-rag-types)
-
-### A3.4: Recursive Abstraction (If Phase 1 Succeeds)
-- Embed cluster summaries
-- Cluster again, summarize
-- Repeat until convergence or max depth
-- Result: emergent architectural tree
-
-### A3.5: Architecture Comparison
-- **Requires:** A1 hierarchy (FolderChunk, FileChunk)
-- Query routing to both views
-- "What's the architecture?" → top-down (A1) + bottom-up (A3)
-- Highlight discrepancies (architectural drift detection)
-- **Crate:** code-rag-chat
-
-### Research Questions
-- Best clustering algorithm for code semantics?
-- Optimal cluster size / recursion depth?
-- How to evaluate quality of emergent structure?
-- How to handle cross-cutting concerns?
-
-**Deliverable:** Validated clustering approach with evaluation results, OR documented learnings on why it doesn't work.
-
-**Maps to Vision:** Improvement #14 (Code Topology / RAPTOR)
-
-**Success Criteria:**
-- Clusters are semantically coherent (human evaluation + cluster purity vs folder structure)
-- Emergent structure reveals non-obvious groupings
-- Comparison with folder structure provides insight
-
----
-
 # Track B: Search Precision
 
-Independent track. Can run in parallel with Track A and C.
+Independent track. Can run in parallel with Tracks A, C, and D.
 
 **Track total:** ~3-4 weeks
 
@@ -726,75 +709,180 @@ See `development_log.md` for results and per-intent gating rationale.
 
 # Track C: Relationship Graph
 
-Independent track. Can run in parallel with Track A and B.
+Independent track. Can run in parallel with Tracks A, B, and D.
 
-**Track total:** ~3-5 weeks (C2 has high variance due to cross-file resolution complexity)
-
----
-
-## C1: Same-File Call Edges
-
-**Estimated effort:** 3-4 days
-- Extract function→function edges within same file
-- No import resolution needed
-- Store as `CallEdge` in LanceDB
-- Store edges bidirectionally: `(caller → callee)` AND `(callee → caller)`
-- Enables both "what calls X?" and "what does X call?" without reverse lookups
-- Minimal storage overhead (double the edges, but edges are small)
-- **Crate:** code-raptor
+**Track total:** ~2-3 weeks
 
 ---
 
-## C2: Cross-File Call Graph
+## C1: Graph RAG
 
-**Estimated effort:** 1-2 weeks (HIGH VARIANCE)
+**Estimated effort:** 11-14 days
 
-- Module-level imports first (File→File edges)
-- Then function-level resolution
-- Handle Rust traits/generics, Python duck typing gracefully (incomplete OK)
-- **Crate:** code-raptor
+End-to-end call graph: extract edges (same-file + cross-file), persist in LanceDB, query via graph traversal, export to WASM standalone demo. One implementation pass — no separate same-file/cross-file/query phases (they share the same identifier resolution work and deliver no value independently).
 
-**Risk:** Static analysis for dynamic languages can spiral. Accept 80% accuracy, don't chase edge cases.
+- Build global identifier→chunk_id index after parsing all files
+- Add `extract_file_imports` to `LanguageHandler` for cross-file resolution (Rust `use`, Python `import`, TS `import`)
+- Resolve calls via: same-file match → import-based → unique-global fallback → skip ambiguous
+- Store as `CallEdge` in LanceDB (scalar table, no embeddings)
+- `CallGraph` in-memory adjacency list in `code-rag-engine` (wasm-compatible, no petgraph)
+- Relationship intent augments vector search with graph traversal (hybrid, graceful degradation)
+- Export edges in `index.json` for GitHub Pages standalone demo
+- Accept 80% cross-file accuracy. Skip: trait dispatch, duck typing, macros, closures-in-variables
+- **Crates:** code-rag-types, code-rag-store, code-raptor, code-rag-engine, code-rag-chat, code-rag-ui
 
----
-
-## C3: Graph Query Interface
-
-**Estimated effort:** 3-5 days
-- New query type: `relationship`
-- "What calls X?" → traverse CallEdge
-- "Show the auth flow" → path finding
-- **Crate:** code-rag-chat
-
-**Deliverable:** "What calls this function?" returns accurate callers.
-
-### C1-C3 Hero Queries
-- "What calls the retrieve function?" → Returns accurate callers
-- "Show the query flow" → Traces from API to retrieval
+**Hero Queries:**
+- "What calls the retrieve function?" → Returns accurate callers via graph traversal
+- "Show the query flow" → Traces from API to retrieval via BFS path finding
 
 **Maps to Vision:** Improvement #2, #9, #12, #13 (Call Graph phases)
 
 ---
 
-## C4: Graph Embeddings Research (Time-Boxed)
+## C2: Graph Result Protection
 
-**Prerequisite:** C2 (Cross-File Call Graph) — need a mature graph first
+**Prerequisite:** C1 (Graph RAG)
 
-**Estimated effort:** 3-5 days (TIME-BOXED)
+**Estimated effort:** 1-2 days
 
-**Goal:** Evaluate whether structural graph embeddings (Node2Vec or similar) improve relationship query recall beyond what graph traversal (C3) achieves alone.
+Provenance tagging, collision-safe merge, reserved graph slots / SOTA routing. Fixes graph-resolved chunks being dropped or demoted despite valid call edges.
 
-**Research questions:**
-- Do graph embeddings capture useful structural signals (hub functions, leaf functions, bridge functions)?
-- How to fuse graph embeddings with code semantic embeddings? Options:
-  - Separate search channel + RRF fusion with semantic results
-  - Concatenated vectors (changes dimensionality)
-  - Graph position as metadata features (simpler)
-- Does the added pipeline complexity justify the recall improvement?
+- **Crates:** code-rag-engine (graph), code-rag-chat (server retriever), code-rag-ui (WASM standalone)
 
-**Success criteria:** Relationship recall improves by >0.05 over C3-only baseline, OR documented findings on why graph embeddings don't add value for code.
+See [C2.md](C2.md) for full design.
 
-**Crate:** code-rag-engine (fusion logic), code-raptor (graph embedding generation)
+---
+
+## C3: Comparison Query Decomposition
+
+**Prerequisite:** C1 (Graph RAG)
+
+**Estimated effort:** 2-3 days
+
+Extract comparators, per-entity fetch, RRF merge. Fixes flat `code_limit` letting one side dominate.
+
+- **Crates:** code-rag-engine (intent, fusion, comparison helper, MMR fallback)
+
+See [C3.md](C3.md) for full design.
+
+---
+
+# Track D: Enrichment Pipeline
+
+Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is V1.5 (docstring extraction, complete).
+
+**Goal:** Make undocumented code searchable through generated descriptions.
+
+**Estimated effort:** ~1-1.5 weeks
+
+| Item | Effort | Notes |
+|------|--------|-------|
+| D1 Docstring Generation | 3-4 days | LLM integration, caching, source flags |
+| D2 Type Inference | 2-3 days | Similar pattern to D1 |
+
+### D1: Docstring Generation
+- Generate when: no docstring in store, OR existing is marked `source: generated`
+- Never overwrite docstrings not marked as `source: generated`
+- Content-hash caching (regenerate `source: generated` only on code changes)
+- Tiered models: Haiku for bulk, better model for central functions
+- Store separately (never modify source)
+- **Crate:** code-raptor
+
+**Contextual Preamble (Anthropic's Contextual Retrieval technique):**
+- For each CodeChunk, generate a 50-100 token preamble situating it in the codebase: "This function is part of the ingestion pipeline in code-raptor. It handles..."
+- Preamble prepended to embedding text in `format_code_for_embedding()`, NOT stored on the chunk struct (ephemeral, like V2.1 calls)
+- Same LLM call pattern as docstring generation (Haiku for bulk, batch together)
+- Reduces failed retrievals by up to 49% (67% combined with B1 reranking)
+- Requires `--full` re-index (same as docstring generation)
+
+### D2: Type Inference for Python
+- LLM-infer types for untyped Python functions
+- Same pattern as docstring generation
+- Store with `source: generated` flag
+- **Crate:** code-raptor
+
+**Deliverable:** Undocumented third-party code returns useful search results.
+
+### D Hero Queries
+- Query undocumented function → Returns generated description
+- "What does [third-party function] do?" → Meaningful answer despite no docstring
+
+**Maps to Vision:** Improvement #7 (Docstring Generation) + #8 (Type Generation)
+
+---
+
+# Track R: RAPTOR Research (Bottom-Up Architecture)
+
+Research track. Starts after Track D completes (needs D-generated summaries for clustering input). Track A hierarchy needed only for R5 architecture comparison.
+
+**Goal:** Validate emergent architecture discovery via clustering. Time-boxed research sprint.
+
+**Estimated effort:** 2 weeks (TIME-BOXED)
+
+| Item | Effort | Notes |
+|------|--------|-------|
+| R1 Clustering Experiments | 3-4 days | Algorithm comparison, parameter tuning |
+| R2 Cross-Cutting Handling | 2-3 days | Strategy evaluation |
+| R3 Cluster Summarization | 2-3 days | LLM summarization, ClusterChunk type |
+| R4 Recursive Abstraction | 2-3 days | Only if R1-R3 succeed |
+| R5 Architecture Comparison | 2 days | Query routing to both views |
+
+**Risk:** High variance. May conclude "doesn't work for code" - that's a valid outcome.
+
+**Prerequisites:**
+- Track D (Enrichment) for clustering on generated summaries instead of raw code
+- Track A (Hierarchy) for architecture comparison (R5 only)
+
+### R1: Clustering Experiments
+- Cluster on D-generated summaries (not raw code embeddings)
+- Experiment with algorithms:
+  - HDBSCAN (handles varying density, noise)
+  - Hierarchical clustering
+  - Spectral clustering
+- Evaluate cluster coherence
+- **Crate:** code-raptor
+
+### R2: Cross-Cutting Concern Handling
+- **Problem:** Logging, error handling cluster together but aren't a "module"
+- Strategies:
+  - Exclude common patterns
+  - Separate cluster type for cross-cutting
+  - Accept as emergent insight
+- Document findings
+
+### R3: Cluster Summarization
+- LLM-summarize each cluster
+- "These N functions handle authentication..."
+- New `ClusterChunk` type
+- **Crate:** code-raptor (types in code-rag-types)
+
+### R4: Recursive Abstraction (If Phase 1 Succeeds)
+- Embed cluster summaries
+- Cluster again, summarize
+- Repeat until convergence or max depth
+- Result: emergent architectural tree
+
+### R5: Architecture Comparison
+- **Requires:** Track A hierarchy (FolderChunk, FileChunk)
+- Query routing to both views
+- "What's the architecture?" → top-down (A) + bottom-up (R)
+- Highlight discrepancies (architectural drift detection)
+- **Crate:** code-rag-chat
+
+### Research Questions
+- Best clustering algorithm for code semantics?
+- Optimal cluster size / recursion depth?
+- How to evaluate quality of emergent structure?
+- How to handle cross-cutting concerns?
+
+**Deliverable:** Validated clustering approach with evaluation results, OR documented learnings on why it doesn't work.
+
+**Maps to Vision:** Improvement #14 (Code Topology / RAPTOR)
+
+**Success Criteria:**
+- Clusters are semantically coherent (human evaluation + cluster purity vs folder structure)
+- Emergent structure reveals non-obvious groupings
+- Comparison with folder structure provides insight
 
 ---
 
@@ -815,7 +903,9 @@ Independent track. Can run in parallel with Track A and B.
 | Quality harness (V3) | code-rag-chat |
 | Docstring generation | code-raptor |
 | Hierarchical embeddings | code-raptor |
-| Call graph extraction | code-raptor |
+| Graph RAG (C1) | code-rag-types, code-rag-store, code-raptor, code-rag-engine, code-rag-chat, code-rag-ui |
+| Graph result protection (C2) | code-rag-engine, code-rag-chat, code-rag-ui |
+| Comparison query decomposition (C3) | code-rag-engine |
 | Type generation | code-raptor |
 | RAPTOR clustering | code-raptor |
 | Repo summaries | code-raptor |
@@ -823,7 +913,7 @@ Independent track. Can run in parallel with Track A and B.
 | Hybrid search | code-rag-chat |
 | Graph query interface | code-rag-chat |
 | Code embedding evaluation (V3.4) | code-rag-store |
-| Graph embeddings research (C4) | code-rag-engine, code-raptor |
+| Graph embeddings research (hypothetical) | code-rag-engine, code-raptor |
 | HyDE query transformation (hypothetical) | code-rag-engine, code-rag-chat |
 
 ---
@@ -836,13 +926,13 @@ Independent track. Can run in parallel with Track A and B.
 | V2 [DONE] | Queries route by intent (cosine similarity); retrieval sources with relevance scores shown; call context in embeddings; Leptos WASM frontend; GitHub Pages standalone demo; code-rag-engine shared algorithms; 135 tests pass |
 | V3 | Test dataset with 20+ queries; baseline recall@5 documented; regression script runs <60s |
 | V3.4 | Code embedding model evaluated; decision documented |
-| A1 | "What does engine/ do?" returns coherent answer |
-| A2 | Undocumented code has generated descriptions in search |
-| A3 | Clustering produces meaningful emergent structure (or documented why not) |
+| A | "What does engine/ do?" returns coherent answer |
+| D | Undocumented code has generated descriptions in search |
+| R | Clustering produces meaningful emergent structure (or documented why not) |
 | B1 | Reranking improves recall@5 by >10% over baseline |
 | B2-B3 | "Show me UserService" finds exact match |
-| C1-C3 | "What calls X?" returns accurate results |
-| C4 | Graph embeddings evaluated; decision documented |
+| C1+C2 | "What calls X?" returns accurate results via graph traversal + slot routing |
+| C3 | Comparison queries cover both sides (per-entity fetch + RRF merge) |
 
 ---
 
@@ -923,3 +1013,60 @@ Ideas informed by 2025-2026 RAG advancements. Not scheduled — evaluate after T
 **When NOT to use HyDE:**
 - Exact identifier queries ("show me Retriever") — B2 hybrid search handles these better
 - Gate on intent: only apply for `Overview` and `Relationship` intents, skip for `Implementation` with exact identifiers
+
+## Hypothetical: Graph Embeddings (Node2Vec / Structural)
+
+**Status:** Idea — was originally scoped as C5 in Track C, now extracted to research because Track C (C1+C2+C3) already closed the relationship-recall gap to 0.60 and the comparison gap to 0.65 without it. No track number assigned.
+
+**Prerequisite:** C1 (call graph data already populated in `call_edges`). No dependency on a "C4" path-aware embeddings step — that work was dropped.
+
+**Estimated effort:** 3-5 days (TIME-BOXED if revived)
+
+**Goal:** Evaluate whether structural graph embeddings (Node2Vec, GraphSAGE, or similar) improve relationship query recall beyond what C1 graph traversal + C2 result protection already deliver. Fuse with semantic embeddings via RRF as a *new arm* in the existing N-ary fusion, not a replacement for graph traversal.
+
+**Why it might help:**
+- Graph traversal answers "what calls X" exactly but cannot answer fuzzy structural questions ("functions that look like they coordinate I/O", "modules with similar fan-in shape").
+- Node2Vec encodes structural neighborhood into a vector — chunks with similar call-graph context end up close even when their text/identifiers differ.
+- Could rescue the two stubborn pre-C3 comparison failures (`comp-retriever-generator`, `b4-comp-retriever-api`) if their call-graph context is more discriminative than their BGE-small text embeddings.
+
+**Why it was deferred from main Track C:**
+- C1+C2 already lifted relationship recall from 0.50 → 0.60 without any embedding work, so the marginal value of a third arm is uncertain.
+- Adds a second embedding model (graph) to the ingestion pipeline, plus a new arm in `code-rag-engine::fusion`, plus a WASM port — non-trivial scope for an unproven gain.
+- Should only be revived if a future measurement shows residual relationship/comparison failures that graph traversal cannot reach.
+
+**Success criteria when revived:** Relationship recall improves by >0.05 over the post-C3 baseline (currently 0.60), OR documented findings on why structural graph embeddings don't add value for code on top of AST-derived call-graph traversal.
+
+**Crates:** code-rag-engine (fusion logic + new graph-embedding arm), code-raptor (graph embedding generation at ingest)
+
+## Hypothetical: MMR Diversity Re-ranking
+
+**Status:** Idea — considered as the C3 fallback for failed comparator extraction, deferred. No track number assigned.
+
+**Prerequisite:** None structurally. To implement on the server, `store.search_code` would need to project the body_vector column into its result (or a separate `fetch_embeddings_by_id` helper would be added). On WASM it's already cheap because `EmbeddedChunk.embedding` is in memory.
+
+**The problem:** When a multi-entity query reaches the Comparison path but doesn't match any of the regex decomposition patterns (`X vs Y`, `difference between X and Y`, `compare X and Y`, `how does X differ from Y`, `how do X and Y differ`), the fallback today is the unchanged single-arm body-vec search with `code_limit = 5`. That can return five near-duplicate chunks of the same function — diversity zero, neither half of the comparison represented.
+
+**Maximal Marginal Relevance (MMR):**
+1. Over-fetch a candidate pool (e.g. top-10) on the original query
+2. Greedily pick the next item to include from the pool by scoring `λ × relevance(i) − (1 − λ) × max_{j ∈ selected} similarity(i, j)`
+3. With λ = 0.7, that's 70% relevance / 30% diversity penalty — the second pick is penalized for being similar to the first, the third for being similar to either, etc.
+4. Stop when `code_limit` items have been selected
+5. Generic anti-redundancy filter — not specific to comparison, also useful for any over-fetched ranked list
+
+**Why it would help comparison queries specifically:**
+- Forces selection of structurally different chunks even when the query doesn't decompose cleanly
+- Cheap insurance against the worst case where one comparator dominates all five slots
+
+**Why it was deferred:**
+- The five regex patterns (after adding `how do X and Y differ`) cover every comparison test case in the current `data/test_queries.json`. The fallback path essentially never fires today, so MMR would be dead code we'd be carrying for a hypothetical future query phrasing.
+- Server-side implementation requires either broadening the `store.search_code` contract (every caller pays a ~15 KB embedding-payload bloat per call) or adding a separate by-id fetch (~5–15 ms extra round trip on Comparison fallback queries). Neither is hard, but neither is justified by current measurement.
+- The current "fallback to single-arm body-vec" path is strictly the same as pre-C3 Comparison behavior — zero regression risk, no diversification, but also no new failure mode.
+
+**Revisit trigger:**
+- Measurement shows the Comparison fallback firing on real queries AND returning redundant top-5 lists, OR
+- A future track introduces a multi-entity intent without clean decomposition patterns (e.g. "list all the X-style modules"), at which point a generic diversity filter starts paying for itself.
+
+**Implementation sketch when revived:**
+- New `crates/code-rag-engine/src/mmr.rs` with a pure `mmr_rerank<T, S>(candidates, lambda, k, similarity)` helper that takes a similarity closure (caller supplies cosine on body embeddings).
+- Server: extend `store.search_code` (or add a parallel `search_code_with_vectors`) to return `Vec<(CodeChunk, f32, Vec<f32>)>`, gated to the Comparison fallback path so other callers don't pay the bloat.
+- WASM: pull the cached `EmbeddedChunk.embedding` for each candidate via `index.chunk_id_index` and pass it into the same `mmr_rerank` helper for parity.

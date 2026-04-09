@@ -1,4 +1,4 @@
-use super::super::language::LanguageHandler;
+use super::super::language::{ImportInfo, LanguageHandler};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct RustHandler;
@@ -103,12 +103,7 @@ impl LanguageHandler for RustHandler {
         calls
     }
 
-    fn extract_signature(
-        &self,
-        source: &str,
-        node: &Node,
-        _source_bytes: &[u8],
-    ) -> Option<String> {
+    fn extract_signature(&self, source: &str, node: &Node, _source_bytes: &[u8]) -> Option<String> {
         let kind = node.kind();
         match kind {
             "function_item" => {
@@ -129,6 +124,102 @@ impl LanguageHandler for RustHandler {
                 if sig.is_empty() { None } else { Some(sig) }
             }
             _ => None,
+        }
+    }
+
+    fn extract_file_imports(
+        &self,
+        _source: &str,
+        root: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<ImportInfo> {
+        let mut imports = Vec::new();
+        let mut cursor = root.walk();
+
+        for child in root.children(&mut cursor) {
+            if child.kind() == "use_declaration" {
+                collect_use_imports(&child, source_bytes, &mut imports);
+            }
+        }
+
+        imports
+    }
+}
+
+/// Extract imports from a `use_declaration` node.
+/// Handles: `use crate::module::function;`, `use super::module::*;`,
+/// `use crate::module::{foo, bar};`
+fn collect_use_imports(node: &Node, source_bytes: &[u8], imports: &mut Vec<ImportInfo>) {
+    // Walk the use_declaration looking for scoped_use_list or a simple use_path
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "use_as_clause" | "scoped_identifier" => {
+                // Simple path like `use crate::foo::bar;`
+                if let Ok(text) = child.utf8_text(source_bytes) {
+                    let text = text.split(" as ").next().unwrap_or(text).trim();
+                    if let Some((path, name)) = text.rsplit_once("::") {
+                        imports.push(ImportInfo {
+                            imported_name: name.to_string(),
+                            source_path: path.to_string(),
+                        });
+                    }
+                }
+            }
+            "scoped_use_list" => {
+                collect_scoped_use_list(&child, source_bytes, imports);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Handle `use crate::module::{foo, bar};`
+fn collect_scoped_use_list(node: &Node, source_bytes: &[u8], imports: &mut Vec<ImportInfo>) {
+    // Find the path prefix (everything before `::{ ... }`)
+    let full_text = node.utf8_text(source_bytes).unwrap_or("");
+
+    // The parent path is the scoped_identifier before the `::{`
+    let path_prefix = if let Some(prefix_end) = full_text.find("::{") {
+        full_text[..prefix_end].trim()
+    } else {
+        return;
+    };
+
+    // Walk children for use_list items
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "use_list" {
+            let mut list_cursor = child.walk();
+            for item in child.children(&mut list_cursor) {
+                match item.kind() {
+                    "identifier" => {
+                        if let Ok(name) = item.utf8_text(source_bytes) {
+                            imports.push(ImportInfo {
+                                imported_name: name.to_string(),
+                                source_path: path_prefix.to_string(),
+                            });
+                        }
+                    }
+                    "use_as_clause" | "scoped_identifier" => {
+                        if let Ok(text) = item.utf8_text(source_bytes) {
+                            let text = text.split(" as ").next().unwrap_or(text).trim();
+                            if let Some((sub_path, name)) = text.rsplit_once("::") {
+                                imports.push(ImportInfo {
+                                    imported_name: name.to_string(),
+                                    source_path: format!("{}::{}", path_prefix, sub_path),
+                                });
+                            } else {
+                                imports.push(ImportInfo {
+                                    imported_name: text.to_string(),
+                                    source_path: path_prefix.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -152,6 +243,14 @@ fn collect_calls_recursive(cursor: &mut TreeCursor, source_bytes: &[u8], calls: 
             "field_expression" => {
                 if let Some(field) = func.child_by_field_name("field")
                     && let Ok(name) = field.utf8_text(source_bytes)
+                {
+                    calls.push(name.to_string());
+                }
+            }
+            "scoped_identifier" => {
+                // module::function() — extract the last segment (function name)
+                if let Some(name_node) = func.child_by_field_name("name")
+                    && let Ok(name) = name_node.utf8_text(source_bytes)
                 {
                     calls.push(name.to_string());
                 }
@@ -279,6 +378,12 @@ mod tests {
     }
 
     #[test]
+    fn test_rust_extract_calls_scoped() {
+        let calls = extract_calls_from("fn foo() { module::bar(); std::mem::swap(); }");
+        assert_eq!(calls, vec!["bar", "swap"]);
+    }
+
+    #[test]
     fn test_rust_extract_calls_nested() {
         let calls = extract_calls_from("fn foo() { bar(baz()); }");
         assert_eq!(calls, vec!["bar", "baz"]);
@@ -294,6 +399,40 @@ mod tests {
     fn test_rust_extract_calls_dedup() {
         let calls = extract_calls_from("fn foo() { bar(); bar(); }");
         assert_eq!(calls, vec!["bar"]);
+    }
+
+    // C1: Import extraction tests
+
+    fn extract_imports_from(source: &str) -> Vec<ImportInfo> {
+        let handler = RustHandler;
+        let mut parser = tree_sitter::Parser::new();
+        let grammar = handler.grammar();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        handler.extract_file_imports(source, &tree.root_node(), source.as_bytes())
+    }
+
+    #[test]
+    fn test_rust_import_simple() {
+        let imports = extract_imports_from("use crate::ingestion::parser;\nfn foo() {}");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].imported_name, "parser");
+        assert_eq!(imports[0].source_path, "crate::ingestion");
+    }
+
+    #[test]
+    fn test_rust_import_scoped_list() {
+        let imports = extract_imports_from("use crate::module::{foo, bar};\nfn baz() {}");
+        assert_eq!(imports.len(), 2);
+        assert!(imports.iter().any(|i| i.imported_name == "foo"));
+        assert!(imports.iter().any(|i| i.imported_name == "bar"));
+        assert!(imports.iter().all(|i| i.source_path == "crate::module"));
+    }
+
+    #[test]
+    fn test_rust_import_none() {
+        let imports = extract_imports_from("fn foo() {}");
+        assert!(imports.is_empty());
     }
 
     #[test]

@@ -4,8 +4,10 @@
 //! and query routing. No I/O, no HTTP, no filesystem — compiles to both native
 //! and wasm32.
 
+pub mod comparison;
 pub mod config;
 pub mod context;
 pub mod fusion;
+pub mod graph;
 pub mod intent;
 pub mod retriever;

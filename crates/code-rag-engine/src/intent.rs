@@ -186,7 +186,8 @@ pub fn pre_classify_comparison(query: &str) -> Option<QueryIntent> {
 
     // Positive cues
     // Match "differ" as a standalone token (not inside "different" idioms covered above).
-    let has_differ = q.split(|c: char| !c.is_alphanumeric())
+    let has_differ = q
+        .split(|c: char| !c.is_alphanumeric())
         .any(|tok| tok == "differ" || tok == "differs");
     let strong_cue = q.contains("difference between")
         || q.contains("differences between")
@@ -201,6 +202,92 @@ pub fn pre_classify_comparison(query: &str) -> Option<QueryIntent> {
     } else {
         None
     }
+}
+
+// --- C3: Comparator extraction ---
+
+use regex::Regex;
+use std::sync::OnceLock;
+
+/// Compiled regex patterns for comparator extraction. Built once on first use.
+fn comparator_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        // Order matters: more specific phrasings first so they take precedence
+        // over the looser "X vs Y" fallback. Each pattern must produce exactly
+        // two named/positional captures for the two comparators.
+        [
+            // "How do X and Y differ/compare" — needed for `comp-rust-python-handler`.
+            r"(?i)how\s+(?:does|do)\s+(.+?)\s+and\s+(.+?)\s+(?:differ|compare)",
+            // "How does X differ from Y"
+            r"(?i)how\s+(?:does|do)\s+(.+?)\s+differ\s+from\s+(.+?)[?.]?$",
+            // "Difference(s) between X and Y"
+            r"(?i)differences?\s+between\s+(.+?)\s+and\s+(.+?)[?.]?$",
+            // "Compare X and/with/to Y"
+            r"(?i)compare\s+(.+?)\s+(?:and|with|to)\s+(.+?)[?.]?$",
+            // "X vs Y" / "X versus Y" — last because it's the loosest.
+            r"(?i)^(.+?)\s+(?:vs\.?|versus)\s+(.+?)[?.]?$",
+        ]
+        .iter()
+        .map(|p| Regex::new(p).expect("comparator pattern failed to compile"))
+        .collect()
+    })
+}
+
+/// Canonicalize a single extracted comparator: lowercase, trim whitespace and
+/// trailing punctuation, strip a leading article ("the"/"a"/"an"). Returns
+/// None if the result is too short, too long, or otherwise unusable.
+fn canonicalize_comparator(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches(['?', '.', ',', ';', ':']);
+    let lower = trimmed.to_lowercase();
+
+    // Strip leading article (whole word only).
+    let stripped = if let Some(rest) = lower.strip_prefix("the ") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix("an ") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix("a ") {
+        rest
+    } else {
+        lower.as_str()
+    };
+
+    let stripped = stripped.trim();
+    if stripped.len() < 2 || stripped.len() > 60 {
+        return None;
+    }
+    Some(stripped.to_string())
+}
+
+/// Extract comparator entities from a comparison query.
+///
+/// Returns the canonicalized entities (lowercased, trimmed, articles stripped).
+/// Returns `Vec::new()` if no pattern matches or if extraction yields a
+/// degenerate pair (identical, too short, too long) — caller falls back to the
+/// existing single-arm Comparison path.
+///
+/// Patterns covered (case-insensitive):
+/// - `How do X and Y differ/compare` (e.g. `comp-rust-python-handler`)
+/// - `How does X differ from Y`
+/// - `difference(s) between X and Y`
+/// - `compare X and/with/to Y`
+/// - `X vs/versus Y`
+pub fn extract_comparators(query: &str) -> Vec<String> {
+    for pat in comparator_patterns() {
+        if let Some(caps) = pat.captures(query) {
+            // All patterns capture exactly two groups.
+            let a = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let b = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let ca = canonicalize_comparator(a);
+            let cb = canonicalize_comparator(b);
+            if let (Some(ca), Some(cb)) = (ca, cb)
+                && ca != cb
+            {
+                return vec![ca, cb];
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// Classify query intent via cosine similarity against prototype embeddings.
@@ -630,10 +717,84 @@ mod tests {
             pre_classify_comparison("How does the retriever work?"),
             None
         );
-        assert_eq!(
-            pre_classify_comparison("What calls this function?"),
-            None
-        );
+        assert_eq!(pre_classify_comparison("What calls this function?"), None);
+    }
+
+    // --- C3: extract_comparators tests ---
+
+    #[test]
+    fn test_extract_comparators_how_do_x_and_y_differ() {
+        // The headline test case: comp-rust-python-handler.
+        let out = extract_comparators("How do the Rust and Python language handlers differ?");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "rust");
+        assert_eq!(out[1], "python language handlers");
+    }
+
+    #[test]
+    fn test_extract_comparators_difference_between() {
+        // b4-comp-shared-py-rs.
+        let out = extract_comparators("What is the difference between shared-py and shared-rs?");
+        assert_eq!(out, vec!["shared-py".to_string(), "shared-rs".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_compare_x_and_y() {
+        let out = extract_comparators("Compare retriever and generator");
+        assert_eq!(out, vec!["retriever".to_string(), "generator".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_compare_x_with_y() {
+        let out = extract_comparators("Compare foo with bar");
+        assert_eq!(out, vec!["foo".to_string(), "bar".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_x_vs_y() {
+        let out = extract_comparators("Python vs Rust");
+        assert_eq!(out, vec!["python".to_string(), "rust".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_how_does_x_differ_from_y() {
+        let out = extract_comparators("How does shared-py differ from shared-rs?");
+        assert_eq!(out, vec!["shared-py".to_string(), "shared-rs".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_strips_leading_article() {
+        let out = extract_comparators("Compare the retriever and the generator");
+        assert_eq!(out, vec!["retriever".to_string(), "generator".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_strips_trailing_punctuation() {
+        let out = extract_comparators("difference between alpha and beta.");
+        assert_eq!(out, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_comparators_rejects_identical() {
+        // After canonicalization both comparators collapse to the same string.
+        let out = extract_comparators("Compare retriever and the retriever");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_extract_comparators_unmatched_returns_empty() {
+        // No comparison cue at all.
+        assert!(extract_comparators("How does the retriever work?").is_empty());
+        // "vs" inside a token is not a match (no surrounding spaces).
+        assert!(extract_comparators("transformer_vs_rnn.py").is_empty());
+    }
+
+    #[test]
+    fn test_extract_comparators_handles_too_short() {
+        // Single-letter comparators are rejected by the length guard.
+        let out = extract_comparators("X vs Y");
+        // "x" and "y" are 1 char each → rejected.
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -693,7 +854,10 @@ mod tests {
             QueryIntent::Relationship,
             QueryIntent::Comparison,
         ] {
-            assert!(!arm_policy(intent).sig_vec, "{intent:?} sig_vec should be off");
+            assert!(
+                !arm_policy(intent).sig_vec,
+                "{intent:?} sig_vec should be off"
+            );
         }
     }
 
