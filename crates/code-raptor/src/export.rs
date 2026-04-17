@@ -1,56 +1,14 @@
 //! Export all chunks with embeddings from LanceDB to JSON for static deployment.
 
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt64Array};
-use code_rag_store::build_searchable_text;
+use code_rag_engine::text::{IdfTable, build_searchable_text};
 use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, ModuleDocChunk, ReadmeChunk};
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
-
-/// Pre-computed IDF table for browser-side BM25.
-#[derive(Serialize)]
-pub struct IdfTable {
-    pub num_docs: usize,
-    pub doc_frequencies: HashMap<String, usize>,
-}
-
-impl IdfTable {
-    /// Build from an iterator of text content.
-    /// Tokenizes identically to server-side `simple` tokenizer:
-    /// split on non-alphanumeric boundaries, lowercase.
-    #[allow(dead_code)]
-    pub fn build(texts: impl Iterator<Item = impl AsRef<str>>) -> Self {
-        let mut doc_frequencies: HashMap<String, usize> = HashMap::new();
-        let mut num_docs = 0;
-        for text in texts {
-            num_docs += 1;
-            let mut seen = HashSet::new();
-            for token in tokenize(text.as_ref()) {
-                if seen.insert(token.clone()) {
-                    *doc_frequencies.entry(token).or_default() += 1;
-                }
-            }
-        }
-        Self {
-            num_docs,
-            doc_frequencies,
-        }
-    }
-}
-
-/// Tokenize identically to server-side `simple` tokenizer: split on non-alphanumeric, lowercase.
-#[allow(dead_code)]
-fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .into_iter()
-}
 
 /// Matches the ChunkIndex format expected by code-rag-ui standalone mode.
 #[derive(Serialize)]
@@ -172,63 +130,19 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
 }
 
 fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
+    use code_rag_engine::intent::{
+        COMPARISON_PROTOTYPES, IMPLEMENTATION_PROTOTYPES, OVERVIEW_PROTOTYPES,
+        RELATIONSHIP_PROTOTYPES,
+    };
     use code_rag_store::Embedder;
 
     let mut embedder = Embedder::new()?;
 
     let intent_texts: &[(&str, &[&str])] = &[
-        (
-            "overview",
-            &[
-                "What is this project?",
-                "Tell me about this codebase",
-                "Give me an overview",
-                "What does this do?",
-                "Describe the purpose",
-                "What is the architecture?",
-                "What is the purpose of this module?",
-                "What is the role of this component?",
-                "What is this package?",
-            ],
-        ),
-        (
-            "implementation",
-            &[
-                "How does this function work?",
-                "Show me the implementation",
-                "How is this implemented?",
-                "Walk me through the logic",
-                "How is this function implemented?",
-                "Walk through this code step by step",
-                "What are the steps of this algorithm?",
-            ],
-        ),
-        (
-            "relationship",
-            &[
-                "What calls this function?",
-                "How does A relate to B?",
-                "What depends on this?",
-                "Show me the call chain",
-                "What uses this module?",
-                "What formats does this support?",
-                "How do errors propagate through the system?",
-            ],
-        ),
-        (
-            "comparison",
-            &[
-                "Compare A and B",
-                "What are the differences between X and Y?",
-                "How does A differ from B?",
-                "A versus B",
-                "Contrast these approaches",
-                "What are the pros and cons?",
-                "What is the difference between X and Y?",
-                "How does X compare to Y?",
-                "Differences between X and Y",
-            ],
-        ),
+        ("overview", OVERVIEW_PROTOTYPES),
+        ("implementation", IMPLEMENTATION_PROTOTYPES),
+        ("relationship", RELATIONSHIP_PROTOTYPES),
+        ("comparison", COMPARISON_PROTOTYPES),
     ];
 
     let mut prototypes = HashMap::new();

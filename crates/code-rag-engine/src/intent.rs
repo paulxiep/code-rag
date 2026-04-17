@@ -34,7 +34,7 @@ impl std::str::FromStr for QueryIntent {
 
 // --- Prototype queries (static data, replaces keyword lists) ---
 
-const OVERVIEW_PROTOTYPES: &[&str] = &[
+pub const OVERVIEW_PROTOTYPES: &[&str] = &[
     "What is this project?",
     "Tell me about this codebase",
     "Give me an overview",
@@ -46,7 +46,7 @@ const OVERVIEW_PROTOTYPES: &[&str] = &[
     "What is this package?",
 ];
 
-const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
+pub const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
     "How does this function work?",
     "Show me the implementation",
     "How is this implemented?",
@@ -56,7 +56,7 @@ const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
     "What are the steps of this algorithm?",
 ];
 
-const RELATIONSHIP_PROTOTYPES: &[&str] = &[
+pub const RELATIONSHIP_PROTOTYPES: &[&str] = &[
     "What calls this function?",
     "How does A relate to B?",
     "What depends on this?",
@@ -66,7 +66,7 @@ const RELATIONSHIP_PROTOTYPES: &[&str] = &[
     "How do errors propagate through the system?",
 ];
 
-const COMPARISON_PROTOTYPES: &[&str] = &[
+pub const COMPARISON_PROTOTYPES: &[&str] = &[
     "Compare A and B",
     "What are the differences between X and Y?",
     "How does A differ from B?",
