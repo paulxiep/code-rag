@@ -141,6 +141,7 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
         let sources = build_sources(&result);
@@ -159,6 +160,7 @@ mod tests {
             readme_chunks: vec![scored(sample_readme_chunk(), 0.54)],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let sources = build_sources(&result);
@@ -174,6 +176,7 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![scored(sample_crate_chunk(), 0.72)],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let sources = build_sources(&result);
@@ -190,6 +193,7 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![scored(sample_module_doc_chunk(), 0.65)],
+            folder_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let sources = build_sources(&result);
@@ -205,6 +209,7 @@ mod tests {
             readme_chunks: vec![scored(sample_readme_chunk(), 0.9)],
             crate_chunks: vec![scored(sample_crate_chunk(), 0.3)],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -222,6 +227,7 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
         let sources = build_sources(&result);

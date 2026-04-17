@@ -4,7 +4,7 @@ use code_rag_engine::text::build_searchable_text;
 use gloo_net::http::Request;
 use serde::Deserialize;
 
-use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, FolderChunk, ModuleDocChunk, ReadmeChunk};
 
 /// A chunk paired with its pre-computed embedding vector.
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +26,10 @@ pub struct ChunkIndex {
     pub readme_chunks: Vec<EmbeddedChunk<ReadmeChunk>>,
     pub crate_chunks: Vec<EmbeddedChunk<CrateChunk>>,
     pub module_doc_chunks: Vec<EmbeddedChunk<ModuleDocChunk>>,
+    /// A2: folder summary chunks. `#[serde(default)]` so pre-A2 index.json
+    /// bundles still deserialize cleanly (field absent → empty Vec).
+    #[serde(default)]
+    pub folder_chunks: Vec<EmbeddedChunk<FolderChunk>>,
     /// Pre-computed prototype embeddings for intent classification.
     /// Keys: "overview", "implementation", "relationship", "comparison"
     pub intent_prototypes: std::collections::HashMap<String, Vec<Vec<f32>>>,
@@ -39,6 +43,9 @@ pub struct ChunkIndex {
     pub crate_idf: Option<super::text_search::IdfTable>,
     #[serde(default)]
     pub module_doc_idf: Option<super::text_search::IdfTable>,
+    /// A2: IDF over folder summary_text. None → folder BM25 short-circuits.
+    #[serde(default)]
+    pub folder_idf: Option<super::text_search::IdfTable>,
 
     /// C1: Call graph edges for browser-side graph traversal.
     #[serde(default)]

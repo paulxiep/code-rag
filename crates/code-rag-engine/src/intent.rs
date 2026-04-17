@@ -399,12 +399,15 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// findings; the config flags capture the global feature toggle.
 ///
 /// `body_vec` is always true — it is the unconditional baseline arm.
+/// `folder_vec` (A2) gates the folder-summary arm — off for every intent
+/// until A3 evaluates the harness and opens it for the right intents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArmPolicy {
     pub body_vec: bool,
     pub sig_vec: bool,
     pub bm25: bool,
     pub rerank: bool,
+    pub folder_vec: bool,
 }
 
 /// Per-intent arm policy. Values are empirical — derived from the B5 space
@@ -421,6 +424,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             sig_vec: false,
             bm25: true,
             rerank: true,
+            folder_vec: false, // A2: dark, A3 will flip this on for Overview.
         },
         // Implementation: hybrid HURTS (-4.2pp). BM25 over-matches identifier tokens
         // in test/caller chunks, swamping the real implementation chunk.
@@ -429,6 +433,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             sig_vec: false,
             bm25: false,
             rerank: true,
+            folder_vec: false,
         },
         // Relationship: hybrid+rerank tied with body-vec-only at 0.485.
         // Keep BM25 on because caller/dependency queries benefit from term match.
@@ -437,6 +442,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             sig_vec: false,
             bm25: true,
             rerank: true,
+            folder_vec: false,
         },
         // Comparison: all arms off except body-vec. B3 finding preserved —
         // signature tokens + BM25 + rerank all over-rank ONE half of a pair.
@@ -445,6 +451,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             sig_vec: false,
             bm25: false,
             rerank: false,
+            folder_vec: false,
         },
     }
 }
@@ -466,6 +473,7 @@ impl Default for RoutingTable {
         // code_limit fixed at 5 (pre-V2.2 default) across all intents.
         // Differentiation is in supplementary context only.
         // Revisit once V3 quality harness measures recall@5 per intent.
+        // A2: folder_limit=0 for every intent — arm is dark until A3.
         routes.insert(
             QueryIntent::Overview,
             RetrievalConfig {
@@ -473,6 +481,7 @@ impl Default for RoutingTable {
                 readme_limit: 3,
                 crate_limit: 3,
                 module_doc_limit: 3,
+                folder_limit: 0,
             },
         );
 
@@ -483,6 +492,7 @@ impl Default for RoutingTable {
                 readme_limit: 1,
                 crate_limit: 1,
                 module_doc_limit: 2,
+                folder_limit: 0,
             },
         );
 
@@ -493,6 +503,7 @@ impl Default for RoutingTable {
                 readme_limit: 1,
                 crate_limit: 2,
                 module_doc_limit: 2,
+                folder_limit: 0,
             },
         );
 
@@ -503,6 +514,7 @@ impl Default for RoutingTable {
                 readme_limit: 2,
                 crate_limit: 3,
                 module_doc_limit: 2,
+                folder_limit: 0,
             },
         );
 
@@ -870,6 +882,21 @@ mod tests {
             QueryIntent::Comparison,
         ] {
             assert!(arm_policy(intent).body_vec);
+        }
+    }
+
+    #[test]
+    fn test_arm_policy_folder_vec_off_everywhere_a2() {
+        // A2 ships the folder arm gated off. A3 will flip this for the
+        // intents that benefit (at least Overview). Guard rail so A2
+        // ingestion can't accidentally change answers.
+        for intent in [
+            QueryIntent::Overview,
+            QueryIntent::Implementation,
+            QueryIntent::Relationship,
+            QueryIntent::Comparison,
+        ] {
+            assert!(!arm_policy(intent).folder_vec);
         }
     }
 

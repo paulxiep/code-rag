@@ -4,14 +4,16 @@ use code_rag_engine::config::RetrievalConfig;
 
 use crate::data::{ChunkIndex, EmbeddedChunk};
 
-/// Bundled search results for the three non-code chunk arms (README, crate,
-/// module-doc). Each `Vec` is a list of `(chunk, score)` pairs where the score
-/// is either an RRF rank (hybrid path) or an L2 distance (brute-force path);
-/// the caller decides how to interpret it via the matching `to_scored*` helper.
+/// Bundled search results for the non-code chunk arms (README, crate,
+/// module-doc, A2 folder). Each `Vec` is a list of `(chunk, score)` pairs
+/// where the score is either an RRF rank (hybrid path) or an L2 distance
+/// (brute-force path); the caller decides how to interpret it via the
+/// matching `to_scored*` helper.
 pub struct NonCodeResults {
     pub readme: Vec<(code_rag_types::ReadmeChunk, f32)>,
     pub crates: Vec<(code_rag_types::CrateChunk, f32)>,
     pub module_docs: Vec<(code_rag_types::ModuleDocChunk, f32)>,
+    pub folders: Vec<(code_rag_types::FolderChunk, f32)>,
 }
 
 /// Compute L2 (Euclidean) distance between two vectors.
@@ -176,10 +178,29 @@ pub fn hybrid_search_non_code(
         )
     };
 
+    // A2: folder arm. Short-circuits when limit == 0 (A2 default), so no
+    // work happens until A3 flips folder_limit per intent.
+    let folders = if config.folder_limit == 0 {
+        Vec::new()
+    } else if let Some(ref idf) = index.folder_idf {
+        let vec_results = top_k(query_embedding, &index.folder_chunks, config.folder_limit);
+        let bm25_results = bm25_search(
+            query,
+            &index.folder_chunks,
+            |c| c.summary_text.as_str(),
+            idf,
+            config.folder_limit,
+        );
+        rrf_fuse(&[vec_results, bm25_results], 60, |c| &c.chunk_id)
+    } else {
+        top_k(query_embedding, &index.folder_chunks, config.folder_limit)
+    };
+
     NonCodeResults {
         readme,
         crates,
         module_docs,
+        folders,
     }
 }
 
@@ -197,5 +218,7 @@ pub fn brute_force_non_code(
             &index.module_doc_chunks,
             config.module_doc_limit,
         ),
+        // A2: `top_k` with limit 0 returns empty, so no gate needed here.
+        folders: top_k(query_embedding, &index.folder_chunks, config.folder_limit),
     }
 }

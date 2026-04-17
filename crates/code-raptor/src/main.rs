@@ -3,7 +3,7 @@
 mod export;
 
 use clap::{Parser, Subcommand};
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
 use code_raptor::{
     DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
     IngestionStats, VectorStore, format_code_for_embedding, format_crate_for_embedding,
@@ -21,6 +21,8 @@ const CODE_TABLE: &str = "code_chunks";
 const README_TABLE: &str = "readme_chunks";
 const CRATE_TABLE: &str = "crate_chunks";
 const MODULE_DOC_TABLE: &str = "module_doc_chunks";
+/// A2: folder summary chunks.
+const FOLDER_TABLE: &str = "folder_chunks";
 
 #[derive(Parser)]
 #[command(name = "code-raptor")]
@@ -236,6 +238,24 @@ async fn run_incremental_ingestion(
     // Then delete old chunks
     apply_deletions(store, &diff.to_delete).await?;
 
+    // A2: Folder summary chunks aren't tracked by reconcile. Take the simple
+    // route (matches C1 call_edges): wipe folder chunks for each affected
+    // project and re-upsert from the full current ingestion result. Folder
+    // chunks are ~1 per directory and cheap to embed, so full rebuild is
+    // fine. Skipping this in incremental would leave stale summaries when
+    // a folder's key_types/key_functions change.
+    if !result.folder_chunks.is_empty() {
+        for project in &projects {
+            store
+                .delete_chunks_by_project(FOLDER_TABLE, project)
+                .await?;
+        }
+        let n = embed_and_store_folders(&result.folder_chunks, store, embedder).await?;
+        if n > 0 {
+            info!("Rebuilt {} folder chunks (incremental)", n);
+        }
+    }
+
     // Rebuild FTS indices for hybrid search (B2)
     info!("Rebuilding FTS indices...");
     store.create_fts_indices().await?;
@@ -333,7 +353,13 @@ async fn delete_project_from_all_tables(
     project_name: &str,
 ) -> anyhow::Result<()> {
     info!("Deleting all chunks for project: {}", project_name);
-    for table in [CODE_TABLE, README_TABLE, CRATE_TABLE, MODULE_DOC_TABLE] {
+    for table in [
+        CODE_TABLE,
+        README_TABLE,
+        CRATE_TABLE,
+        MODULE_DOC_TABLE,
+        FOLDER_TABLE,
+    ] {
         store.delete_chunks_by_project(table, project_name).await?;
     }
     Ok(())
@@ -395,6 +421,15 @@ async fn embed_and_store_all(
         embed_and_store_module_docs(&result.module_doc_chunks, store, embedder).await?;
     if module_doc_count > 0 {
         info!("Stored {} module doc chunks", module_doc_count);
+    }
+
+    // A2: folder summaries. Cheap — one chunk per directory. Always fully
+    // re-embedded (no incremental diff), matching the C1 call_edges pattern:
+    // callers wipe-by-project before calling embed_and_store_all in the
+    // full-ingest path; incremental-path folder churn is negligible.
+    let folder_count = embed_and_store_folders(&result.folder_chunks, store, embedder).await?;
+    if folder_count > 0 {
+        info!("Stored {} folder chunks", folder_count);
     }
 
     Ok(())
@@ -551,6 +586,30 @@ async fn embed_and_store_module_docs(
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = embedder.embed_batch(&text_refs)?;
         total += store.upsert_module_doc_chunks(batch, embeddings).await?;
+    }
+    Ok(total)
+}
+
+/// A2: Embed + upsert folder summary chunks. The pre-rendered `summary_text`
+/// (built at parse time in `ingestion::folder`) is the embedding input —
+/// bytes-identical to what the browser BM25-scores, so IDF built at export
+/// time agrees on token counts.
+async fn embed_and_store_folders(
+    chunks: &[FolderChunk],
+    store: &VectorStore,
+    embedder: &mut Embedder,
+) -> anyhow::Result<usize> {
+    if chunks.is_empty() {
+        return Ok(0);
+    }
+
+    info!("Embedding {} folder chunks...", chunks.len());
+    let mut total = 0;
+    for batch in chunks.chunks(EMBEDDING_BATCH_SIZE) {
+        let texts: Vec<String> = batch.iter().map(|c| c.summary_text.clone()).collect();
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let embeddings = embedder.embed_batch(&text_refs)?;
+        total += store.upsert_folder_chunks(batch, embeddings).await?;
     }
     Ok(total)
 }

@@ -1,5 +1,264 @@
 # Development Log
 
+## 2026-04-17: A2 — Folder-Level Embeddings (Dark Arm, A3-Ready)
+
+### Summary
+
+Added `FolderChunk`, a new chunk type that represents a directory as a single embeddable summary. 118 folder chunks produced across the portfolio (`code-rag` + `invoice-parse` + `quant-trading-gym`), each a 5-line template rendering of file count, languages, public types, public functions, and direct subfolders. Chunks flow through the standard ingest → LanceDB → export → browser pipeline with a new `folder_chunks` table (Arrow schema mirroring `crate_chunks` with `List<Utf8>` for the four string-vec fields), a new FTS index on `summary_text`, a new `folder_idf` IDF table in `index.json`, and a new retrieval arm (`hybrid_search_folders` server-side, `hybrid_search_non_code` extended with a folder branch browser-side).
+
+Arm is **dark**: `RetrievalConfig.folder_limit = 0` and `ArmPolicy.folder_vec = false` for every intent. A3 flips both on. Dark-but-wired lets A2 verify "ingest works, WASM loads, nothing regresses" without entangling those signals with "A3 routing lifts Overview recall."
+
+**The one non-mechanical design choice** was the template's first line: users phrase directory questions as "what's in the X **module**?" as often as "what does the X **folder** do?" — especially in Rust-heavy contexts where `mod x` backs folder `x/`, and A2's own `a2-ingestion-folder` case literally says "ingestion module". Vector search copes via semantic similarity; BM25 and the cross-encoder are exact-token and would miss. The fix is a dual label in the embedded string itself, not query rewriting:
+
+```
+Folder: code-rag/crates/code-rag-engine/src (module: src)
+Contains: 6 files (rust)
+Key types: ArmPolicy, RetrievalConfig, ...
+Key functions: arm_policy, classify, ...
+Subfolders: text
+```
+
+One extra tag (~10 bytes/chunk), bytes-identical on server and WASM because the template is a pure function in `code_rag_engine::folder::render_summary`, no new routing code. Not extending to `package`/`directory` — diluted signal, and `package` collides with `CrateChunk` semantics.
+
+**Harness results (81-case dataset, re-ingested portfolio, rerank+hybrid):**
+
+| Intent | Queries | post_a1 recall@5 | post_a2 recall@5 | Δ |
+|--------|---------|------------------|-------------------|---|
+| overview | 23 | 0.80 | 0.81 | +0.01 |
+| implementation | 27 | 0.76 | 0.76 | 0 |
+| relationship | 18 | 0.62 | 0.62 | 0 |
+| comparison | 12 | 0.65 | 0.65 | 0 |
+| **aggregate** | 81 | **0.72** | **0.72** | 0 |
+
+MRR: 0.71 → 0.70 (within ±0.01 noise band). `recall@10`: 0.76 → 0.77. Latency `p50` 2345 → 2617 ms (+11.6%, within the ≤20% success band); `p95` 3189 → 3086 ms (-3.2%). Warning count unchanged at 4.
+
+Ground-truth intent: recall@5 = 0.73 (aggregate), comparison 0.65, implementation 0.78, overview 0.81, relationship 0.64.
+
+The +0.01 on overview is not from the folder arm (it's gated off). It's from re-ingestion — the upstream `code-rag` files themselves changed between the `post_a1_214d847` and `post_a2_bd57b33` commits, so a small per-query shift is expected. All intents sit within the ±0.01/±0.02 no-regression bands documented in the V3.3 baseline memory.
+
+### Motivation
+
+Track A's hero query "What does the `engine/` folder do?" was unanswerable pre-A2: vector search over function/readme/crate/module_doc chunks returns the most similar *function*, not a directory-level answer — there was no chunk whose semantic content was "the engine folder". A2 fills that gap. RAPTOR (ICLR 2024) validates the "embed a subtree summary" pattern for hierarchical retrieval but is agnostic to how the summary is produced; deterministic templates are the pragmatic choice — reproducible (identical bytes on every re-ingest), cheap (no LLM API calls during CI), WASM-compatible. The template draws from facts already extracted during CodeChunk ingestion (public types, public functions from `node_type` + signature-prefix visibility heuristic) — no new parsing.
+
+A2 ships dark so it can be landed, re-ingested, and deployed to the browser demo without altering answers. A3 (collapsed-tree routing) flips `folder_limit` per intent and becomes a small config-only change that activates the feature.
+
+### Implementation
+
+**Types (`code-rag-types/src/lib.rs`):**
+- `FolderChunk` struct after `ModuleDocChunk`. 11 fields: `folder_path`, `project_name`, `file_count`, four `Vec<String>` metadata fields, `summary_text` (persisted so server-embedded bytes and browser BM25 bytes can never drift), `chunk_id` (via existing `deterministic_chunk_id` — no new ID helper needed), `content_hash`, `embedding_model_version`.
+
+**Engine folder module (`code-rag-engine/src/folder.rs`, NEW):**
+- `FolderMeta<'a>` borrowed view + `render_summary` (pure format, deterministic, wasm-safe).
+- `MAX_KEYS = 12` cap on both `key_types` and `key_functions`; 12 names × 2 categories + framing stays ~300 bytes (well under BGE-small's 512-token budget).
+- `canonical_tuple` for change-detection hash input.
+- `is_public(language, signature, identifier)` visibility heuristic:
+  - Rust: `pub ` prefix on signature (`pub(crate)` excluded — conservative first cut; A3 can revisit if hero queries miss).
+  - Python: identifier doesn't start with `_`; dunder methods pass through.
+  - TypeScript: `export` token present (word-boundary match — avoids false-positives on "exported" etc.).
+- 13 unit tests covering template bytes, fallbacks, bounded length, basename edge cases, and per-language visibility including `pub(crate)` / TS-arrow / Python-dunder cases.
+
+**Engine config + intent (`code-rag-engine/src/{config,intent,retriever,context}.rs`):**
+- `RetrievalConfig.folder_limit: 0` (default), `RerankConfig.folder_fetch_multiplier: 2`.
+- `fetch_limits` extended. `ArmPolicy.folder_vec: false` for all 4 intents (A3 will flip Overview/Relationship).
+- `RoutingTable::default` extended: every intent entry carries `folder_limit: 0` — dark.
+- `RetrievalResult.folder_chunks: Vec<ScoredChunk<FolderChunk>>` + `flatten()` appends folder entries with `chunk_type: "folder"`.
+- `RerankText for FolderChunk` returns `summary_text` verbatim — cross-encoder sees the exact bytes the embedder saw.
+- `build_context` appends `## Relevant Folders` section when non-empty; empty → suppressed.
+
+**Store (`code-rag-store/src/vector_store.rs`):**
+- `FOLDER_TABLE = "folder_chunks"` constant.
+- `folder_chunks_to_batch` + `extract_folder_chunks_from_batch` + `batches_to_folder_chunks_hybrid`. Arrow schema: Utf8 scalars for path/project/summary/hash/version, `UInt64` for `file_count`, **native `List<Utf8>`** (not JSON-encoded string) for languages/key_types/key_functions/subfolders — matches `CrateChunk.dependencies` post-V1.1 pattern.
+- `upsert_folder_chunks`, `search_folders` (vector-only, L2), `hybrid_search_folders` (vector + FTS fused inside LanceDB with graceful fallback to vector+score-inversion on FTS miss).
+- `create_fts_indices` tuple extended: `(FOLDER_TABLE, "summary_text")`.
+- 2 new arrow-roundtrip unit tests, including an empty-lists edge case.
+
+**Ingestion (`code-raptor/src/ingestion/folder.rs`, NEW):**
+- `build_folder_chunks(repo_path, code_chunks, project_name_override) -> Vec<FolderChunk>`. Three passes:
+  1. Walk the tree with `walkdir::WalkDir` reusing `should_skip` + `normalize_path` from the parent module (exposed `pub(crate)`). Per-directory accumulator tracks `file_count`, `BTreeSet<String>` languages (via existing `handler_for_path`), `BTreeSet<String>` subfolders registered from each file's grandparent.
+  2. Register subfolder edges for hierarchy-only directories that had no files (otherwise pure `crates/` wouldn't list its children).
+  3. Bucket `code_chunks` by parent folder with `node_type` + `is_public` filter, sort alphabetically (`BTreeSet` → `Vec`), cap at `MAX_KEYS`.
+- Skip empty folders (no files, no subfolders, no keys).
+- Determinism test asserts identical `chunk_id` across two calls. 9 unit tests total.
+- `IngestionResult.folder_chunks` field added; `run_ingestion` populates it after code chunks are assembled (needs `node_type`).
+
+**Ingest orchestration (`code-raptor/src/main.rs`):**
+- `FOLDER_TABLE` constant + `embed_and_store_folders` helper (EMBEDDING_BATCH_SIZE = 25, same as the other arms; `summary_text` is the embedding input — bytes-identical to what the browser BM25-scores).
+- Wired into both `embed_and_store_all` (full-ingest) and `run_incremental_ingestion` (reconcile doesn't track folders — incremental path wipes folder chunks for each affected project and re-upserts from the full current IngestionResult, matching the C1 `call_edges` pattern).
+- `delete_project_from_all_tables` extended to include `FOLDER_TABLE` for clean wipe.
+
+**Export (`code-raptor/src/export.rs`):**
+- `ExportIndex.folder_chunks: Vec<EmbeddedChunk<FolderChunk>>` with `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — forward-compat with pre-A2 readers.
+- `ExportIndex.folder_idf: Option<IdfTable>` — built via `IdfTable::build` over the exact `summary_text` strings shipped in `index.json`, so browser-side df counts line up.
+- `export_folder_chunks` mirrors `export_crate_chunks`, including graceful-empty when the `folder_chunks` table is missing (pre-A2 databases).
+- `index.json` size: 29MB → 33MB (+4MB, ~1.1KB per folder chunk with 384-d vector + summary + metadata — well within the expected bundle growth).
+
+**Server retriever (`src/engine/retriever.rs`):**
+- Folder arm after the non-code block; short-circuits when `fetch_config.folder_limit == 0 || !policy.folder_vec` (A2: both conditions true by default). Calls `hybrid_search_folders` when hybrid is enabled, else `search_folders` with L2-to-relevance conversion.
+- `RetrievalResult` construction sites (5 in this file — bundle, 3 fallback variants, non-rerank path) all carry `folder_chunks` — either the fresh vec or cloned.
+- `rerank_all` extended: adds a `folder_limit > 0` gate on the rerank call (passes `0` when gated off → early return inside `rerank_chunks`, no work).
+
+**WASM (`code-rag-ui/src/{data.rs,search.rs,standalone_api.rs}`):**
+- `ChunkIndex.folder_chunks` + `ChunkIndex.folder_idf` with `#[serde(default)]` — pre-A2 `index.json` bundles still deserialize cleanly (fields absent → empty Vec / None).
+- `NonCodeResults` extended with a `folders` field. `hybrid_search_non_code` and `brute_force_non_code` both grew a folder branch; hybrid path reuses `bm25_search` with `|c| c.summary_text.as_str()` as the text extractor + `rrf_fuse` against top-k vector results.
+- `standalone_api::run_retrieval`: folder arm wired into the main path, the rerank-fallback branches (both hybrid and brute-force variants), and `rerank_all`. `build_source_list` emits folder entries with `chunk_type: "folder"`, `path` = full path, `label` = basename for UI brevity.
+
+**Harness construction sites (`src/api/dto.rs`, `src/harness/runner.rs`):** `RetrievalResult { … folder_chunks: vec![], intent, }` added to 8 test sites. No behavior change — tests only construct empty folder vecs for now.
+
+### Why dark instead of A3-live
+
+Concern surfaced during planning: shouldn't we just ship A2+A3 together? The two-step split buys three things:
+
+1. **Harness signal isolation.** A2 alone proves "no regression" (important for a net-new chunk type across ingest + schema + store + WASM). A3 alone proves "recall lifts on folder hero queries". Mixing them means a recall dip could be either the arm regressing existing queries OR the folder arm biasing out the right answer — hard to diagnose.
+2. **Dataset freeze preservation.** A2 ships zero new test cases. Pre-seeding 3 `dark`-tagged hero queries that fail-until-A3 would drag aggregate recall@5 down, because `src/bin/harness.rs:92-99` shows `--tag` is a positive include-filter via substring match — no `--exclude-tag` flag exists. Adding failing cases now would muddle the "A2 doesn't regress" signal. A3 adds them at the same commit as activation, so they pass on first harness run.
+3. **Rollback granularity.** If A3 routing turns out to regress some intent, A3 can be config-rolled-back (set `folder_limit=0` in `RoutingTable::default`) with A2's infrastructure intact. Folder chunks remain populated but inert — no re-ingest needed to recover.
+
+Updated `A3.md` sections ("Harness + metadata", "Hero Queries", "Dataset Additions", Implementation Sequence step 10) to reflect that A2 did NOT pre-seed dark-tagged cases — A3 adds them fresh with `a3-` prefix IDs alongside `folder_limit`/`folder_vec` flip.
+
+### Refinements vs A2.md proposal
+
+The A2.md spec was comprehensive but several small decisions diverged during implementation:
+
+- **No new `folder_chunk_id` helper** — A2.md proposed `folder_chunk_id(path, summary)` with a `b"folder:"` prefix to prevent collision with code chunk IDs. Existing `deterministic_chunk_id(file_path, content)` already domain-separates folder paths from file paths by their input strings (no folder path equals any file path in a valid ingest). Reused the existing helper; ID uniqueness asserted by `build_deterministic_across_calls` test + the fact that different tables hold different ID domains.
+- **No new `ExportFolderChunk` struct** — A2.md proposed one; actual existing pattern is the generic `EmbeddedChunk<T>`, used for code/readme/crate/module_doc. `EmbeddedChunk<FolderChunk>` gets the same treatment for free.
+- **`IdfTable` has no `avg_doc_len` field**. A1 intentionally kept that a `score()` parameter so callers can compute over-corpus vs over-subset as fits. A2 follows: `folder_idf` is a plain `IdfTable`; browser computes `avg_doc_len` at query time from `folder_chunks.iter().map(|c| tokenize(&c.summary_text).len())`.
+- **`hybrid_search_folders` signature** follows `hybrid_search_crates` (positional `query_text, query_embedding, limit` returning `Vec<(FolderChunk, f32)>`), not A2.md's proposed `HybridConfig` + `ScoredChunk` variant. LanceDB does its own RRF — no wrapper needed on the server side.
+- **Extended `hybrid_search_non_code`** rather than adding a standalone `search_folder_arm` — single function handles all non-code arms, folder is the 4th branch. Reduces duplication.
+- **Folder metadata from the existing walk, not a re-walk** — A2.md's proposal to re-walk was avoided. `build_folder_chunks` does walk separately but reuses `should_skip` + `normalize_path` (exposed `pub(crate)` from `ingestion::mod`), so the blocklist (`.git`, `target`, `node_modules`, `.venv`, `__pycache__`, `dist`, `build`, `tests`, `test`, `.idea`, `.vscode` + hidden dirs) stays single-sourced — no A1-violating duplication.
+- **Test cases deferred to A3** — reasoning above.
+
+### Files touched
+
+- `crates/code-rag-types/src/lib.rs` (+`FolderChunk` struct + docstring)
+- `crates/code-rag-engine/src/folder.rs` (NEW — `FolderMeta`, `render_summary`, `is_public`, `canonical_tuple`, `MAX_KEYS`, 13 unit tests)
+- `crates/code-rag-engine/src/lib.rs` (+`pub mod folder;`)
+- `crates/code-rag-engine/src/config.rs` (+`folder_limit`, `folder_fetch_multiplier`, `fetch_limits` extension, +3 unit tests)
+- `crates/code-rag-engine/src/intent.rs` (+`folder_vec: false` on all four `ArmPolicy` rows, `RoutingTable::default` extended, +1 guard-rail test)
+- `crates/code-rag-engine/src/retriever.rs` (+`RerankText for FolderChunk`, +`folder_chunks` in `RetrievalResult` + `flatten`, +`to_retrieval_result` passes empty vec, +2 new unit tests)
+- `crates/code-rag-engine/src/context.rs` (+`format_folder_section` + ordering: crates → folders → module_docs → code → readme, +2 unit tests)
+- `crates/code-rag-store/src/vector_store.rs` (+`FOLDER_TABLE`, upsert/search/hybrid/delete, Arrow schema, FTS config extension, 2 new unit tests)
+- `crates/code-raptor/src/ingestion/folder.rs` (NEW — walk + accumulator + `build_folder_chunks` + 9 unit tests)
+- `crates/code-raptor/src/ingestion/mod.rs` (+`pub mod folder;`, `normalize_path` + `should_skip` + `IGNORED_DIRS` → `pub(crate)`, `IngestionResult.folder_chunks`, wire into `run_ingestion`)
+- `crates/code-raptor/src/ingestion/reconcile.rs` (+`folder_chunks: vec![]` in existing test construction sites)
+- `crates/code-raptor/src/main.rs` (+`FOLDER_TABLE` constant, +`embed_and_store_folders`, full + incremental ingest wiring, `delete_project_from_all_tables` extension)
+- `crates/code-raptor/src/export.rs` (+`folder_chunks` + `folder_idf` on `ExportIndex`, +`export_folder_chunks`, `ListArray` import)
+- `src/engine/retriever.rs` (+folder arm in `retrieve`, 5 `RetrievalResult` construction sites carry `folder_chunks`, `rerank_all` handles `folder_limit`)
+- `src/api/dto.rs` (6 test sites: +`folder_chunks: vec![]`)
+- `src/harness/runner.rs` (2 test sites: +`folder_chunks: vec![]`)
+- `crates/code-rag-ui/src/data.rs` (+`folder_chunks` + `folder_idf` on `ChunkIndex` with `#[serde(default)]`)
+- `crates/code-rag-ui/src/search.rs` (+`folders` in `NonCodeResults`, folder branch in `hybrid_search_non_code` + `brute_force_non_code`)
+- `crates/code-rag-ui/src/standalone_api.rs` (folder arm in `run_retrieval`, fallback paths, `rerank_all`, `build_source_list`)
+- `A3.md` (dataset section updated: A3 adds fresh `a3-` cases; A2 deliberately shipped no `dark`-tagged pre-seeds)
+
+### Reports
+
+- `data/reports/post_a2_bd57b33.{md,json}` — classifier-intent, re-ingested portfolio, rerank+hybrid, 81 cases
+- `data/reports/post_a2_gt_bd57b33.{md,json}` — ground-truth-intent variant
+
+### Next
+
+A3 (collapsed-tree routing). Flips `folder_limit` per intent in `RoutingTable::default`, flips `folder_vec: true` for Overview (and likely Relationship) in `arm_policy`, adds 3 folder hero cases to `data/test_queries.json` (no `dark` tag — fresh `a3-` IDs so they pass on first harness run). Pure code change — no re-ingest.
+
+A4/A5 (file + repo summaries) follow — the arm plumbing is already in place, both in the routing table and in the fusion stages. Only new store tables + new chunk builders needed.
+
+---
+
+## 2026-04-17: A1 — Text Module Consolidation (WASM/Native Single Source)
+
+### Summary
+
+Collapsed three copies of the tokenize / IDF / BM25 / searchable-text logic into one authoritative module at `code-rag-engine::text`. Pure refactor — no behavior change, no dataset change, no re-ingest required. Unblocks Track A (A2 FolderChunks, A4 FileChunks, A5 RepoSummary) so every new chunk type shares one `tokenize()`, one `IdfTable`, one BM25 kernel, one `build_searchable_text` / `split_camel_case`, and one set of intent prototype texts — no new duplication at the WASM/native boundary.
+
+**Why refactor-as-track-item:** the WASM demo and the local Docker server run the same retrieval pipeline. Pre-A1, `tokenize()`, `IdfTable`, `build_searchable_text`, `split_camel_case`, and the intent-prototype string arrays existed in 2-3 places each, with subtle drift risk. B3 already burned time investigating a server/browser `remove_stop_words` divergence that was a direct consequence of this duplication. Landing A2/A4/A5 against duplicated text primitives would guarantee more drift.
+
+**Harness results (81-case dataset, classifier routing, rerank+hybrid, label `post_a1`):**
+
+| Intent | Queries | pre-A1 (V3.3 baseline) | post_a1 recall@5 | Δ |
+|--------|---------|------------------------|-------------------|---|
+| overview | 23 | 0.80 | 0.80 | 0 |
+| implementation | 27 | 0.76 | 0.76 | 0 |
+| relationship | 18 | 0.60 | 0.62 | +0.02 |
+| comparison | 12 | 0.65 | 0.65 | 0 |
+| **aggregate** | 81 | **0.72** | **0.72** | 0 |
+
+Within the ±0.02 per-intent pure-refactor band. Relationship +0.02 is cache/ordering noise from the rebuild — no semantic change in the text primitives. MRR: 0.70 → 0.71. Latency p50: 2345ms (baseline). WASM bundle: no meaningful size change (bytes moved between crates, same total).
+
+### Motivation
+
+Track A's three new chunk types (A2 FolderChunk, A4 FileChunk, A5 RepoSummaryChunk) each need:
+- A `searchable_text` constructed the same way as code chunks (for server FTS and browser BM25 to see identical tokens).
+- An `IdfTable` built over their column so hybrid search works.
+- A `tokenize()` that produces the same output server-side (feeding LanceDB) and browser-side (feeding brute-force cosine + BM25).
+
+Pre-A1, adding each type would have required touching `tokenize` in `code-rag-ui/text_search.rs` AND `code-raptor/src/export.rs` AND potentially `code-rag-store/vector_store.rs`, plus adding per-type helpers in two crates. A1 collapses the shared primitives into one module so the next chunk type (A2) is a single-crate addition.
+
+### Implementation
+
+**New module `code-rag-engine::text` (5 files):**
+
+- `tokenize.rs` — `pub fn tokenize(text: &str) -> Vec<String>`. Canonical form: lowercase, split on non-alphanumeric, drop empty segments. Owned strings (matches browser's pre-A1 shape). Stop-word removal is **off** (matches browser, matches B3's empirical verdict — the pre-A1 server path had `remove_stop_words=true` for LanceDB's FTS config; that branch is gone, FTS uses the same simple tokenizer the browser's BM25 uses).
+- `searchable.rs` — `pub fn build_searchable_text(identifier, signature, docstring) -> String` + `pub fn split_camel_case`. Verbatim lift of the canonical server-side implementation from `vector_store.rs:1859-1910`. Identifier is doubled (field-boost proxy) and camelCase-split alongside the original.
+- `idf.rs` — `pub struct IdfTable { num_docs, doc_frequencies }`. `build<I, S: AsRef<str>>(docs)` consumes any iterator of string-likes. `idf(term)` returns the standard BM25 `ln((N - df + 0.5) / (df + 0.5) + 1)`. `avg_doc_len` is deliberately **not** a field — it's passed as a parameter to `bm25::score()` so callers can choose corpus vs subset scope. This diverges from A1.md's original proposal; it matches LanceDB semantics and preserves per-subset BM25 behavior the browser relied on.
+- `bm25.rs` — `pub fn score(query_tokens, doc_tokens, avg_doc_len, idf, params) -> f32` + `Bm25Params { k1: 1.2, b: 0.75 }`. Default k1=1.2 matches the browser's pre-A1 behavior (not 1.5 — verified against `text_search.rs` BM25 code before the consolidation).
+- `mod.rs` — re-exports `{tokenize, build_searchable_text, split_camel_case, IdfTable, bm25::{Bm25Params, score}}`.
+
+**Intent prototypes exposed as public consts (`code-rag-engine/src/intent.rs`):**
+
+Pre-A1: `OVERVIEW_PROTOTYPES` / `IMPLEMENTATION_PROTOTYPES` / `RELATIONSHIP_PROTOTYPES` / `COMPARISON_PROTOTYPES` were `pub const` in `intent.rs` *and* duplicated as private static arrays in `code-raptor/src/export.rs` for the build-intent-prototypes step. A1 deleted the duplicate arrays; export now imports from the engine.
+
+**Downstream cleanup:**
+
+- `code-rag-store/src/vector_store.rs` — removed local `build_searchable_text` + `split_camel_case` (62 lines deleted). Imports from engine. `remove_stop_words=true` branch removed from the FTS config — server and browser now tokenize identically.
+- `code-rag-ui/src/text_search.rs` — removed local `IdfTable` struct + local `tokenize` + inline BM25 loop. Thin adapter re-exporting from `code_rag_engine::text` + one wrapper (`bm25_search` + `bm25_search_precomputed`) for the `EmbeddedChunk<T>` iteration shape. 170 → ~90 lines.
+- `code-rag-ui/src/data.rs` — deleted dead `build_searchable_text` / `split_camel_case` copy (lines 58-102). `load_index` imports the engine's version.
+- `code-raptor/src/export.rs` — deleted local `IdfTable` + `tokenize` + intent prototype arrays. 106 lines → ~50 lines.
+
+**Deduplication invariant:**
+
+```
+rg "fn tokenize\(" crates/                    # 1 hit: engine/src/text/tokenize.rs:6
+rg "struct IdfTable" crates/                  # 1 hit: engine/src/text/idf.rs:13
+rg "fn build_searchable_text\(" crates/       # 1 hit: engine/src/text/searchable.rs:7
+rg "fn split_camel_case\(" crates/            # 1 hit: engine/src/text/searchable.rs:36
+```
+
+Verified post-A1 as a smoke check. Any future drift will show up as > 1 hit on one of these searches.
+
+### Dependency graph sanity
+
+`code-rag-engine` gained no new deps (serde + std + existing `regex` from the C3 comparator work). Compiles to `wasm32-unknown-unknown` — verified via `cargo build -p code-rag-ui --target wasm32-unknown-unknown --features standalone` (which pulls engine transitively). `cargo tree -p code-rag-engine` is stable pre/post.
+
+Downstream consumers (`code-rag-store`, `code-rag-ui`, `code-raptor`) already depended on `code-rag-engine` pre-A1 — no Cargo.toml changes needed beyond dropping dead imports.
+
+### A1.md deviations
+
+The A1 plan proposed:
+- `IdfTable.avg_doc_len` as a field. Not carried — A1 landed with avg_doc_len as a `score()` parameter. Rationale: browser-side `bm25_search` computes avg_doc_len over the per-query subset (not corpus); LanceDB computes it over the corpus internally. Keeping it as a parameter preserves per-caller choice.
+- Per-plan `Bm25Params::default()` was `{ k1: 1.5, b: 0.75 }`. Implementation uses `{ k1: 1.2, b: 0.75 }` — matches the actual pre-A1 browser BM25 code, preserves behavior. Harness confirms no regression.
+
+### Files touched
+
+- `crates/code-rag-engine/src/text/{mod,tokenize,searchable,idf,bm25}.rs` (NEW — 5 files)
+- `crates/code-rag-engine/src/lib.rs` (+`pub mod text;`)
+- `crates/code-rag-engine/tests/text.rs` (NEW — 20+ unit tests covering tokenize, IDF build + serde roundtrip, BM25 monotone-in-tf, searchable-text boosts, split_camel_case edge cases)
+- `crates/code-rag-engine/src/intent.rs` (prototype arrays: private → `pub const`)
+- `crates/code-rag-store/Cargo.toml` (confirmed `code-rag-engine` dep already present)
+- `crates/code-rag-store/src/vector_store.rs` (deleted local `build_searchable_text` + `split_camel_case`, import from engine, dropped `remove_stop_words=true` branch)
+- `crates/code-rag-ui/Cargo.toml` (dep confirmed)
+- `crates/code-rag-ui/src/text_search.rs` (re-export from engine + thin `bm25_search` adapter)
+- `crates/code-rag-ui/src/data.rs` (deleted dead local helpers)
+- `crates/code-raptor/src/export.rs` (deleted local IdfTable + tokenize + prototype arrays, import from engine)
+- `Cargo.lock` (regenerated)
+
+### Reports
+
+- `data/reports/post_a1_214d847.{md,json}` — classifier routing, rerank+hybrid, 81 cases
+
+### Next
+
+A2 (folder-level embeddings) builds directly on this: folder summary_text feeds `code_rag_engine::text::IdfTable::build`, folder BM25 calls the same `bm25::score` the other arms use, and `render_summary` compiles to wasm32 with zero friction because the engine crate is already WASM-pure.
+
+---
+
 ## 2026-04-09: C3 — Comparison Query Decomposition (Per-Comparator RRF Fusion)
 
 ### Summary

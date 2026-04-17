@@ -313,6 +313,7 @@ mod tests {
             readme_chunks: vec![readme_chunk("README.md", "hash_r")],
             crate_chunks: vec![crate_chunk("my-crate", "hash_c")],
             module_doc_chunks: vec![module_doc_chunk("src/lib.rs", "hash_m")],
+            folder_chunks: vec![],
         };
 
         let existing = ExistingFileIndex {

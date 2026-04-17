@@ -1,3 +1,4 @@
+pub mod folder;
 pub mod language;
 pub mod languages;
 pub mod parser;
@@ -51,7 +52,7 @@ fn resolve_project_name(path: &Path, repo_root: &Path, cli_override: Option<&str
 }
 
 /// Normalize a path for storage: relative to repo_root, forward slashes
-fn normalize_path(path: &Path, repo_root: &Path) -> String {
+pub(crate) fn normalize_path(path: &Path, repo_root: &Path) -> String {
     let relative = path.strip_prefix(repo_root).unwrap_or(path);
     relative.to_string_lossy().replace('\\', "/")
 }
@@ -278,7 +279,7 @@ fn process_code_file(
 }
 
 /// Directories to skip during ingestion
-const IGNORED_DIRS: &[&str] = &[
+pub(crate) const IGNORED_DIRS: &[&str] = &[
     ".git",
     "target",
     "node_modules",
@@ -294,7 +295,7 @@ const IGNORED_DIRS: &[&str] = &[
 ];
 
 /// Check if path contains any ignored directory (relative to repo root)
-fn should_skip(entry: &DirEntry, repo_root: &Path) -> bool {
+pub(crate) fn should_skip(entry: &DirEntry, repo_root: &Path) -> bool {
     // Only check components within the repo, not the full system path
     let relative = match entry.path().strip_prefix(repo_root) {
         Ok(r) => r,
@@ -342,6 +343,8 @@ pub struct IngestionResult {
     pub readme_chunks: Vec<ReadmeChunk>,
     pub crate_chunks: Vec<CrateChunk>,
     pub module_doc_chunks: Vec<ModuleDocChunk>,
+    /// A2: folder-level summaries. One per non-empty, non-vendor directory.
+    pub folder_chunks: Vec<code_rag_types::FolderChunk>,
 }
 
 /// Type aliases for ingestion side-channels.
@@ -401,12 +404,19 @@ pub fn run_ingestion(
         .filter_map(|e| process_module_docs(e, &repo_root, &mut analyzer, project_name_override))
         .collect();
 
+    // A2: Produce folder-level summary chunks. Runs after code_chunks are
+    // assembled so key_types/key_functions can be derived from the already-
+    // parsed code chunks. Uses the shared `should_skip` blocklist — no
+    // duplication with the main walk.
+    let folder_chunks = folder::build_folder_chunks(repo_path, &all_chunks, project_name_override);
+
     (
         IngestionResult {
             code_chunks: all_chunks,
             readme_chunks,
             crate_chunks,
             module_doc_chunks,
+            folder_chunks,
         },
         all_calls,
         all_imports,

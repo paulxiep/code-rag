@@ -129,6 +129,48 @@ pub struct ModuleDocChunk {
     pub embedding_model_version: String,
 }
 
+/// A2: Folder-level summary chunk. One per directory in the portfolio.
+///
+/// Deterministic, template-rendered summary of a folder's contents (no LLM):
+/// file count, distinct languages, public types, public functions, direct
+/// subfolders. Answers directory-level Overview queries like "What does the
+/// engine/ folder do?" which vector search over function chunks cannot.
+///
+/// `summary_text` is the exact string that is embedded server-side and
+/// BM25-scored browser-side — persisted to avoid re-render drift.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FolderChunk {
+    /// Project-prefixed, forward-slash folder path relative to the portfolio
+    /// root. Matches CodeChunk.file_path convention.
+    /// Example: "code-rag/crates/code-rag-engine/src".
+    pub folder_path: String,
+    /// Project this folder belongs to (sibling subdir of the ingest root).
+    pub project_name: String,
+    /// Source files directly in this folder (non-recursive).
+    pub file_count: usize,
+    /// Distinct language names for source files directly in this folder.
+    pub languages: Vec<String>,
+    /// Public types (structs/enums/traits/classes/interfaces) in this folder.
+    /// Alphabetical, deduped, capped at 12.
+    pub key_types: Vec<String>,
+    /// Public functions in this folder. Alphabetical, deduped, capped at 12.
+    pub key_functions: Vec<String>,
+    /// Direct child directory names (one level).
+    pub subfolders: Vec<String>,
+    /// Pre-rendered template string — same bytes embedded and BM25-scored.
+    /// First line: `Folder: {folder_path} (module: {basename})` — the
+    /// `module:` synonym lets BM25 hit queries phrased "X module" without
+    /// query-time expansion.
+    pub summary_text: String,
+
+    /// Deterministic ID: hash(folder_path, summary_text).
+    pub chunk_id: String,
+    /// SHA256 of the canonicalized metadata tuple (enables skip-unchanged).
+    pub content_hash: String,
+    /// Embedding model identifier
+    pub embedding_model_version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

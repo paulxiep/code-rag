@@ -7,6 +7,7 @@
 pub mod comparison;
 pub mod config;
 pub mod context;
+pub mod folder;
 pub mod fusion;
 pub mod graph;
 pub mod intent;
