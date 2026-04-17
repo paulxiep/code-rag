@@ -419,24 +419,34 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
     match intent {
         // Overview: hybrid + rerank wins (+4.9pp over no-hybrid at same rerank setting).
         // Queries are project/crate-level, BM25 on identifiers helps anchor results.
+        // A3: folder_vec true — Overview carries the biggest folder_limit (4).
         QueryIntent::Overview => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: true,
             rerank: true,
-            folder_vec: false, // A2: dark, A3 will flip this on for Overview.
+            folder_vec: true,
         },
         // Implementation: hybrid HURTS (-4.2pp). BM25 over-matches identifier tokens
         // in test/caller chunks, swamping the real implementation chunk.
+        // A3: folder_vec true, but folder_limit=1 keeps contribution light.
         QueryIntent::Implementation => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: false,
             rerank: true,
-            folder_vec: false,
+            folder_vec: true,
         },
         // Relationship: hybrid+rerank tied with body-vec-only at 0.485.
         // Keep BM25 on because caller/dependency queries benefit from term match.
+        // A3: folder_vec=false — empirical. Harness post_a3 showed folder
+        // chunks of the target (e.g. folder:code-rag-store/src) high-ranking
+        // on "what uses X" queries, displacing consumer code chunks in OTHER
+        // crates. Consumer discovery is a structural/graph problem (C2's
+        // protection covers code chunks, not folder chunks). Dropping folder
+        // for Relationship recovers the 0.60 → 0.55 regression on this intent.
+        // Revisit if a non-displacement folder-use-case for Relationship
+        // emerges; the arm is one flip away.
         QueryIntent::Relationship => ArmPolicy {
             body_vec: true,
             sig_vec: false,
@@ -446,12 +456,13 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
         },
         // Comparison: all arms off except body-vec. B3 finding preserved —
         // signature tokens + BM25 + rerank all over-rank ONE half of a pair.
+        // A3: folder_vec true — folder context anchors cross-project comparisons.
         QueryIntent::Comparison => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: false,
             rerank: false,
-            folder_vec: false,
+            folder_vec: true,
         },
     }
 }
@@ -472,8 +483,10 @@ impl Default for RoutingTable {
 
         // code_limit fixed at 5 (pre-V2.2 default) across all intents.
         // Differentiation is in supplementary context only.
-        // Revisit once V3 quality harness measures recall@5 per intent.
-        // A2: folder_limit=0 for every intent — arm is dark until A3.
+        // A3: folder_limit activated per intent (was all 0 in A2). Overview's
+        // code_limit stays at 5 — the `code 5 → 3` rebalance from the draft
+        // A3.md is deferred to A5, when file + repo_summary arms also ship
+        // and the full RAPTOR 40–45% summary-share window becomes reachable.
         routes.insert(
             QueryIntent::Overview,
             RetrievalConfig {
@@ -481,7 +494,7 @@ impl Default for RoutingTable {
                 readme_limit: 3,
                 crate_limit: 3,
                 module_doc_limit: 3,
-                folder_limit: 0,
+                folder_limit: 4,
             },
         );
 
@@ -492,10 +505,13 @@ impl Default for RoutingTable {
                 readme_limit: 1,
                 crate_limit: 1,
                 module_doc_limit: 2,
-                folder_limit: 0,
+                folder_limit: 1,
             },
         );
 
+        // Relationship: folder_limit=0 — paired with folder_vec=false in
+        // arm_policy. Harness empirics (post_a3) showed folder hijacks
+        // consumer-discovery queries. See arm_policy comment for detail.
         routes.insert(
             QueryIntent::Relationship,
             RetrievalConfig {
@@ -514,7 +530,7 @@ impl Default for RoutingTable {
                 readme_limit: 2,
                 crate_limit: 3,
                 module_doc_limit: 2,
-                folder_limit: 0,
+                folder_limit: 2,
             },
         );
 
@@ -886,18 +902,27 @@ mod tests {
     }
 
     #[test]
-    fn test_arm_policy_folder_vec_off_everywhere_a2() {
-        // A2 ships the folder arm gated off. A3 will flip this for the
-        // intents that benefit (at least Overview). Guard rail so A2
-        // ingestion can't accidentally change answers.
-        for intent in [
-            QueryIntent::Overview,
-            QueryIntent::Implementation,
-            QueryIntent::Relationship,
-            QueryIntent::Comparison,
-        ] {
-            assert!(!arm_policy(intent).folder_vec);
-        }
+    fn test_arm_policy_folder_vec_per_a3() {
+        // A3: folder_vec true for Overview/Implementation/Comparison; false
+        // for Relationship. Relationship is gated off because the post_a3
+        // harness run showed folder chunks of the target displacing consumer
+        // code chunks on "what uses X?" queries — a C2-style structural
+        // miss that C2's graph-slot protection doesn't extend to folders.
+        assert!(arm_policy(QueryIntent::Overview).folder_vec);
+        assert!(arm_policy(QueryIntent::Implementation).folder_vec);
+        assert!(!arm_policy(QueryIntent::Relationship).folder_vec);
+        assert!(arm_policy(QueryIntent::Comparison).folder_vec);
+    }
+
+    #[test]
+    fn test_route_folder_limits_per_a3_table() {
+        // A3 activation values. Overview=4 (biggest), Implementation=1,
+        // Relationship=0 (empirical — see arm_policy comment), Comparison=2.
+        let table = RoutingTable::default();
+        assert_eq!(route(QueryIntent::Overview, &table).folder_limit, 4);
+        assert_eq!(route(QueryIntent::Implementation, &table).folder_limit, 1);
+        assert_eq!(route(QueryIntent::Relationship, &table).folder_limit, 0);
+        assert_eq!(route(QueryIntent::Comparison, &table).folder_limit, 2);
     }
 
     #[test]

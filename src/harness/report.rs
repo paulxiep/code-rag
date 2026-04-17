@@ -51,6 +51,12 @@ pub struct SystemConfig {
     /// Whether B5 dual-embedding (signature_vector arm) was enabled
     #[serde(default)]
     pub dual_embedding_enabled: bool,
+    /// A3: per-intent folder_limit from the active RoutingTable. Lets
+    /// post-A3 vs post-A2 reports diff the routing change unambiguously.
+    /// Keyed by lowercase intent name ("overview", "implementation",
+    /// "relationship", "comparison"). BTreeMap for deterministic ordering.
+    #[serde(default)]
+    pub folder_limit_by_intent: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -480,6 +486,7 @@ mod tests {
                 code_fetch_multiplier: None,
                 hybrid_enabled: false,
                 dual_embedding_enabled: false,
+                folder_limit_by_intent: Default::default(),
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -528,6 +535,7 @@ mod tests {
                 code_fetch_multiplier: None,
                 hybrid_enabled: false,
                 dual_embedding_enabled: false,
+                folder_limit_by_intent: Default::default(),
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,

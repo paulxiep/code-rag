@@ -1,5 +1,81 @@
 # Development Log
 
+## 2026-04-17: A3 — Collapsed-Tree Routing (folder activation)
+
+### Summary
+
+Flipped A2's dark folder arm on for three of four intents. Folder-only scope — file (A4) and repo_summary (A5) are separate tracks; the modular arm design lets A3 ship without them. Aggregate recall@5 went from 0.72 (post-A2 / post-C3) to 0.73, with **Comparison recall@5 jumping 0.31 → 0.67 (+36pp)** as the dominant win. Overview +2pp, Implementation +1pp, Relationship +1pp after an empirical fix (see below). All three `a3-` folder hero queries pass at recall@5 = 1.00.
+
+### Design decisions (with SOTA grounding)
+
+The draft A3.md prescribed more work than needed. Exploration revealed A2 had already shipped most plumbing (config fields, ArmPolicy field, RetrievalResult field, server + WASM folder arms, context builder section). The actual A3 diff is ~4 touch-points.
+
+Two draft prescriptions were reversed after research review:
+
+- **Overview `code_limit` 5 → 3 (deferred to A5, not 3).** RAPTOR (Sarthi et al., ICLR 2024, arXiv:2401.18059) shows collapsed-tree retrieval emergently mixes ~55–60% leaves with ~40–45% summaries at top-20. A3 with only folder active gives summary share 4/18 ≈ 22%, below that window — so cutting code adds no compensating hierarchy mass. The rebalance makes sense at A5 when file + repo_summary fill the budget; realistic landing is `code_limit = 4`, not 3.
+- **Context-section order kept as A2's `crate → folder → module_doc → code → readme`.** Draft prescribed the opposite (code first). Lost-in-the-Middle (Liu et al., TACL 2024, arXiv:2307.03172) is U-shaped — primacy + recency both win, middle loses up to 20pp. A2's ordering gives primacy to architecture and recency (query-adjacent) to code + README. LongLLMLingua (ACL 2024, arXiv:2310.06839) corroborates query-adjacent privilege. Production systems (Aider repo-map, Sourcegraph Cody) also ship coarse-first. Bonus: keeping A2 ordering isolates the harness signal to *routing*, not ordering.
+
+### Relationship regression and fix (the main surprise)
+
+First harness run flipped `folder_vec: true` for all four intents. Relationship dropped 0.60 → 0.55. Failure-trace showed "What uses X?" queries retrieving folder chunks of X *itself* (e.g. `folder:code-rag/crates/code-rag-store/src` at rank 2 on `rel-embedder-consumers`), displacing the actual consumer code in other crates. Consumer discovery is a structural/graph problem; C2's graph-reserved slot protection covers code chunks but not folders. Rather than extend C2 (out of A3 scope), flipped `folder_vec: false` and `folder_limit: 0` for Relationship only. Recovered to 0.61. Arm is one flip away if a future relationship hero case demonstrates folder value.
+
+### Routing table shipped (A3)
+
+| Intent | code | folder | readme | crate | module_doc |
+|---|---|---|---|---|---|
+| Overview | 5 | 4 | 3 | 3 | 3 |
+| Implementation | 5 | 1 | 1 | 1 | 2 |
+| Relationship | 5 | **0** | 1 | 2 | 2 |
+| Comparison | 5 | 2 | 2 | 3 | 2 |
+
+ArmPolicy: `folder_vec: true` for Overview/Implementation/Comparison; `false` for Relationship.
+
+### Files changed
+
+- `crates/code-rag-engine/src/intent.rs` — `RoutingTable::default()` folder_limit values, `arm_policy()` folder_vec flips, `test_arm_policy_folder_vec_per_a3` + `test_route_folder_limits_per_a3_table` tests.
+- `data/test_queries.json` — three new `a3-`-prefixed hero cases (`a3-engine-folder`, `a3-ingestion-module`, `a3-api-folder`). Tags: `["a3", "a3_folder", <intent>]`. No `dark` tag (harness has no `--exclude-tag` mechanism).
+- `src/harness/report.rs::SystemConfig` — added `folder_limit_by_intent: BTreeMap<String, usize>` for post-A3 vs post-A2 report diffability.
+- `src/bin/harness.rs` — populates the new field from `RoutingTable::default()`.
+- `A3.md` — added a scope-lock banner + inline corrections noting the deferred `code_limit` cut and the preserved ordering.
+
+Zero changes to WASM code (`code-rag-engine` compiles to wasm32 unconditionally — `RoutingTable::default()` *is* the WASM routing). No re-ingest, no re-export. Existing `portfolio.lance/folder_chunks.lance` (from A2) carried straight through.
+
+### Harness results (rerank + hybrid, 84-case dataset)
+
+| Intent | Queries | pre-A3 (c3_post) recall@5 | post_a3_v2 recall@5 | Δ |
+|--------|---------|---------------------------|---------------------|---|
+| overview | 25 | 0.80 | 0.82 | +0.02 |
+| implementation | 28 | 0.76 | 0.77 | +0.01 |
+| relationship | 18 | 0.60 | 0.61 | +0.01 |
+| comparison | 12 | 0.31 | 0.67 | **+0.36** |
+| **aggregate** | **84** | **0.72** | **0.73** | **+0.01** |
+
+Ground-truth run: 0.74 aggregate, 100% intent accuracy. Classifier intent accuracy 70% (unchanged — A3 doesn't touch B4). Hero-only subset (`--tag a3_folder`): 1.00 recall@5 across three cases. Reports at `data/reports/post_a3_v2_{,gt_,hero_}f82b0fb.{json,md}`.
+
+### Validations run
+
+- `cargo check --all-targets` — clean.
+- `cargo clippy --all-targets -- -D warnings` — clean (native).
+- `cargo clippy -p code-rag-ui --target wasm32-unknown-unknown --features standalone -- -D warnings` — clean.
+- `cargo test -p code-rag-engine --lib` — 40 intent tests pass (2 new).
+- `cargo test -p code-rag-chat --lib` — 64 tests pass.
+
+### What A3 explicitly did NOT do
+
+- Add `file_limit` / `repo_summary_limit` to `RetrievalConfig` (deferred to A4/A5 with their arm wiring — keeps each track's diff tight).
+- Add `file_vec` / `repo_summary_vec` to `ArmPolicy` (same reason).
+- Reshuffle context-section order (Decision B — research says keep A2's order).
+- Reduce Overview `code_limit` (Decision A — deferred to A5).
+- Extract `search_folder_arm` from `hybrid_search_non_code` in the WASM path (works as-is).
+- Add `--override-limit` harness flag (nice-to-have; not blocking).
+- Extend C2's graph-slot protection to folder chunks (Relationship gated off instead; revisit if folder-utility-for-relationship emerges).
+
+### Rollback
+
+One-line flips: `folder_vec: false` + `folder_limit: 0` per intent. No re-ingest required.
+
+---
+
 ## 2026-04-17: A2 — Folder-Level Embeddings (Dark Arm, A3-Ready)
 
 ### Summary

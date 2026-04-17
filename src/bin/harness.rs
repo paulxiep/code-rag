@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use code_rag_chat::engine::intent::IntentClassifier;
+use code_rag_chat::engine::intent::{IntentClassifier, QueryIntent, RoutingTable};
 use code_rag_chat::engine::{DualEmbeddingConfig, EngineConfig, HybridConfig, RerankConfig};
 use code_rag_chat::harness::dataset::TestDataset;
 use code_rag_chat::harness::metrics;
@@ -215,6 +215,27 @@ async fn main() -> anyhow::Result<()> {
             },
             hybrid_enabled: cli.hybrid,
             dual_embedding_enabled: cli.dual_embedding,
+            folder_limit_by_intent: {
+                let table = RoutingTable::default();
+                [
+                    QueryIntent::Overview,
+                    QueryIntent::Implementation,
+                    QueryIntent::Relationship,
+                    QueryIntent::Comparison,
+                ]
+                .iter()
+                .map(|i| {
+                    (
+                        format!("{i:?}").to_lowercase(),
+                        table
+                            .routes
+                            .get(i)
+                            .map(|c| c.folder_limit)
+                            .unwrap_or(0),
+                    )
+                })
+                .collect()
+            },
         },
         aggregate,
         generation_cost: None,
