@@ -213,6 +213,17 @@ fn rerank_all(
     code_keep_override: Option<usize>,
 ) -> Result<RetrievalResult, EngineError> {
     let code_limit = code_keep_override.unwrap_or(config.code_limit);
+    let folder_limit = if config.folder_limit > 0 {
+        config.folder_limit
+    } else {
+        // Skip rerank-induced allocation when the arm is gated off.
+        0
+    };
+    let file_limit = if config.file_limit > 0 {
+        config.file_limit
+    } else {
+        0
+    };
     Ok(RetrievalResult {
         code_chunks: rerank_chunks(query, bundle.code_chunks, reranker, code_limit)?,
         readme_chunks: rerank_chunks(query, bundle.readme_chunks, reranker, config.readme_limit)?,
@@ -223,6 +234,8 @@ fn rerank_all(
             reranker,
             config.module_doc_limit,
         )?,
+        folder_chunks: rerank_chunks(query, bundle.folder_chunks, reranker, folder_limit)?,
+        file_chunks: rerank_chunks(query, bundle.file_chunks, reranker, file_limit)?,
         intent: bundle.intent,
     })
 }
@@ -462,6 +475,57 @@ pub async fn retrieve(
         )
     };
 
+    // A2: folder arm. Short-circuits when either the config limit is 0 or
+    // the per-intent ArmPolicy blocks it — both default off so A2 ingest
+    // cannot change answers. A3 flips these on for the right intents.
+    let folder_scored: Vec<ScoredChunk<code_rag_types::FolderChunk>> =
+        if fetch_config.folder_limit > 0 && policy.folder_vec {
+            let raw = if use_hybrid {
+                store
+                    .hybrid_search_folders(query, query_embedding, fetch_config.folder_limit)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                store
+                    .search_folders(query_embedding, fetch_config.folder_limit)
+                    .await
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            to_scored_relevance(raw)
+        } else {
+            Vec::new()
+        };
+
+    // A4: file arm. Same short-circuit pattern as folder. `file_vec` is true
+    // for all four intents (stratified SOTA); `file_limit` varies per intent.
+    let file_scored: Vec<ScoredChunk<code_rag_types::FileChunk>> =
+        if fetch_config.file_limit > 0 && policy.file_vec {
+            let raw = if use_hybrid {
+                store
+                    .hybrid_search_files(query, query_embedding, fetch_config.file_limit)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                store
+                    .search_files(query_embedding, fetch_config.file_limit)
+                    .await
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            to_scored_relevance(raw)
+        } else {
+            Vec::new()
+        };
+
     // C2: SOTA routing for structural queries. When the query has explicit
     // direction keywords ("what calls X", "called by", "depends on", etc.),
     // partition graph-confirmed chunks OUT of the rerank pipeline entirely.
@@ -531,6 +595,8 @@ pub async fn retrieve(
                 readme_chunks: readme_scored,
                 crate_chunks: crate_scored,
                 module_doc_chunks: module_doc_scored,
+                folder_chunks: folder_scored.clone(),
+                file_chunks: file_scored.clone(),
                 intent,
             };
             match rerank_all(query, bundle, reranker, config, code_keep_override) {
@@ -578,11 +644,15 @@ pub async fn retrieve(
                             to_scored_relevance(code_raw),
                         )
                     };
+                    // A2: folder arm is dark-by-default; on rerank failure
+                    // just reuse whatever we already fetched (empty when gated off).
                     RetrievalResult {
                         code_chunks,
                         readme_chunks: readme_raw,
                         crate_chunks: crate_raw,
                         module_doc_chunks: module_doc_raw,
+                        folder_chunks: folder_scored.clone(),
+                        file_chunks: file_scored.clone(),
                         intent,
                     }
                 }
@@ -594,6 +664,8 @@ pub async fn retrieve(
                 readme_chunks: readme_scored,
                 crate_chunks: crate_scored,
                 module_doc_chunks: module_doc_scored,
+                folder_chunks: folder_scored,
+                file_chunks: file_scored,
                 intent,
             }
         }
@@ -603,6 +675,8 @@ pub async fn retrieve(
             readme_chunks: readme_scored,
             crate_chunks: crate_scored,
             module_doc_chunks: module_doc_scored,
+            folder_chunks: folder_scored,
+            file_chunks: file_scored,
             intent,
         }
     };

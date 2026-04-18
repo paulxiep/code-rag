@@ -85,8 +85,7 @@ Inline call context
     └──► Same-file call edges
         └──► Cross-file call graph
 
-Folder/File-level embeddings
-    └──► Auto-generate repo summaries
+Folder/File-level embeddings (A2/A4 — shipped)
 
 Function signature extraction ─── independent (Track B)
 Large function chunking ───────── independent (Track B)
@@ -164,7 +163,7 @@ V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3.
 | **V1** (Indexing) | 2.5-3 weeks | 2.5-3 weeks |
 | **V2** (Query) | 1 week | 2.5-3 weeks |
 | **V3** (Testing) | 1 week | 3.5-4 weeks |
-| **Track A** (A1→A5) | 1.5-2 weeks | — |
+| **Track A** (A1→A4) | 1.5-2 weeks | — |
 | **Track B** (B1→B2→B3→B4→B5) | 3-4 weeks | — |
 | **Track C** (C1→C2→C3) | 2-3 weeks | — |
 | **Track D** (D1→D2) | 1-1.5 weeks | — |
@@ -471,7 +470,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 | A2 Folder Embeddings | 3-4 days | New chunk type, template-based summarization |
 | A3 Collapsed-Tree Routing | 1-2 days | Extend routing table — modular, works with any chunk type combo |
 | A4 File Embeddings | 2-3 days | Similar pattern to A2; lights up in routing automatically |
-| A5 Repo Summaries | 2-3 days | README/manifest parsing, template-based |
+| ~~A5 Repo Summaries~~ | — | **Retired by measurement 2026-04-18** — existing ReadmeChunks + project-root FolderChunks already cover the 3 hero queries at recall@10=1.0 (see `development_log.md` and decision #40 in `docs/technical_summary.md`) |
 
 **Ordering rationale:** Consolidation (A1) first so new chunk types share code from day one. Routing (A3) early so each subsequent chunk type is harness-testable immediately. Routing is modular — missing chunk types produce empty results (limit > 0 but table empty = no-op). Each new type "lights up" without routing changes.
 
@@ -562,17 +561,11 @@ Repo Summary  (CrateChunk / ReadmeChunk — already exist)
   - Harness run: file queries hit FileChunks; folder queries still work; code queries unaffected
   - Check if Overview recall improves with both folder + file chunks active
 
-### A5: Repo Summaries
-- Template-based only: extract from README + Cargo.toml/package.json + directory structure
-- Extract tech stack from dependencies
-- Identify entry points
-- No LLM summarization (expensive to re-ingest, non-deterministic)
-- LLM enhancement noted as theoretical option but not pursued
-- **Crate:** code-raptor
-- **Testable immediately (routing already in place):**
-  - Add architecture-level test queries (e.g., "What are the main components?")
-  - Harness run: full hierarchy active, compare aggregate metrics vs V3.3 baseline
-  - Final A quality gate: Overview recall target, no Implementation regression
+### ~~A5: Repo Summaries~~ — Retired by measurement (2026-04-18)
+
+A5 was drafted as Track A's capstone (per-repo manifest summaries with tech stack + entry points + top-level folders). Pre-implementation measurement against three hero queries (`a5-main-components`, `a5-how-to-run`, `a5-repo-comparison`) at commit `df49136` showed **recall@10 = 1.00 across all three queries** using existing chunks today: ReadmeChunks for prose, project-root FolderChunks for top-level structure (the A2 template's `Subfolders:` line already enumerates the data A5 would have carried), CrateChunks for Rust dependencies. The single recall@5 miss (`a5-main-components`) was a lexical collision (`folder:components` ranking #1 on the literal word "components"), not a fundamental gap that A5 would close.
+
+A5 retired. The 3 measurement queries kept in `data/test_queries.json` as regression tests. If a future query genuinely needs manifest-derived tech stack / entry-point data — particularly for non-Rust portfolio members where `CrateChunk` doesn't apply — revisit then with concrete evidence (the manifest parser would be a small surgical addition, not a whole new chunk type). See `development_log.md` 2026-04-18 entry and decision #40 in `docs/technical_summary.md`.
 
 ### WASM/Native Code Sharing
 
@@ -585,7 +578,6 @@ After A1 consolidation, new Track A logic lives in `code-rag-engine` (shared). P
 - A2: `ChunkIndex` gains `folder_chunks`, `search_folder_arm()` uses engine's BM25
 - A3: Routing table + ArmPolicy changes (already WASM-compatible via code-rag-engine)
 - A4: `ChunkIndex` gains `file_chunks`, `search_file_arm()` uses engine's BM25
-- A5: No additional WASM changes needed
 - index.json size impact: ~250 extra chunks per repo, minimal
 
 **Deliverable:** "What does the engine/ folder do?" returns meaningful answer.
@@ -602,7 +594,7 @@ After A1 consolidation, new Track A logic lives in `code-rag-engine` (shared). P
 - AI21 query-dependent chunking — multi-scale indexing gains 1-37%
 - HEAL (arXiv 2412.04661) — hierarchical embedding alignment loss
 
-**Maps to Vision:** Improvement #4 (Hierarchical Embedding) + #5 (Repo Summaries)
+**Maps to Vision:** Improvement #4 (Hierarchical Embedding). Vision item #5 (Repo Summaries) retired by measurement — see A5 note above.
 
 ---
 
@@ -908,7 +900,6 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | Comparison query decomposition (C3) | code-rag-engine |
 | Type generation | code-raptor |
 | RAPTOR clustering | code-raptor |
-| Repo summaries | code-raptor |
 | Cross-encoder reranking (B1) | code-rag-engine, code-rag-chat |
 | Hybrid search | code-rag-chat |
 | Graph query interface | code-rag-chat |

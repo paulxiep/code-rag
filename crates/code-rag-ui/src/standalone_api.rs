@@ -243,8 +243,13 @@ async fn run_retrieval(
     } else {
         search::brute_force_non_code(query_embedding, index, &search_config)
     };
-    let (readme_raw, crate_raw, module_doc_raw) =
-        (non_code.readme, non_code.crates, non_code.module_docs);
+    let (readme_raw, crate_raw, module_doc_raw, folder_raw, file_raw) = (
+        non_code.readme,
+        non_code.crates,
+        non_code.module_docs,
+        non_code.folders,
+        non_code.files,
+    );
 
     // Normalize all four arms to ScoredChunk. Code uses relevance or distance
     // based on whether fusion happened; non-code uses relevance (hybrid) or
@@ -267,17 +272,22 @@ async fn run_retrieval(
         (code_scored, std::collections::HashSet::new())
     };
 
-    let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
+    let (readme_scored, crate_scored, module_doc_scored, folder_scored, file_scored) = if use_hybrid
+    {
         (
             retriever::to_scored_relevance(readme_raw),
             retriever::to_scored_relevance(crate_raw),
             retriever::to_scored_relevance(module_doc_raw),
+            retriever::to_scored_relevance(folder_raw),
+            retriever::to_scored_relevance(file_raw),
         )
     } else {
         (
             retriever::to_scored(readme_raw),
             retriever::to_scored(crate_raw),
             retriever::to_scored(module_doc_raw),
+            retriever::to_scored(folder_raw),
+            retriever::to_scored(file_raw),
         )
     };
 
@@ -328,6 +338,8 @@ async fn run_retrieval(
             readme_chunks: readme_scored.clone(),
             crate_chunks: crate_scored.clone(),
             module_doc_chunks: module_doc_scored.clone(),
+            folder_chunks: folder_scored.clone(),
+            file_chunks: file_scored.clone(),
             intent: classification.intent,
         };
         match rerank_all(query, bundle, &final_config, code_keep_override).await {
@@ -361,6 +373,8 @@ async fn run_retrieval(
                         readme_chunks: retriever::to_scored_relevance(nc.readme),
                         crate_chunks: retriever::to_scored_relevance(nc.crates),
                         module_doc_chunks: retriever::to_scored_relevance(nc.module_docs),
+                        folder_chunks: retriever::to_scored_relevance(nc.folders),
+                        file_chunks: retriever::to_scored_relevance(nc.files),
                         intent: classification.intent,
                     }
                 } else {
@@ -369,6 +383,8 @@ async fn run_retrieval(
                         readme_chunks: retriever::to_scored(nc.readme),
                         crate_chunks: retriever::to_scored(nc.crates),
                         module_doc_chunks: retriever::to_scored(nc.module_docs),
+                        folder_chunks: retriever::to_scored(nc.folders),
+                        file_chunks: retriever::to_scored(nc.files),
                         intent: classification.intent,
                     }
                 }
@@ -380,6 +396,8 @@ async fn run_retrieval(
             readme_chunks: readme_scored,
             crate_chunks: crate_scored,
             module_doc_chunks: module_doc_scored,
+            folder_chunks: folder_scored,
+            file_chunks: file_scored,
             intent: classification.intent,
         }
     };
@@ -522,6 +540,8 @@ async fn rerank_all(
         crate_chunks: rerank_chunks(query, bundle.crate_chunks, config.crate_limit).await?,
         module_doc_chunks: rerank_chunks(query, bundle.module_doc_chunks, config.module_doc_limit)
             .await?,
+        folder_chunks: rerank_chunks(query, bundle.folder_chunks, config.folder_limit).await?,
+        file_chunks: rerank_chunks(query, bundle.file_chunks, config.file_limit).await?,
         intent: bundle.intent,
     })
 }
@@ -574,6 +594,41 @@ fn build_source_list(result: &RetrievalResult) -> Vec<SourceInfo> {
             chunk_type: "module_doc".into(),
             path: s.chunk.file_path.clone(),
             label: s.chunk.module_name.clone(),
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            relevance_pct: (s.score * 100.0).round() as u8,
+            line: 0,
+        });
+    }
+    for s in &result.folder_chunks {
+        sources.push(SourceInfo {
+            chunk_type: "folder".into(),
+            path: s.chunk.folder_path.clone(),
+            // Label with just the basename for UI brevity; full path goes in `path`.
+            label: s
+                .chunk
+                .folder_path
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(&s.chunk.folder_path)
+                .to_string(),
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            relevance_pct: (s.score * 100.0).round() as u8,
+            line: 0,
+        });
+    }
+    for s in &result.file_chunks {
+        sources.push(SourceInfo {
+            chunk_type: "file".into(),
+            path: s.chunk.file_path.clone(),
+            label: s
+                .chunk
+                .file_path
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(&s.chunk.file_path)
+                .to_string(),
             project: s.chunk.project_name.clone(),
             relevance: s.score,
             relevance_pct: (s.score * 100.0).round() as u8,

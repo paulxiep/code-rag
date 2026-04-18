@@ -1,9 +1,12 @@
 //! Load pre-computed chunk index from static JSON asset.
 
+use code_rag_engine::text::build_searchable_text;
 use gloo_net::http::Request;
 use serde::Deserialize;
 
-use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{
+    CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+};
 
 /// A chunk paired with its pre-computed embedding vector.
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +28,13 @@ pub struct ChunkIndex {
     pub readme_chunks: Vec<EmbeddedChunk<ReadmeChunk>>,
     pub crate_chunks: Vec<EmbeddedChunk<CrateChunk>>,
     pub module_doc_chunks: Vec<EmbeddedChunk<ModuleDocChunk>>,
+    /// A2: folder summary chunks. `#[serde(default)]` so pre-A2 index.json
+    /// bundles still deserialize cleanly (field absent → empty Vec).
+    #[serde(default)]
+    pub folder_chunks: Vec<EmbeddedChunk<FolderChunk>>,
+    /// A4: file summary chunks. Pre-A4 bundle → empty Vec.
+    #[serde(default)]
+    pub file_chunks: Vec<EmbeddedChunk<FileChunk>>,
     /// Pre-computed prototype embeddings for intent classification.
     /// Keys: "overview", "implementation", "relationship", "comparison"
     pub intent_prototypes: std::collections::HashMap<String, Vec<Vec<f32>>>,
@@ -38,6 +48,12 @@ pub struct ChunkIndex {
     pub crate_idf: Option<super::text_search::IdfTable>,
     #[serde(default)]
     pub module_doc_idf: Option<super::text_search::IdfTable>,
+    /// A2: IDF over folder summary_text. None → folder BM25 short-circuits.
+    #[serde(default)]
+    pub folder_idf: Option<super::text_search::IdfTable>,
+    /// A4: IDF over file summary_text.
+    #[serde(default)]
+    pub file_idf: Option<super::text_search::IdfTable>,
 
     /// C1: Call graph edges for browser-side graph traversal.
     #[serde(default)]
@@ -51,54 +67,6 @@ pub struct ChunkIndex {
     /// C1: chunk_id → index into code_chunks vec for O(1) graph-resolved lookups.
     #[serde(skip)]
     pub chunk_id_index: std::collections::HashMap<String, usize>,
-}
-
-/// Build searchable_text from high-signal fields (mirrors server-side build_searchable_text).
-/// Identifier boosted 2x + camelCase split + signature + docstring.
-fn build_searchable_text(
-    identifier: &str,
-    signature: Option<&str>,
-    docstring: Option<&str>,
-) -> String {
-    let mut parts = Vec::new();
-    let split = split_camel_case(identifier);
-    if split != identifier.to_lowercase() {
-        parts.push(format!("{} {} {}", identifier, identifier, split));
-    } else {
-        parts.push(format!("{} {}", identifier, identifier));
-    }
-    if let Some(sig) = signature {
-        parts.push(sig.to_string());
-    }
-    if let Some(doc) = docstring
-        && !doc.is_empty()
-    {
-        parts.push(doc.to_string());
-    }
-    parts.join("\n")
-}
-
-/// Split camelCase/PascalCase into lowercase words.
-fn split_camel_case(s: &str) -> String {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    for i in 0..chars.len() {
-        let c = chars[i];
-        if c.is_uppercase() && !current.is_empty() {
-            let prev_upper = i > 0 && chars[i - 1].is_uppercase();
-            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
-            if !prev_upper || next_lower {
-                words.push(current.to_lowercase());
-                current = String::new();
-            }
-        }
-        current.push(c);
-    }
-    if !current.is_empty() {
-        words.push(current.to_lowercase());
-    }
-    words.join(" ")
 }
 
 /// Fetch and deserialize the pre-computed index from a static asset URL.

@@ -11,7 +11,10 @@ use lancedb::{
 use std::sync::Arc;
 use thiserror::Error;
 
-use code_rag_types::{CallEdge, CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_engine::text::build_searchable_text;
+use code_rag_types::{
+    CallEdge, CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+};
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -33,6 +36,10 @@ const README_TABLE: &str = "readme_chunks";
 const CRATE_TABLE: &str = "crate_chunks";
 const MODULE_DOC_TABLE: &str = "module_doc_chunks";
 const CALL_EDGES_TABLE: &str = "call_edges";
+/// A2: folder-level summary chunks.
+pub const FOLDER_TABLE: &str = "folder_chunks";
+/// A4: file-level summary chunks.
+pub const FILE_TABLE: &str = "file_chunks";
 
 /// LanceDB-backed vector store for code and readme chunks.
 pub struct VectorStore {
@@ -135,6 +142,42 @@ impl VectorStore {
         Ok(count)
     }
 
+    /// A2: insert folder-summary chunks with their embeddings.
+    /// Creates the `folder_chunks` table if needed.
+    pub async fn upsert_folder_chunks(
+        &self,
+        chunks: &[FolderChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
+
+        let batch = folder_chunks_to_batch(chunks, embeddings, self.dimension)?;
+        let count = batch.num_rows();
+
+        self.upsert_batch(FOLDER_TABLE, batch).await?;
+        Ok(count)
+    }
+
+    /// A4: insert file-summary chunks with their embeddings.
+    /// Creates the `file_chunks` table if needed.
+    pub async fn upsert_file_chunks(
+        &self,
+        chunks: &[FileChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
+
+        let batch = file_chunks_to_batch(chunks, embeddings, self.dimension)?;
+        let count = batch.num_rows();
+
+        self.upsert_batch(FILE_TABLE, batch).await?;
+        Ok(count)
+    }
+
     // ========================================================================
     // Read operations (used by code-rag-chat)
     // ========================================================================
@@ -173,6 +216,42 @@ impl VectorStore {
             .await?;
 
         batches_to_module_doc_chunks(results).await
+    }
+
+    /// A2: search folder-summary chunks by vector similarity.
+    pub async fn search_folders(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+        let table = self.get_table(FOLDER_TABLE).await?;
+
+        let results = table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .limit(limit)
+            .execute()
+            .await?;
+
+        batches_to_folder_chunks(results).await
+    }
+
+    /// A4: search file-summary chunks by vector similarity.
+    pub async fn search_files(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+        let table = self.get_table(FILE_TABLE).await?;
+
+        let results = table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .limit(limit)
+            .execute()
+            .await?;
+
+        batches_to_file_chunks(results).await
     }
 
     /// Search code chunks by vector similarity. Returns (chunk, distance) pairs.
@@ -286,6 +365,10 @@ impl VectorStore {
             (README_TABLE, "content"),
             (CRATE_TABLE, "description"),
             (MODULE_DOC_TABLE, "doc_content"),
+            // A2: FTS over the folder's rendered summary text.
+            (FOLDER_TABLE, "summary_text"),
+            // A4: FTS over the file's rendered summary text.
+            (FILE_TABLE, "summary_text"),
         ];
 
         for (table_name, column) in &tables_and_columns {
@@ -400,6 +483,76 @@ impl VectorStore {
                     e
                 );
                 let results = self.search_crates(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// A2: hybrid search folder-summary chunks (vector + FTS, LanceDB RRF).
+    /// Returns (chunk, relevance_score) tuples where score is higher=better.
+    /// Falls back to vector-only if FTS index is missing.
+    pub async fn hybrid_search_folders(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+        let table = self.get_table(FOLDER_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_folder_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    FOLDER_TABLE,
+                    e
+                );
+                let results = self.search_folders(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// A4: hybrid search file-summary chunks (vector + FTS, LanceDB RRF).
+    /// Returns (chunk, relevance_score) tuples where score is higher=better.
+    /// Falls back to vector-only if FTS index is missing.
+    pub async fn hybrid_search_files(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+        let table = self.get_table(FILE_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_file_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    FILE_TABLE,
+                    e
+                );
+                let results = self.search_files(query_embedding, limit).await?;
                 Ok(results
                     .into_iter()
                     .map(|(c, d)| (c, 1.0 / (1.0 + d)))
@@ -1469,6 +1622,470 @@ fn module_doc_chunks_to_batch(
     )?)
 }
 
+/// A2: Arrow batch for folder-summary chunks. Vec<String> fields are stored
+/// as native `List<Utf8>` — same pattern as CrateChunk.dependencies.
+fn folder_chunks_to_batch(
+    chunks: &[FolderChunk],
+    embeddings: Vec<Vec<f32>>,
+    dim: usize,
+) -> Result<RecordBatch, StoreError> {
+    use arrow_array::builder::FixedSizeListBuilder;
+    use arrow_array::{ArrayRef, ListArray};
+    use arrow_buffer::OffsetBuffer;
+
+    let folder_paths: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.folder_path.as_str()))
+        .collect();
+    let project_names: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.project_name.as_str()))
+        .collect();
+    let file_counts: UInt64Array = chunks.iter().map(|c| Some(c.file_count as u64)).collect();
+    let summary_texts: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.summary_text.as_str()))
+        .collect();
+    let chunk_ids: StringArray = chunks.iter().map(|c| Some(c.chunk_id.as_str())).collect();
+    let content_hashes: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.content_hash.as_str()))
+        .collect();
+    let model_versions: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.embedding_model_version.as_str()))
+        .collect();
+
+    // Helper: build a List<Utf8> column from a slice-of-Vec<String>.
+    fn list_of_strings(per_row: impl Iterator<Item = Vec<String>>) -> ListArray {
+        let mut offsets = vec![0i32];
+        let mut values: Vec<String> = Vec::new();
+        for row in per_row {
+            values.extend(row);
+            offsets.push(values.len() as i32);
+        }
+        let refs: Vec<Option<&str>> = values.iter().map(|s| Some(s.as_str())).collect();
+        let values_array: StringArray = refs.into_iter().collect();
+        ListArray::new(
+            Arc::new(arrow_schema::Field::new(
+                "item",
+                arrow_schema::DataType::Utf8,
+                true,
+            )),
+            OffsetBuffer::new(offsets.into()),
+            Arc::new(values_array),
+            None,
+        )
+    }
+
+    let languages = list_of_strings(chunks.iter().map(|c| c.languages.clone()));
+    let key_types = list_of_strings(chunks.iter().map(|c| c.key_types.clone()));
+    let key_functions = list_of_strings(chunks.iter().map(|c| c.key_functions.clone()));
+    let subfolders = list_of_strings(chunks.iter().map(|c| c.subfolders.clone()));
+
+    let mut vector_builder =
+        FixedSizeListBuilder::new(arrow_array::builder::Float32Builder::new(), dim as i32);
+    for emb in &embeddings {
+        vector_builder.values().append_slice(emb);
+        vector_builder.append(true);
+    }
+    let vectors = vector_builder.finish();
+
+    let list_field = || {
+        arrow_schema::DataType::List(Arc::new(arrow_schema::Field::new(
+            "item",
+            arrow_schema::DataType::Utf8,
+            true,
+        )))
+    };
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("folder_path", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("file_count", arrow_schema::DataType::UInt64, false),
+        arrow_schema::Field::new("languages", list_field(), true),
+        arrow_schema::Field::new("key_types", list_field(), true),
+        arrow_schema::Field::new("key_functions", list_field(), true),
+        arrow_schema::Field::new("subfolders", list_field(), true),
+        arrow_schema::Field::new("summary_text", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("content_hash", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new(
+            "embedding_model_version",
+            arrow_schema::DataType::Utf8,
+            false,
+        ),
+        arrow_schema::Field::new(
+            "vector",
+            arrow_schema::DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new(
+                    "item",
+                    arrow_schema::DataType::Float32,
+                    true,
+                )),
+                dim as i32,
+            ),
+            false,
+        ),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(folder_paths),
+            Arc::new(project_names),
+            Arc::new(file_counts),
+            Arc::new(languages) as ArrayRef,
+            Arc::new(key_types) as ArrayRef,
+            Arc::new(key_functions) as ArrayRef,
+            Arc::new(subfolders) as ArrayRef,
+            Arc::new(summary_texts),
+            Arc::new(chunk_ids),
+            Arc::new(content_hashes),
+            Arc::new(model_versions),
+            Arc::new(vectors),
+        ],
+    )?)
+}
+
+async fn batches_to_folder_chunks(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_folder_chunks_from_batch(&batch, "_distance")?);
+            Ok(acc)
+        })
+        .await
+}
+
+async fn batches_to_folder_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_folder_chunks_from_batch(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
+fn extract_folder_chunks_from_batch(
+    batch: &RecordBatch,
+    score_column: &str,
+) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+    use arrow_array::ListArray;
+
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let folder_paths = col("folder_path")?;
+    let project_names = col("project_name")?;
+    let summary_texts = col("summary_text")?;
+    let chunk_ids = col("chunk_id")?;
+    let content_hashes = col("content_hash")?;
+    let model_versions = col("embedding_model_version")?;
+
+    let file_counts = batch
+        .column_by_name("file_count")
+        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("file_count".into()))?;
+
+    let list = |name: &str| -> Option<&ListArray> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+    };
+    let languages_list = list("languages");
+    let key_types_list = list("key_types");
+    let key_functions_list = list("key_functions");
+    let subfolders_list = list("subfolders");
+
+    let scores = batch
+        .column_by_name(score_column)
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+    let extract_list = |arr: Option<&ListArray>, i: usize| -> Vec<String> {
+        arr.filter(|a| !a.is_null(i))
+            .map(|a| {
+                let v = a.value(i);
+                v.as_any()
+                    .downcast_ref::<StringArray>()
+                    .map(|sa| {
+                        (0..sa.len())
+                            .filter_map(|j| {
+                                if sa.is_null(j) {
+                                    None
+                                } else {
+                                    Some(sa.value(j).to_string())
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    };
+
+    let rows = (0..batch.num_rows())
+        .map(|i| {
+            let chunk = FolderChunk {
+                folder_path: folder_paths.value(i).to_string(),
+                project_name: project_names.value(i).to_string(),
+                file_count: file_counts.value(i) as usize,
+                languages: extract_list(languages_list, i),
+                key_types: extract_list(key_types_list, i),
+                key_functions: extract_list(key_functions_list, i),
+                subfolders: extract_list(subfolders_list, i),
+                summary_text: summary_texts.value(i).to_string(),
+                chunk_id: chunk_ids.value(i).to_string(),
+                content_hash: content_hashes.value(i).to_string(),
+                embedding_model_version: model_versions.value(i).to_string(),
+            };
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
+        })
+        .collect();
+    Ok(rows)
+}
+
+fn file_chunks_to_batch(
+    chunks: &[FileChunk],
+    embeddings: Vec<Vec<f32>>,
+    dim: usize,
+) -> Result<RecordBatch, StoreError> {
+    use arrow_array::builder::FixedSizeListBuilder;
+    use arrow_array::{ArrayRef, ListArray};
+    use arrow_buffer::OffsetBuffer;
+
+    let file_paths: StringArray = chunks.iter().map(|c| Some(c.file_path.as_str())).collect();
+    let project_names: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.project_name.as_str()))
+        .collect();
+    let languages: StringArray = chunks.iter().map(|c| Some(c.language.as_str())).collect();
+    let purposes: StringArray = chunks.iter().map(|c| c.purpose.as_deref()).collect();
+    let summary_texts: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.summary_text.as_str()))
+        .collect();
+    let chunk_ids: StringArray = chunks.iter().map(|c| Some(c.chunk_id.as_str())).collect();
+    let content_hashes: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.content_hash.as_str()))
+        .collect();
+    let model_versions: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.embedding_model_version.as_str()))
+        .collect();
+
+    fn list_of_strings(per_row: impl Iterator<Item = Vec<String>>) -> ListArray {
+        let mut offsets = vec![0i32];
+        let mut values: Vec<String> = Vec::new();
+        for row in per_row {
+            values.extend(row);
+            offsets.push(values.len() as i32);
+        }
+        let refs: Vec<Option<&str>> = values.iter().map(|s| Some(s.as_str())).collect();
+        let values_array: StringArray = refs.into_iter().collect();
+        ListArray::new(
+            Arc::new(arrow_schema::Field::new(
+                "item",
+                arrow_schema::DataType::Utf8,
+                true,
+            )),
+            OffsetBuffer::new(offsets.into()),
+            Arc::new(values_array),
+            None,
+        )
+    }
+
+    let exports = list_of_strings(chunks.iter().map(|c| c.exports.clone()));
+    let imports = list_of_strings(chunks.iter().map(|c| c.imports.clone()));
+
+    let mut vector_builder =
+        FixedSizeListBuilder::new(arrow_array::builder::Float32Builder::new(), dim as i32);
+    for emb in &embeddings {
+        vector_builder.values().append_slice(emb);
+        vector_builder.append(true);
+    }
+    let vectors = vector_builder.finish();
+
+    let list_field = || {
+        arrow_schema::DataType::List(Arc::new(arrow_schema::Field::new(
+            "item",
+            arrow_schema::DataType::Utf8,
+            true,
+        )))
+    };
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("file_path", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("language", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("exports", list_field(), true),
+        arrow_schema::Field::new("imports", list_field(), true),
+        arrow_schema::Field::new("purpose", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("summary_text", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("content_hash", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new(
+            "embedding_model_version",
+            arrow_schema::DataType::Utf8,
+            false,
+        ),
+        arrow_schema::Field::new(
+            "vector",
+            arrow_schema::DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new(
+                    "item",
+                    arrow_schema::DataType::Float32,
+                    true,
+                )),
+                dim as i32,
+            ),
+            false,
+        ),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(file_paths),
+            Arc::new(project_names),
+            Arc::new(languages),
+            Arc::new(exports) as ArrayRef,
+            Arc::new(imports) as ArrayRef,
+            Arc::new(purposes),
+            Arc::new(summary_texts),
+            Arc::new(chunk_ids),
+            Arc::new(content_hashes),
+            Arc::new(model_versions),
+            Arc::new(vectors),
+        ],
+    )?)
+}
+
+async fn batches_to_file_chunks(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_file_chunks_from_batch(&batch, "_distance")?);
+            Ok(acc)
+        })
+        .await
+}
+
+async fn batches_to_file_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_file_chunks_from_batch(&batch, "_relevance_score")?);
+            Ok(acc)
+        })
+        .await
+}
+
+fn extract_file_chunks_from_batch(
+    batch: &RecordBatch,
+    score_column: &str,
+) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+    use arrow_array::ListArray;
+
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let file_paths = col("file_path")?;
+    let project_names = col("project_name")?;
+    let languages = col("language")?;
+    let summary_texts = col("summary_text")?;
+    let chunk_ids = col("chunk_id")?;
+    let content_hashes = col("content_hash")?;
+    let model_versions = col("embedding_model_version")?;
+
+    let purposes: Option<&StringArray> = batch
+        .column_by_name("purpose")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
+    let list = |name: &str| -> Option<&ListArray> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+    };
+    let exports_list = list("exports");
+    let imports_list = list("imports");
+
+    let scores = batch
+        .column_by_name(score_column)
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+    let extract_list = |arr: Option<&ListArray>, i: usize| -> Vec<String> {
+        arr.filter(|a| !a.is_null(i))
+            .map(|a| {
+                let v = a.value(i);
+                v.as_any()
+                    .downcast_ref::<StringArray>()
+                    .map(|sa| {
+                        (0..sa.len())
+                            .filter_map(|j| {
+                                if sa.is_null(j) {
+                                    None
+                                } else {
+                                    Some(sa.value(j).to_string())
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    };
+
+    let rows = (0..batch.num_rows())
+        .map(|i| {
+            let purpose = purposes
+                .filter(|a| !a.is_null(i))
+                .map(|a| a.value(i).to_string());
+            let chunk = FileChunk {
+                file_path: file_paths.value(i).to_string(),
+                project_name: project_names.value(i).to_string(),
+                language: languages.value(i).to_string(),
+                exports: extract_list(exports_list, i),
+                imports: extract_list(imports_list, i),
+                purpose,
+                summary_text: summary_texts.value(i).to_string(),
+                chunk_id: chunk_ids.value(i).to_string(),
+                content_hash: content_hashes.value(i).to_string(),
+                embedding_model_version: model_versions.value(i).to_string(),
+            };
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
+        })
+        .collect();
+    Ok(rows)
+}
+
 async fn batches_to_code_chunks(
     stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
 ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
@@ -1848,67 +2465,6 @@ fn extract_module_doc_chunks_from_batch_with_score(
     Ok(chunks)
 }
 
-// --- B3: Searchable text construction ---
-
-/// Build searchable_text from high-signal fields only.
-/// Excludes code body and calls — these dilute BM25 signal.
-///
-/// Two BM25 optimizations:
-/// 1. Identifier repeated 2x — simulates field-level boosting (LanceDB single-column FTS)
-/// 2. camelCase/PascalCase split into component words alongside original
-pub fn build_searchable_text(
-    identifier: &str,
-    signature: Option<&str>,
-    docstring: Option<&str>,
-) -> String {
-    let mut parts = Vec::new();
-
-    // Identifier with boost (2x) + camelCase split
-    let split = split_camel_case(identifier);
-    if split != identifier.to_lowercase() {
-        parts.push(format!("{} {} {}", identifier, identifier, split));
-    } else {
-        parts.push(format!("{} {}", identifier, identifier));
-    }
-
-    if let Some(sig) = signature {
-        parts.push(sig.to_string());
-    }
-    if let Some(doc) = docstring
-        && !doc.is_empty()
-    {
-        parts.push(doc.to_string());
-    }
-    parts.join("\n")
-}
-
-/// Split camelCase/PascalCase into lowercase words.
-/// "VectorStore" → "vector store"
-/// "parseHTTPResponse" → "parse http response"
-/// "snake_case" → "snake_case" (unchanged, already split by tokenizer)
-pub fn split_camel_case(s: &str) -> String {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = s.chars().collect();
-
-    for i in 0..chars.len() {
-        let c = chars[i];
-        if c.is_uppercase() && !current.is_empty() {
-            let prev_upper = i > 0 && chars[i - 1].is_uppercase();
-            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
-            if !prev_upper || next_lower {
-                words.push(current.to_lowercase());
-                current = String::new();
-            }
-        }
-        current.push(c);
-    }
-    if !current.is_empty() {
-        words.push(current.to_lowercase());
-    }
-    words.join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2024,6 +2580,61 @@ mod tests {
         let results = store.search_code(&fake_embedding(384), 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.identifier, "test_func");
+    }
+
+    fn sample_folder_chunk() -> FolderChunk {
+        FolderChunk {
+            folder_path: "code-rag/crates/code-rag-engine/src".into(),
+            project_name: "code-rag".into(),
+            file_count: 6,
+            languages: vec!["rust".into()],
+            key_types: vec!["ArmPolicy".into(), "RetrievalConfig".into()],
+            key_functions: vec!["arm_policy".into(), "classify".into()],
+            subfolders: vec!["text".into()],
+            summary_text: "Folder: code-rag/crates/code-rag-engine/src (module: src)\nContains: 6 files (rust)\nKey types: ArmPolicy, RetrievalConfig\nKey functions: arm_policy, classify\nSubfolders: text".into(),
+            chunk_id: "fold-1".into(),
+            content_hash: "hash-1".into(),
+            embedding_model_version: "BGESmallENV15_384".into(),
+        }
+    }
+
+    #[test]
+    fn test_folder_chunks_to_batch_roundtrip() {
+        let chunks = vec![sample_folder_chunk()];
+        let embeddings = vec![fake_embedding(384)];
+        let batch = folder_chunks_to_batch(&chunks, embeddings, 384).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // 7 scalar + 4 list + 1 vector = 12 columns
+        assert_eq!(batch.num_columns(), 12);
+
+        let roundtripped = extract_folder_chunks_from_batch(&batch, "_distance").unwrap();
+        assert_eq!(roundtripped.len(), 1);
+        let (got, _score) = &roundtripped[0];
+        assert_eq!(got.folder_path, chunks[0].folder_path);
+        assert_eq!(got.project_name, chunks[0].project_name);
+        assert_eq!(got.file_count, 6);
+        assert_eq!(got.languages, chunks[0].languages);
+        assert_eq!(got.key_types, chunks[0].key_types);
+        assert_eq!(got.key_functions, chunks[0].key_functions);
+        assert_eq!(got.subfolders, chunks[0].subfolders);
+        assert_eq!(got.summary_text, chunks[0].summary_text);
+        assert_eq!(got.chunk_id, chunks[0].chunk_id);
+    }
+
+    #[test]
+    fn test_folder_chunks_to_batch_empty_lists_roundtrip() {
+        let mut chunk = sample_folder_chunk();
+        chunk.languages.clear();
+        chunk.key_types.clear();
+        chunk.key_functions.clear();
+        chunk.subfolders.clear();
+        let batch =
+            folder_chunks_to_batch(&[chunk.clone()], vec![fake_embedding(384)], 384).unwrap();
+        let got = &extract_folder_chunks_from_batch(&batch, "_distance").unwrap()[0].0;
+        assert!(got.languages.is_empty());
+        assert!(got.key_types.is_empty());
+        assert!(got.key_functions.is_empty());
+        assert!(got.subfolders.is_empty());
     }
 
     #[test]

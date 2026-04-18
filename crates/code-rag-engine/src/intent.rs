@@ -34,7 +34,7 @@ impl std::str::FromStr for QueryIntent {
 
 // --- Prototype queries (static data, replaces keyword lists) ---
 
-const OVERVIEW_PROTOTYPES: &[&str] = &[
+pub const OVERVIEW_PROTOTYPES: &[&str] = &[
     "What is this project?",
     "Tell me about this codebase",
     "Give me an overview",
@@ -46,7 +46,7 @@ const OVERVIEW_PROTOTYPES: &[&str] = &[
     "What is this package?",
 ];
 
-const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
+pub const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
     "How does this function work?",
     "Show me the implementation",
     "How is this implemented?",
@@ -56,7 +56,7 @@ const IMPLEMENTATION_PROTOTYPES: &[&str] = &[
     "What are the steps of this algorithm?",
 ];
 
-const RELATIONSHIP_PROTOTYPES: &[&str] = &[
+pub const RELATIONSHIP_PROTOTYPES: &[&str] = &[
     "What calls this function?",
     "How does A relate to B?",
     "What depends on this?",
@@ -66,7 +66,7 @@ const RELATIONSHIP_PROTOTYPES: &[&str] = &[
     "How do errors propagate through the system?",
 ];
 
-const COMPARISON_PROTOTYPES: &[&str] = &[
+pub const COMPARISON_PROTOTYPES: &[&str] = &[
     "Compare A and B",
     "What are the differences between X and Y?",
     "How does A differ from B?",
@@ -399,12 +399,25 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// findings; the config flags capture the global feature toggle.
 ///
 /// `body_vec` is always true — it is the unconditional baseline arm.
+/// `folder_vec` (A2) gates the folder-summary arm — off for every intent
+/// until A3 evaluates the harness and opens it for the right intents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArmPolicy {
     pub body_vec: bool,
     pub sig_vec: bool,
     pub bm25: bool,
     pub rerank: bool,
+    pub folder_vec: bool,
+    /// A4: file-summary arm.
+    /// Stratified relationship retrieval (SOTA on code RAG — Sourcegraph Cody,
+    /// Aider, RepoCoder): file-level queries ("which files depend on X?") get
+    /// file-level answers. A3's `folder_vec=false` gate for Relationship was a
+    /// MISMATCHED-granularity fix (folder hijacked function-level queries);
+    /// same-granularity retrieval doesn't inherit that problem, so A4 keeps
+    /// `file_vec=true` for all four intents. If harness shows file chunks of
+    /// a query's own target file hijacking function-level Relationship
+    /// queries, flip Relationship to false — same mechanism as A3.
+    pub file_vec: bool,
 }
 
 /// Per-intent arm policy. Values are empirical — derived from the B5 space
@@ -416,35 +429,55 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
     match intent {
         // Overview: hybrid + rerank wins (+4.9pp over no-hybrid at same rerank setting).
         // Queries are project/crate-level, BM25 on identifiers helps anchor results.
+        // A3: folder_vec true — Overview carries the biggest folder_limit (4).
         QueryIntent::Overview => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: true,
             rerank: true,
+            folder_vec: true,
+            file_vec: true,
         },
         // Implementation: hybrid HURTS (-4.2pp). BM25 over-matches identifier tokens
         // in test/caller chunks, swamping the real implementation chunk.
+        // A3: folder_vec true, but folder_limit=1 keeps contribution light.
         QueryIntent::Implementation => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: false,
             rerank: true,
+            folder_vec: true,
+            file_vec: true,
         },
         // Relationship: hybrid+rerank tied with body-vec-only at 0.485.
         // Keep BM25 on because caller/dependency queries benefit from term match.
+        // A3: folder_vec=false — empirical. Harness post_a3 showed folder
+        // chunks of the target (e.g. folder:code-rag-store/src) high-ranking
+        // on "what uses X" queries, displacing consumer code chunks in OTHER
+        // crates. Consumer discovery is a structural/graph problem (C2's
+        // protection covers code chunks, not folder chunks). Dropping folder
+        // for Relationship recovers the 0.60 → 0.55 regression on this intent.
+        // Revisit if a non-displacement folder-use-case for Relationship
+        // emerges; the arm is one flip away.
         QueryIntent::Relationship => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: true,
             rerank: true,
+            folder_vec: false,
+            // A4: true — stratified. See ArmPolicy.file_vec doc.
+            file_vec: true,
         },
         // Comparison: all arms off except body-vec. B3 finding preserved —
         // signature tokens + BM25 + rerank all over-rank ONE half of a pair.
+        // A3: folder_vec true — folder context anchors cross-project comparisons.
         QueryIntent::Comparison => ArmPolicy {
             body_vec: true,
             sig_vec: false,
             bm25: false,
             rerank: false,
+            folder_vec: true,
+            file_vec: true,
         },
     }
 }
@@ -465,7 +498,10 @@ impl Default for RoutingTable {
 
         // code_limit fixed at 5 (pre-V2.2 default) across all intents.
         // Differentiation is in supplementary context only.
-        // Revisit once V3 quality harness measures recall@5 per intent.
+        // A3: folder_limit activated per intent (was all 0 in A2). Overview's
+        // code_limit stays at 5 — the `code 5 → 3` rebalance from the draft
+        // A3.md is deferred to A5, when file + repo_summary arms also ship
+        // and the full RAPTOR 40–45% summary-share window becomes reachable.
         routes.insert(
             QueryIntent::Overview,
             RetrievalConfig {
@@ -473,6 +509,11 @@ impl Default for RoutingTable {
                 readme_limit: 3,
                 crate_limit: 3,
                 module_doc_limit: 3,
+                folder_limit: 4,
+                // A4 calibration 2026-04-18 (on fresh db): file_limit=2 gives
+                // Overview r@pool 0.902 vs pseudo_a3 0.880 (+2.2pp).
+                // Slight r@5 regression (-1pp) offset by large pool gain.
+                file_limit: 2,
             },
         );
 
@@ -483,9 +524,23 @@ impl Default for RoutingTable {
                 readme_limit: 1,
                 crate_limit: 1,
                 module_doc_limit: 2,
+                folder_limit: 1,
+                // A4 calibration 2026-04-18 (fresh db): file_limit=1 is
+                // flat vs pseudo_a3 on Implementation (r@5 0.740, r@pool
+                // 0.788 both tracks). Kept at 1 to preserve file signal
+                // for file-level implementation queries.
+                file_limit: 1,
             },
         );
 
+        // Relationship: folder_limit=0 — paired with folder_vec=false in
+        // arm_policy. Harness empirics (post_a3) showed folder hijacks
+        // consumer-discovery queries.
+        // A4 calibration 2026-04-18 (fresh db): file_limit=1 gives r@5
+        // 0.588 vs pseudo_a3 0.630 (-4pp) but r@pool 0.681 matches.
+        // Kept at 1 to preserve a4-depends-on-fastembed hero (file-level
+        // relationship); consumer-discovery bottleneck is code/graph, not
+        // file displacement.
         routes.insert(
             QueryIntent::Relationship,
             RetrievalConfig {
@@ -493,6 +548,8 @@ impl Default for RoutingTable {
                 readme_limit: 1,
                 crate_limit: 2,
                 module_doc_limit: 2,
+                folder_limit: 0,
+                file_limit: 1,
             },
         );
 
@@ -503,6 +560,11 @@ impl Default for RoutingTable {
                 readme_limit: 2,
                 crate_limit: 3,
                 module_doc_limit: 2,
+                folder_limit: 2,
+                // A4 calibration 2026-04-18 (fresh db): file_limit=1 gives
+                // r@5 0.688 vs pseudo_a3 0.625 (+6pp) AND r@pool 0.792 vs
+                // 0.667 (+12pp). Biggest A4 win across intents.
+                file_limit: 1,
             },
         );
 
@@ -871,6 +933,30 @@ mod tests {
         ] {
             assert!(arm_policy(intent).body_vec);
         }
+    }
+
+    #[test]
+    fn test_arm_policy_folder_vec_per_a3() {
+        // A3: folder_vec true for Overview/Implementation/Comparison; false
+        // for Relationship. Relationship is gated off because the post_a3
+        // harness run showed folder chunks of the target displacing consumer
+        // code chunks on "what uses X?" queries — a C2-style structural
+        // miss that C2's graph-slot protection doesn't extend to folders.
+        assert!(arm_policy(QueryIntent::Overview).folder_vec);
+        assert!(arm_policy(QueryIntent::Implementation).folder_vec);
+        assert!(!arm_policy(QueryIntent::Relationship).folder_vec);
+        assert!(arm_policy(QueryIntent::Comparison).folder_vec);
+    }
+
+    #[test]
+    fn test_route_folder_limits_per_a3_table() {
+        // A3 activation values. Overview=4 (biggest), Implementation=1,
+        // Relationship=0 (empirical — see arm_policy comment), Comparison=2.
+        let table = RoutingTable::default();
+        assert_eq!(route(QueryIntent::Overview, &table).folder_limit, 4);
+        assert_eq!(route(QueryIntent::Implementation, &table).folder_limit, 1);
+        assert_eq!(route(QueryIntent::Relationship, &table).folder_limit, 0);
+        assert_eq!(route(QueryIntent::Comparison, &table).folder_limit, 2);
     }
 
     #[test]

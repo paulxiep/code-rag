@@ -56,6 +56,10 @@ To clean, run `sh clean_docker.sh`.
 | **C1** | 2026-04-09 | Graph RAG — call graph edges + 3-tier resolution + traversal (relationship 0.50→0.57) |
 | **C2** | 2026-04-09 | Graph result protection — SOTA routing + soft reserve (relationship 0.57→0.60) |
 | **C3** | 2026-04-09 | Comparison query decomposition — per-comparator RRF + project filter (comparison 0.62→0.65, aggregate 0.71→0.72) |
+| **A1** | 2026-04-17 | Text module consolidation — single `code-rag-engine::text` for tokenize/IDF/BM25/searchable_text (WASM/native single source) |
+| **A2** | 2026-04-17 | Folder-level embeddings — `FolderChunk` (5-line template, 118 chunks) shipped dark for A3 activation |
+| **A3** | 2026-04-17 | Collapsed-tree routing — folder arm activated for Overview/Implementation/Comparison (comparison 0.31→0.67 +36pp) |
+| **A4** | 2026-04-18 | File-level embeddings — `FileChunk` (4-line template, 247 chunks) + stratified relationship retrieval (`recall@pool` metric introduced) |
 
 ## Purpose
 
@@ -103,28 +107,31 @@ To clean, run `sh clean_docker.sh`.
 - Supports Rust, Python, and TypeScript via tree-sitter AST parsing
 - Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc)
 - Declaration signatures extracted: functions + structs/enums/traits/interfaces/classes
+- **Hierarchy chunks (Track A)**: `FolderChunk` (1 per directory, 5-line template — folder/files+languages/key types/key functions/subfolders) and `FileChunk` (1 per source file, 4-line template — file/exports/imports/purpose). Built deterministically at ingest from existing CodeChunk metadata + C1 imports map — no LLM. Both render through pure `code-rag-engine::{folder,file}` functions, so server-embedded bytes and browser BM25 bytes are byte-identical
 - **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table (~3011 edges), 3-tier resolver (same-file → import-based → unique-global), AST scoped-identifier (`module::function()`) extraction
 - **Test code exclusion at ingest** (3-level): directory `tests/`, filename `test_*.py` / `*.test.ts`, AST-walked `#[cfg(test)]` enclosing-mod detection (~24% chunk reduction)
 - Intent classification: cosine similarity against prototype query embeddings
-- Query routing: declarative routing table maps intent → retrieval limits
+- Query routing: declarative routing table maps intent → retrieval limits across all six chunk types (code, folder, file, readme, crate, module_doc)
 - **Two-stage retrieval**: hybrid (BM25 on `searchable_text` + vector) → cross-encoder reranking (ms-marco-MiniLM-L-6-v2), fused via N-ary RRF in shared `code-rag-engine::fusion`
-- **Per-intent `ArmPolicy`**: per-intent `{body_vec, sig_vec, bm25, rerank}` gating (single source of truth, server + browser). Overview = hybrid+rerank; Implementation = rerank-only; Relationship = hybrid+rerank; Comparison = vector-only
+- **Per-intent `ArmPolicy`**: per-intent `{body_vec, sig_vec, bm25, rerank, folder_vec, file_vec}` gating (single source of truth, server + browser). Overview = hybrid+rerank; Implementation = rerank-only; Relationship = hybrid+rerank; Comparison = vector-only. Folder arm gated off for Relationship after empirical regression (folder chunks of X displaced consumers of X — stratified retrieval, file arm stays on)
 - **Graph-augmented retrieval**: shared `code-rag-engine::graph` (`graph_augment`, `merge_graph_chunks`, `reserve_graph_slots`, `detect_direction`). Two protection paths: SOTA routing for explicit-direction queries ("what calls X / called by") partitions graph chunks **out** of the reranker entirely; soft reserve for ambiguous-direction over-retains the code arm by `+5` and rescues demoted graph chunks. Mirrored line-for-line in WASM standalone
 - **Comparison query decomposition** (`code-rag-engine::comparison`): regex extracts ≥2 comparators → per-comparator body-vec sub-searches (comparator name prepended to original query) → vote-based dominant-project filter → RRF fusion → max-of-natural rescoring so RRF outputs compete with non-code arms. Mirrored in WASM standalone
+- **Single text module (A1)**: `code-rag-engine::text` is the sole home for `tokenize`, `IdfTable`, BM25 kernel, `build_searchable_text`, `split_camel_case`, and intent prototype texts. Compiles to native + wasm32 — no duplication across server, store, raptor, or UI
 - **Dual-vector schema**: nullable `signature_vector` column populated at ingest (shipped OFF after 8-config space sweep; column retained for future experiments)
 - Intent classifier: prototype cosine similarity + k-NN (k=3) weighted voting + Comparison keyword pre-filter with adversarial guards — **74% accuracy** (was 58%)
-- Retrieval traces: all 4 chunk types surfaced with relevance scores, sorted by relevance
-- Quality harness: 81-query cleaned test dataset (73 recall-scoreable), recall@K, MRR, intent accuracy, latency — dual-run mode
-- Post-C3 (composite `ArmPolicy`, classifier routing, 81-case dataset): recall@5 = **0.72** aggregate · overview 0.80 · implementation 0.76 · relationship 0.60 · comparison 0.65 · recall@10 = 0.76 · MRR = 0.71
+- Retrieval traces: all 6 chunk types surfaced with relevance scores, sorted by relevance
+- Quality harness: 87-query test dataset (79 recall-scoreable), recall@K, **`recall@pool`** (introduced in A4 — recall over every chunk reaching `build_context`, no top-k truncation), MRR, intent accuracy, latency — dual-run mode
+- Post-A4 (fresh db, all hierarchy arms active, classifier routing, 79 scored): recall@5 = **0.72** aggregate · overview 0.82 · implementation 0.74 · relationship 0.59 · comparison 0.69 · recall@10 = 0.79 · recall@pool = **0.80** · MRR = 0.73
 - Incremental ingestion: SHA256 file hashing, skips unchanged files
 - Shared `code-rag-engine` crate: pure algorithms compile to native + wasm32
 - GitHub Pages demo: `standalone` feature runs full RAG pipeline in-browser (LLM generation optional)
 
 ## Known Limitations
 
-- **Granularity**: Cannot search within functions or at file/module level
+- **Granularity**: File and folder levels covered by Track A (`FileChunk`, `FolderChunk`). Repo-level summary considered and retired by measurement (existing READMEs + project-root FolderChunks already covered the 3 hero queries at recall@10=1.0)
 - **Comparison short-identifier ceiling**: Two stubborn pre-C3 failures (`comp-retriever-generator`, `b4-comp-retriever-api`) remain — BGE-small produces noisy vectors for bare hyphenated identifiers (`retriever`, `generator`), and the C3 regex extracts comparators only from explicit "compare X and Y / X vs Y" phrasings. Gated on a future embedder upgrade (BGE-base / jina-code) or MMR fallback
 - **Classifier**: No longer the dominant bottleneck post-B4 (+2pp classifier→GT gap on recall@5). Implementation and Relationship classification still below targets (70% / 53%)
+- **Incremental reconcile under multi-file change**: surfaced during A4 calibration — wipe-and-reinsert across many simultaneously-changed files corrupted BM25 IDF / row ordering and degraded hybrid retrieval. Workaround: fresh full ingest. Filed as a follow-up; not Track A-specific
 
 ## Planned Features
 

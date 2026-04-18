@@ -25,6 +25,18 @@ pub fn recall_at_k(result: &QueryResult, case: &TestCase, k: usize) -> f32 {
     total_hits as f32 / total_expected as f32
 }
 
+/// Recall over the entire retrieved pool (no top-k truncation).
+///
+/// In production, every chunk in `RetrievalResult` flows into `build_context`
+/// and reaches the LLM. recall@5 measures rank quality, not pipeline success:
+/// a chunk at rank 8 still reaches the LLM just like a chunk at rank 1.
+/// This metric captures "did the retrieval pipeline surface the expected
+/// chunk anywhere in its output" — the outcome that actually matters for
+/// answer quality. Pair with MRR to retain rank-sensitivity signal.
+pub fn recall_at_pool(result: &QueryResult, case: &TestCase) -> f32 {
+    recall_at_k(result, case, result.retrieved.len())
+}
+
 /// Mean Reciprocal Rank: 1/rank of the first relevant result.
 /// Returns 0.0 if no relevant result found.
 pub fn mrr(result: &QueryResult, case: &TestCase) -> f32 {
@@ -63,6 +75,11 @@ pub struct AggregateMetrics {
     pub no_expectation_queries: usize,
     pub recall_at_5: f32,
     pub recall_at_10: f32,
+    /// Recall over the full retrieved pool (no top-k truncation) — the
+    /// "did the expected chunk reach the LLM" signal. Complements r@5/r@10
+    /// (rank quality) and MRR (first-hit rank).
+    #[serde(default)]
+    pub recall_at_pool: f32,
     pub mrr: f32,
     pub intent_accuracy: f32,
     pub latency_p50_ms: u64,
@@ -75,6 +92,8 @@ pub struct IntentMetrics {
     pub query_count: usize,
     pub recall_at_5: f32,
     pub recall_at_10: f32,
+    #[serde(default)]
+    pub recall_at_pool: f32,
     pub intent_accuracy: f32,
 }
 
@@ -84,6 +103,7 @@ pub fn compute_aggregate(results: &[(QueryResult, &TestCase)]) -> AggregateMetri
 
     let mut recall_5_sum = 0.0f32;
     let mut recall_10_sum = 0.0f32;
+    let mut recall_pool_sum = 0.0f32;
     let mut mrr_sum = 0.0f32;
     let mut recall_scored = 0usize;
     let mut intent_correct = 0usize;
@@ -96,6 +116,7 @@ pub fn compute_aggregate(results: &[(QueryResult, &TestCase)]) -> AggregateMetri
         if has_expectations {
             recall_5_sum += recall_at_k(result, case, 5);
             recall_10_sum += recall_at_k(result, case, 10);
+            recall_pool_sum += recall_at_pool(result, case);
             mrr_sum += mrr(result, case);
             recall_scored += 1;
         }
@@ -125,6 +146,11 @@ pub fn compute_aggregate(results: &[(QueryResult, &TestCase)]) -> AggregateMetri
         },
         recall_at_10: if recall_scored > 0 {
             recall_10_sum / recall_scored as f32
+        } else {
+            0.0
+        },
+        recall_at_pool: if recall_scored > 0 {
+            recall_pool_sum / recall_scored as f32
         } else {
             0.0
         },
@@ -164,6 +190,7 @@ pub fn compute_by_intent(results: &[(QueryResult, &TestCase)]) -> Vec<IntentMetr
             let query_count = pairs.len();
             let mut r5_sum = 0.0f32;
             let mut r10_sum = 0.0f32;
+            let mut rpool_sum = 0.0f32;
             let mut scored = 0usize;
             let mut correct = 0usize;
 
@@ -173,6 +200,7 @@ pub fn compute_by_intent(results: &[(QueryResult, &TestCase)]) -> Vec<IntentMetr
                 if has_expectations {
                     r5_sum += recall_at_k(result, case, 5);
                     r10_sum += recall_at_k(result, case, 10);
+                    rpool_sum += recall_at_pool(result, case);
                     scored += 1;
                 }
 
@@ -194,6 +222,11 @@ pub fn compute_by_intent(results: &[(QueryResult, &TestCase)]) -> Vec<IntentMetr
                 },
                 recall_at_10: if scored > 0 {
                     r10_sum / scored as f32
+                } else {
+                    0.0
+                },
+                recall_at_pool: if scored > 0 {
+                    rpool_sum / scored as f32
                 } else {
                     0.0
                 },

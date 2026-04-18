@@ -51,6 +51,15 @@ pub struct SystemConfig {
     /// Whether B5 dual-embedding (signature_vector arm) was enabled
     #[serde(default)]
     pub dual_embedding_enabled: bool,
+    /// A3: per-intent folder_limit from the active RoutingTable. Lets
+    /// post-A3 vs post-A2 reports diff the routing change unambiguously.
+    /// Keyed by lowercase intent name ("overview", "implementation",
+    /// "relationship", "comparison"). BTreeMap for deterministic ordering.
+    #[serde(default)]
+    pub folder_limit_by_intent: std::collections::BTreeMap<String, usize>,
+    /// A4: per-intent file_limit. Same shape/rationale as folder_limit_by_intent.
+    #[serde(default)]
+    pub file_limit_by_intent: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +73,8 @@ pub struct QueryReport {
     pub intent_margin: f32,
     pub recall_at_5: f32,
     pub recall_at_10: f32,
+    #[serde(default)]
+    pub recall_at_pool: f32,
     pub mrr: f32,
     pub latency_ms: u64,
     pub top_results: Vec<String>,
@@ -111,6 +122,7 @@ pub fn build_query_reports(results: &[(QueryResult, &TestCase)]) -> Vec<QueryRep
                 intent_margin: result.margin,
                 recall_at_5: metrics::recall_at_k(result, case, 5),
                 recall_at_10: metrics::recall_at_k(result, case, 10),
+                recall_at_pool: metrics::recall_at_pool(result, case),
                 mrr: metrics::mrr(result, case),
                 latency_ms: result.latency.as_millis() as u64,
                 top_results,
@@ -261,6 +273,11 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
     writeln!(md, "|--------|-------|")?;
     writeln!(md, "| recall@5 | {:.2} |", report.aggregate.recall_at_5)?;
     writeln!(md, "| recall@10 | {:.2} |", report.aggregate.recall_at_10)?;
+    writeln!(
+        md,
+        "| recall@pool | {:.2} |",
+        report.aggregate.recall_at_pool
+    )?;
     writeln!(md, "| MRR | {:.2} |", report.aggregate.mrr)?;
     writeln!(
         md,
@@ -293,20 +310,21 @@ pub fn write_markdown(report: &HarnessReport, path: &Path) -> anyhow::Result<()>
         writeln!(md, "## By Intent\n")?;
         writeln!(
             md,
-            "| Intent | Queries | recall@5 | recall@10 | Intent Acc |"
+            "| Intent | Queries | recall@5 | recall@10 | recall@pool | Intent Acc |"
         )?;
         writeln!(
             md,
-            "|--------|---------|----------|-----------|------------|"
+            "|--------|---------|----------|-----------|-------------|------------|"
         )?;
         for im in &report.by_intent {
             writeln!(
                 md,
-                "| {} | {} | {:.2} | {:.2} | {:.0}% |",
+                "| {} | {} | {:.2} | {:.2} | {:.2} | {:.0}% |",
                 im.intent,
                 im.query_count,
                 im.recall_at_5,
                 im.recall_at_10,
+                im.recall_at_pool,
                 im.intent_accuracy * 100.0
             )?;
         }
@@ -418,9 +436,10 @@ pub fn print_summary(report: &HarnessReport) {
         report.system.dataset_path, report.system.total_cases
     );
     println!("---");
-    println!("recall@5:  {:.2}", report.aggregate.recall_at_5);
-    println!("recall@10: {:.2}", report.aggregate.recall_at_10);
-    println!("MRR:       {:.2}", report.aggregate.mrr);
+    println!("recall@5:    {:.2}", report.aggregate.recall_at_5);
+    println!("recall@10:   {:.2}", report.aggregate.recall_at_10);
+    println!("recall@pool: {:.2}", report.aggregate.recall_at_pool);
+    println!("MRR:         {:.2}", report.aggregate.mrr);
     println!(
         "Intent:    {:.0}%",
         report.aggregate.intent_accuracy * 100.0
@@ -480,6 +499,8 @@ mod tests {
                 code_fetch_multiplier: None,
                 hybrid_enabled: false,
                 dual_embedding_enabled: false,
+                folder_limit_by_intent: Default::default(),
+                file_limit_by_intent: Default::default(),
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -487,6 +508,7 @@ mod tests {
                 no_expectation_queries: 0,
                 recall_at_5: 0.75,
                 recall_at_10: 0.85,
+                recall_at_pool: 0.9,
                 mrr: 0.65,
                 intent_accuracy: 0.9,
                 latency_p50_ms: 45,
@@ -528,6 +550,8 @@ mod tests {
                 code_fetch_multiplier: None,
                 hybrid_enabled: false,
                 dual_embedding_enabled: false,
+                folder_limit_by_intent: Default::default(),
+                file_limit_by_intent: Default::default(),
             },
             aggregate: AggregateMetrics {
                 total_queries: 2,
@@ -535,6 +559,7 @@ mod tests {
                 no_expectation_queries: 0,
                 recall_at_5: 0.72,
                 recall_at_10: 0.85,
+                recall_at_pool: 0.88,
                 mrr: 0.61,
                 intent_accuracy: 0.89,
                 latency_p50_ms: 45,

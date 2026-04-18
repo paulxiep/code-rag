@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 code-rag-types = { path = "../code-rag-types" }
+code-rag-engine = { path = "../code-rag-engine" }
 
 # Embeddings
 fastembed = "5.5"

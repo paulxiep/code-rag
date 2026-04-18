@@ -1,4 +1,4 @@
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
 
 use super::intent::QueryIntent;
 
@@ -88,6 +88,23 @@ impl RerankText for ModuleDocChunk {
     }
 }
 
+impl RerankText for FolderChunk {
+    fn rerank_text(&self) -> String {
+        // summary_text is the same string embedded at ingest time — short
+        // (~200-500 chars) and already well-structured. Reuse verbatim so
+        // the cross-encoder sees the same bytes the embedder saw.
+        self.summary_text.clone()
+    }
+}
+
+impl RerankText for FileChunk {
+    fn rerank_text(&self) -> String {
+        // A4: same pattern as FolderChunk — embed/BM25/rerank all see the
+        // same summary_text bytes so there's no tokenizer-level drift.
+        self.summary_text.clone()
+    }
+}
+
 /// Convert cross-encoder logit to 0-1 relevance score.
 pub fn sigmoid(logit: f32) -> f32 {
     1.0 / (1.0 + (-logit).exp())
@@ -107,6 +124,11 @@ pub struct RetrievalResult {
     pub readme_chunks: Vec<ScoredChunk<ReadmeChunk>>,
     pub crate_chunks: Vec<ScoredChunk<CrateChunk>>,
     pub module_doc_chunks: Vec<ScoredChunk<ModuleDocChunk>>,
+    /// A2: folder-level summary chunks. Empty when `folder_limit == 0`
+    /// (pre-A3 default) so context/flatten behave as before.
+    pub folder_chunks: Vec<ScoredChunk<FolderChunk>>,
+    /// A4: file-level summary chunks. Empty when `file_limit == 0`.
+    pub file_chunks: Vec<ScoredChunk<FileChunk>>,
     pub intent: QueryIntent,
 }
 
@@ -137,6 +159,10 @@ pub fn to_scored_relevance<T>(pairs: Vec<(T, f32)>) -> Vec<ScoredChunk<T>> {
 }
 
 /// Build a RetrievalResult from raw search results (chunk + distance tuples).
+///
+/// A2: `folder_chunks` defaults to empty. Callers that activate the folder
+/// arm (server retriever / standalone_api) construct `RetrievalResult`
+/// directly with folder chunks already converted via `to_scored*`.
 pub fn to_retrieval_result(
     code_raw: Vec<(CodeChunk, f32)>,
     readme_raw: Vec<(ReadmeChunk, f32)>,
@@ -149,6 +175,8 @@ pub fn to_retrieval_result(
         readme_chunks: to_scored(readme_raw),
         crate_chunks: to_scored(crate_raw),
         module_doc_chunks: to_scored(module_doc_raw),
+        folder_chunks: Vec::new(),
+        file_chunks: Vec::new(),
         intent,
     }
 }
@@ -205,6 +233,26 @@ impl RetrievalResult {
                 chunk_type: "module_doc".into(),
                 file_path: s.chunk.file_path.clone(),
                 identifier: Some(s.chunk.module_name.clone()),
+                project: s.chunk.project_name.clone(),
+                relevance: s.score,
+                line: None,
+            });
+        }
+        for s in &self.folder_chunks {
+            items.push(FlatChunk {
+                chunk_type: "folder".into(),
+                file_path: s.chunk.folder_path.clone(),
+                identifier: None,
+                project: s.chunk.project_name.clone(),
+                relevance: s.score,
+                line: None,
+            });
+        }
+        for s in &self.file_chunks {
+            items.push(FlatChunk {
+                chunk_type: "file".into(),
+                file_path: s.chunk.file_path.clone(),
+                identifier: None,
                 project: s.chunk.project_name.clone(),
                 relevance: s.score,
                 line: None,
@@ -296,6 +344,47 @@ mod tests {
         }
     }
 
+    fn make_file_chunk(file: &str, project: &str) -> FileChunk {
+        // Match the real template from `code_rag_engine::file::render_summary`.
+        let base = file.rsplit('/').find(|s| !s.is_empty()).unwrap_or(file);
+        let module = base.rsplit_once('.').map(|(a, _)| a).unwrap_or(base);
+        FileChunk {
+            file_path: file.to_string(),
+            project_name: project.to_string(),
+            language: "rust".to_string(),
+            exports: vec![],
+            imports: vec![],
+            purpose: None,
+            summary_text: format!(
+                "File: {file} (module: {module}, rust)\nExports: none\nImports: none\nPurpose: (none extracted)"
+            ),
+            chunk_id: "test-id".to_string(),
+            content_hash: "test-hash".to_string(),
+            embedding_model_version: "test".to_string(),
+        }
+    }
+
+    fn make_folder_chunk(folder: &str, project: &str) -> FolderChunk {
+        // Match the real template from `code_rag_engine::folder::render_summary`
+        // so tests that assert on bytes stay honest.
+        let basename = folder.rsplit('/').find(|s| !s.is_empty()).unwrap_or(folder);
+        FolderChunk {
+            folder_path: folder.to_string(),
+            project_name: project.to_string(),
+            file_count: 1,
+            languages: vec!["rust".to_string()],
+            key_types: vec![],
+            key_functions: vec![],
+            subfolders: vec![],
+            summary_text: format!(
+                "Folder: {folder} (module: {basename})\nContains: 1 files (rust)\nKey types: none\nKey functions: none\nSubfolders: none"
+            ),
+            chunk_id: "test-id".to_string(),
+            content_hash: "test-hash".to_string(),
+            embedding_model_version: "test".to_string(),
+        }
+    }
+
     #[test]
     fn test_flatten_sort_by_relevance_desc() {
         let result = RetrievalResult {
@@ -315,6 +404,8 @@ mod tests {
                 chunk: make_module_doc_chunk("src/lib.rs", "my_crate", "proj"),
                 score: 0.7,
             }],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -342,6 +433,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -360,6 +453,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -383,6 +478,8 @@ mod tests {
                 chunk: make_module_doc_chunk("src/lib.rs", "m", "proj"),
                 score: 0.3,
             }],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -536,10 +633,81 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
         let flat = result.flatten();
         assert!(flat.is_empty());
+    }
+
+    #[test]
+    fn test_rerank_text_folder_chunk_is_summary_text() {
+        let chunk = make_folder_chunk("code-rag/crates/code-rag-engine/src", "code-rag");
+        let text = chunk.rerank_text();
+        // A2: rerank text must equal summary_text byte-for-byte so the
+        // cross-encoder sees the same string the embedder saw.
+        assert_eq!(text, chunk.summary_text);
+        assert!(text.contains("module: src"));
+    }
+
+    #[test]
+    fn test_flatten_includes_folder_chunks() {
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![ScoredChunk {
+                chunk: make_folder_chunk("code-rag/crates/code-rag-engine/src", "code-rag"),
+                score: 0.42,
+            }],
+            file_chunks: vec![],
+            intent: QueryIntent::Overview,
+        };
+        let flat = result.flatten();
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].chunk_type, "folder");
+        assert_eq!(flat[0].file_path, "code-rag/crates/code-rag-engine/src");
+        assert!(flat[0].line.is_none());
+    }
+
+    #[test]
+    fn test_rerank_text_file_chunk_is_summary_text() {
+        let chunk = make_file_chunk(
+            "code-rag/crates/code-rag-engine/src/retriever.rs",
+            "code-rag",
+        );
+        let text = chunk.rerank_text();
+        assert_eq!(text, chunk.summary_text);
+        assert!(text.contains("module: retriever"));
+    }
+
+    #[test]
+    fn test_flatten_includes_file_chunks() {
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![ScoredChunk {
+                chunk: make_file_chunk(
+                    "code-rag/crates/code-rag-engine/src/retriever.rs",
+                    "code-rag",
+                ),
+                score: 0.42,
+            }],
+            intent: QueryIntent::Overview,
+        };
+        let flat = result.flatten();
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].chunk_type, "file");
+        assert_eq!(
+            flat[0].file_path,
+            "code-rag/crates/code-rag-engine/src/retriever.rs"
+        );
+        assert!(flat[0].line.is_none());
     }
 }

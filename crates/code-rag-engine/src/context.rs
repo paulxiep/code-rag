@@ -1,5 +1,5 @@
 use super::retriever::{RetrievalResult, ScoredChunk};
-use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
 
 /// System prompt - instructs the LLM how to behave
 pub const SYSTEM_PROMPT: &str = r#"You are a helpful assistant answering questions about a developer's portfolio of coding projects.
@@ -18,6 +18,18 @@ pub fn build_context(result: &RetrievalResult) -> String {
     // Crate overview (architecture-level context)
     if !result.crate_chunks.is_empty() {
         sections.push(format_crate_section(&result.crate_chunks));
+    }
+
+    // A2: folder summaries — top-down hierarchical context just under
+    // crates, above module-doc/code. Empty when folder_limit=0 (A2 default).
+    if !result.folder_chunks.is_empty() {
+        sections.push(format_folder_section(&result.folder_chunks));
+    }
+
+    // A4: file-level summaries — between folder and module_doc to preserve
+    // coarse→fine hierarchy ordering. Empty when file_limit=0.
+    if !result.file_chunks.is_empty() {
+        sections.push(format_file_section(&result.file_chunks));
     }
 
     // Module documentation (crate-level docs)
@@ -119,6 +131,36 @@ fn format_module_doc_section(chunks: &[ScoredChunk<ModuleDocChunk>]) -> String {
     out
 }
 
+fn format_folder_section(chunks: &[ScoredChunk<FolderChunk>]) -> String {
+    let mut out = String::from("## Relevant Folders\n");
+
+    for scored in chunks {
+        let chunk = &scored.chunk;
+        // `summary_text` is already a complete 5-line synopsis — drop it in
+        // as-is rather than redundantly listing each field.
+        out.push_str(&format!(
+            "\n### `{}` ({})\n{}\n",
+            chunk.folder_path, chunk.project_name, chunk.summary_text
+        ));
+    }
+
+    out
+}
+
+fn format_file_section(chunks: &[ScoredChunk<FileChunk>]) -> String {
+    let mut out = String::from("## Relevant Files\n");
+
+    for scored in chunks {
+        let chunk = &scored.chunk;
+        out.push_str(&format!(
+            "\n### `{}` ({})\n{}\n",
+            chunk.file_path, chunk.project_name, chunk.summary_text
+        ));
+    }
+
+    out
+}
+
 /// Build the complete prompt sent to the LLM
 pub fn build_prompt(query: &str, context: &str) -> String {
     format!(
@@ -212,6 +254,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -230,6 +274,8 @@ mod tests {
             readme_chunks: vec![scored(sample_readme_chunk(), 0.8)],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -246,6 +292,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![scored(sample_crate_chunk(), 0.7)],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -263,6 +311,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![scored(sample_module_doc_chunk(), 0.6)],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -273,6 +323,56 @@ mod tests {
         assert!(context.contains("core functionality"));
     }
 
+    fn sample_folder_chunk() -> FolderChunk {
+        FolderChunk {
+            folder_path: "my_project/crates/engine/src".into(),
+            project_name: "my_project".into(),
+            file_count: 3,
+            languages: vec!["rust".into()],
+            key_types: vec!["Retriever".into()],
+            key_functions: vec!["retrieve".into()],
+            subfolders: vec![],
+            summary_text: "Folder: my_project/crates/engine/src (module: src)\nContains: 3 files (rust)\nKey types: Retriever\nKey functions: retrieve\nSubfolders: none".into(),
+            chunk_id: "folder-id".into(),
+            content_hash: "folder-hash".into(),
+            embedding_model_version: "BGESmallENV15_384".into(),
+        }
+    }
+
+    #[test]
+    fn test_build_context_with_folders() {
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![scored(sample_folder_chunk(), 0.5)],
+            file_chunks: vec![],
+            intent: QueryIntent::Overview,
+        };
+        let context = build_context(&result);
+        assert!(context.contains("## Relevant Folders"));
+        assert!(context.contains("my_project/crates/engine/src"));
+        assert!(context.contains("Retriever"));
+        assert!(context.contains("(module: src)"));
+    }
+
+    #[test]
+    fn test_build_context_empty_folder_vec_omits_section() {
+        // Ensure empty folder_chunks does NOT produce a dangling header.
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![scored(sample_readme_chunk(), 0.8)],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
+            intent: QueryIntent::Overview,
+        };
+        let context = build_context(&result);
+        assert!(!context.contains("## Relevant Folders"));
+    }
+
     #[test]
     fn test_build_context_empty() {
         let result = RetrievalResult {
@@ -280,6 +380,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -307,6 +409,8 @@ mod tests {
             readme_chunks: vec![],
             crate_chunks: vec![],
             module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 

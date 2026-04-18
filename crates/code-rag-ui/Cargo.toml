@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-standalone = ["dep:code-rag-engine", "dep:code-rag-types"]
+standalone = ["dep:code-rag-types"]
 
 [dependencies]
 leptos = { version = "0.8", features = ["csr"] }
@@ -31,6 +31,7 @@ serde-wasm-bindgen = "0.6"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 uuid = { version = "1.20", features = ["js"] }
 
+code-rag-engine = { path = "../code-rag-engine" }
+
 # standalone-only deps (activated by feature flag)
-code-rag-engine = { path = "../code-rag-engine", optional = true }
 code-rag-types = { path = "../code-rag-types", optional = true }

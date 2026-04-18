@@ -129,6 +129,92 @@ pub struct ModuleDocChunk {
     pub embedding_model_version: String,
 }
 
+/// A2: Folder-level summary chunk. One per directory in the portfolio.
+///
+/// Deterministic, template-rendered summary of a folder's contents (no LLM):
+/// file count, distinct languages, public types, public functions, direct
+/// subfolders. Answers directory-level Overview queries like "What does the
+/// engine/ folder do?" which vector search over function chunks cannot.
+///
+/// `summary_text` is the exact string that is embedded server-side and
+/// BM25-scored browser-side — persisted to avoid re-render drift.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FolderChunk {
+    /// Project-prefixed, forward-slash folder path relative to the portfolio
+    /// root. Matches CodeChunk.file_path convention.
+    /// Example: "code-rag/crates/code-rag-engine/src".
+    pub folder_path: String,
+    /// Project this folder belongs to (sibling subdir of the ingest root).
+    pub project_name: String,
+    /// Source files directly in this folder (non-recursive).
+    pub file_count: usize,
+    /// Distinct language names for source files directly in this folder.
+    pub languages: Vec<String>,
+    /// Public types (structs/enums/traits/classes/interfaces) in this folder.
+    /// Alphabetical, deduped, capped at 12.
+    pub key_types: Vec<String>,
+    /// Public functions in this folder. Alphabetical, deduped, capped at 12.
+    pub key_functions: Vec<String>,
+    /// Direct child directory names (one level).
+    pub subfolders: Vec<String>,
+    /// Pre-rendered template string — same bytes embedded and BM25-scored.
+    /// First line: `Folder: {folder_path} (module: {basename})` — the
+    /// `module:` synonym lets BM25 hit queries phrased "X module" without
+    /// query-time expansion.
+    pub summary_text: String,
+
+    /// Deterministic ID: hash(folder_path, summary_text).
+    pub chunk_id: String,
+    /// SHA256 of the canonicalized metadata tuple (enables skip-unchanged).
+    pub content_hash: String,
+    /// Embedding model identifier
+    pub embedding_model_version: String,
+}
+
+/// A4: File-level summary chunk. One per source file that produced CodeChunks.
+///
+/// Sits between CodeChunks (one per function/type) and FolderChunks
+/// (one per directory) in the collapsed-tree hierarchy. Answers file-level
+/// queries like "what does retriever.rs do?" or "which files depend on
+/// fastembed?" — questions that either fragment across function chunks or
+/// aren't answerable by folder summaries.
+///
+/// `summary_text` is the pre-rendered template embedded server-side and
+/// BM25-scored browser-side — persisted to avoid re-render drift.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FileChunk {
+    /// Project-prefixed, forward-slash file path. Matches CodeChunk.file_path.
+    /// Example: "code-rag/crates/code-rag-engine/src/retriever.rs".
+    pub file_path: String,
+    /// Project this file belongs to (sibling subdir of the ingest root).
+    pub project_name: String,
+    /// "rust" | "python" | "typescript" | etc. Same vocab as CodeChunk.language.
+    pub language: String,
+    /// Public items (types + functions) defined in this file.
+    /// Alphabetical, deduped, capped at 16.
+    pub exports: Vec<String>,
+    /// External / cross-file imports used by this file, formatted as
+    /// `"{imported_name} from {source_path}"` (source of the strings is
+    /// LanguageHandler::extract_file_imports, the C1 method).
+    /// Alphabetical, deduped, capped at 16.
+    pub imports: Vec<String>,
+    /// Inferred one-sentence purpose, ≤140 chars. Source order:
+    ///   1. First line of the module-level doc chunk for this file, if any.
+    ///   2. First docstring in the file (smallest start_line), if any.
+    ///   3. Filename-derived fallback: "This file defines {basename}."
+    pub purpose: Option<String>,
+    /// Pre-rendered template — same bytes embedded and BM25-scored.
+    /// First line: `File: {file_path} (module: {basename}, {language})`.
+    pub summary_text: String,
+
+    /// Deterministic ID: hash("file:{file_path}", summary_text).
+    pub chunk_id: String,
+    /// SHA256 of the canonicalized metadata tuple (enables skip-unchanged).
+    pub content_hash: String,
+    /// Embedding model identifier
+    pub embedding_model_version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +310,17 @@ mod tests {
         let hash_lf = content_hash("line1\nline2\n");
         let hash_crlf = content_hash("line1\r\nline2\r\n");
         assert_eq!(hash_lf, hash_crlf);
+    }
+
+    #[test]
+    fn test_file_chunk_id_distinct_from_folder_chunk_id() {
+        let path = "code-rag/crates/code-rag-engine/src/retriever.rs";
+        let summary = "File: retriever.rs\n...";
+        let file_id = deterministic_chunk_id(&format!("file:{}", path), summary);
+        let folder_id = deterministic_chunk_id(&format!("folder:{}", path), summary);
+        let raw_id = deterministic_chunk_id(path, summary);
+        assert_ne!(file_id, folder_id);
+        assert_ne!(file_id, raw_id);
+        assert_ne!(folder_id, raw_id);
     }
 }
