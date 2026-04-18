@@ -314,6 +314,7 @@ mod tests {
             crate_chunks: vec![crate_chunk("my-crate", "hash_c")],
             module_doc_chunks: vec![module_doc_chunk("src/lib.rs", "hash_m")],
             folder_chunks: vec![],
+            file_chunks: vec![],
         };
 
         let existing = ExistingFileIndex {

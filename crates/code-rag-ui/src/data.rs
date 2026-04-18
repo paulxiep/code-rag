@@ -4,7 +4,9 @@ use code_rag_engine::text::build_searchable_text;
 use gloo_net::http::Request;
 use serde::Deserialize;
 
-use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, FolderChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{
+    CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+};
 
 /// A chunk paired with its pre-computed embedding vector.
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +32,9 @@ pub struct ChunkIndex {
     /// bundles still deserialize cleanly (field absent → empty Vec).
     #[serde(default)]
     pub folder_chunks: Vec<EmbeddedChunk<FolderChunk>>,
+    /// A4: file summary chunks. Pre-A4 bundle → empty Vec.
+    #[serde(default)]
+    pub file_chunks: Vec<EmbeddedChunk<FileChunk>>,
     /// Pre-computed prototype embeddings for intent classification.
     /// Keys: "overview", "implementation", "relationship", "comparison"
     pub intent_prototypes: std::collections::HashMap<String, Vec<Vec<f32>>>,
@@ -46,6 +51,9 @@ pub struct ChunkIndex {
     /// A2: IDF over folder summary_text. None → folder BM25 short-circuits.
     #[serde(default)]
     pub folder_idf: Option<super::text_search::IdfTable>,
+    /// A4: IDF over file summary_text.
+    #[serde(default)]
+    pub file_idf: Option<super::text_search::IdfTable>,
 
     /// C1: Call graph edges for browser-side graph traversal.
     #[serde(default)]

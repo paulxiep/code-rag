@@ -3,7 +3,7 @@
 mod export;
 
 use clap::{Parser, Subcommand};
-use code_rag_types::{CodeChunk, CrateChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
 use code_raptor::{
     DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
     IngestionStats, VectorStore, format_code_for_embedding, format_crate_for_embedding,
@@ -23,6 +23,8 @@ const CRATE_TABLE: &str = "crate_chunks";
 const MODULE_DOC_TABLE: &str = "module_doc_chunks";
 /// A2: folder summary chunks.
 const FOLDER_TABLE: &str = "folder_chunks";
+/// A4: file summary chunks.
+const FILE_TABLE: &str = "file_chunks";
 
 #[derive(Parser)]
 #[command(name = "code-raptor")]
@@ -256,6 +258,18 @@ async fn run_incremental_ingestion(
         }
     }
 
+    // A4: Same wipe-and-rebuild pattern for file summaries. ~300-500 per
+    // portfolio, one embed batch per 25 — trivial cost vs CodeChunks.
+    if !result.file_chunks.is_empty() {
+        for project in &projects {
+            store.delete_chunks_by_project(FILE_TABLE, project).await?;
+        }
+        let n = embed_and_store_files(&result.file_chunks, store, embedder).await?;
+        if n > 0 {
+            info!("Rebuilt {} file chunks (incremental)", n);
+        }
+    }
+
     // Rebuild FTS indices for hybrid search (B2)
     info!("Rebuilding FTS indices...");
     store.create_fts_indices().await?;
@@ -430,6 +444,12 @@ async fn embed_and_store_all(
     let folder_count = embed_and_store_folders(&result.folder_chunks, store, embedder).await?;
     if folder_count > 0 {
         info!("Stored {} folder chunks", folder_count);
+    }
+
+    // A4: file summaries. Same wipe-and-rebuild contract as folders.
+    let file_count = embed_and_store_files(&result.file_chunks, store, embedder).await?;
+    if file_count > 0 {
+        info!("Stored {} file chunks", file_count);
     }
 
     Ok(())
@@ -610,6 +630,28 @@ async fn embed_and_store_folders(
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = embedder.embed_batch(&text_refs)?;
         total += store.upsert_folder_chunks(batch, embeddings).await?;
+    }
+    Ok(total)
+}
+
+/// A4: Embed + upsert file summary chunks. Same invariant as folders —
+/// summary_text is bytes-identical server-side and browser-side.
+async fn embed_and_store_files(
+    chunks: &[FileChunk],
+    store: &VectorStore,
+    embedder: &mut Embedder,
+) -> anyhow::Result<usize> {
+    if chunks.is_empty() {
+        return Ok(0);
+    }
+
+    info!("Embedding {} file chunks...", chunks.len());
+    let mut total = 0;
+    for batch in chunks.chunks(EMBEDDING_BATCH_SIZE) {
+        let texts: Vec<String> = batch.iter().map(|c| c.summary_text.clone()).collect();
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let embeddings = embedder.embed_batch(&text_refs)?;
+        total += store.upsert_file_chunks(batch, embeddings).await?;
     }
     Ok(total)
 }

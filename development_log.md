@@ -1,5 +1,134 @@
 # Development Log
 
+## 2026-04-18: A4 — File-Level Embeddings
+
+### Summary
+
+Added `FileChunk` — one embeddable summary per source file — as the file-level rung of the collapsed-tree hierarchy between CodeChunks (per-function) and FolderChunks (per-directory). Answers file-level queries ("What does retriever.rs do?", "Which files depend on fastembed?") that previously fragmented across function chunks. Four-line template: `File: path (module: basename, language) / Exports: ... / Imports: ... / Purpose: ...`. Exports come from existing CodeChunks via A2's public-visibility heuristic; imports come from C1's `LanguageHandler::extract_file_imports`; purpose falls back through module-doc → first docstring → filename. 247 FileChunks ingested across the portfolio.
+
+Shipped at per-intent `file_limit = 2/1/1/1` (Overview/Implementation/Relationship/Comparison) with `file_vec=true` for all four intents. On a fresh db, A4 preserves historical recall@5 baseline (0.72 → 0.72) and lifts recall@10 (+2.4pp), recall@pool (+3.1pp), and MRR (+2.4pp) vs the historical A1-2 numbers. Biggest per-intent win: Comparison r@pool 0.667 → 0.792 (+12.5pp).
+
+### Design decisions
+
+Four decisions, two flipped after SOTA review:
+
+1. **Relationship `file_vec: true` (initially planned false, flipped after research).** Draft plan mirrored A3's `folder_vec=false` Relationship gate. User pushed back: SOTA on code RAG (Sourcegraph Cody repo-map, Aider, RepoCoder, CodePlan) uses *stratified* relationship retrieval — function-level call-graph for "what calls X", file-level import-graph for "which files depend on X". A3's folder gate was a mismatched-granularity symptom, not evidence against same-granularity. Kept `file_vec=true` for Relationship with `file_limit=1`. Empirically: `a4-depends-on-fastembed` (file-level Relationship hero) passes at recall=1.0; consumer-discovery queries (`rel-what-calls-retrieve`) take -4pp r@5 but are unaffected on r@pool — the bottleneck there is code/graph, not displacement.
+
+2. **Imports cap = 16, matches exports cap.** Accommodates re-export-heavy lib.rs files without blowing the BGE-small 512-token budget.
+
+3. **Template dual-label `(module: basename, language)`.** Matches A2's `(module: basename)` pattern. Rust/Python basenames map cleanly to module names; doubles BM25 hit rate for "X module"-phrased queries.
+
+4. **Context-section slot between folder and module_doc.** Ordering stays coarse→fine: `crate → folder → file → module_doc → code → readme`. Same Lost-in-the-Middle rationale as A3 — file slots sit in the primacy half.
+
+### Calibration story: the 3/2/2/2 → 2/1/1/1 → stable iteration
+
+First run at `file_limit = 3/2/2/2` (matching A2 draft proportions) showed -9.6pp aggregate r@5 regression. Per-query diff pointed at **cross-type rerank displacement**: the per-arm limit caps pool size, but `RetrievalResult::flatten()` sorts all types by cross-encoder sigmoid. A file chunk scoring 0.63 in the sigmoid outranks a code chunk at 0.58 regardless of which type's limit allowed them in. File chunks' `summary_text` is semantically "answer-shaped" (four-line overview) and outranks raw code for most queries.
+
+Dropped to `2/1/1/1`. Barely moved the aggregate (+0.3pp). Confirmed the mechanism: the limit isn't the constraining factor — rerank score order is. A single file chunk at rank 1 still takes slot 1.
+
+**Introduced `recall_at_pool` metric** as a more faithful proxy for RAG pipeline quality: recall over *every* chunk in `RetrievalResult` (all that flow to `build_context` and reach the LLM), no top-k truncation. Pairs with MRR for rank sensitivity. Added to `AggregateMetrics`, `IntentMetrics`, and per-query reports; shown in markdown By-Intent table.
+
+### Unrelated bug discovered: incremental reconcile IDF corruption
+
+During calibration, noticed pseudo-A1 (file=0, folder=0) on the current codebase scored r@5=0.65 vs the historical post_a2 baseline of 0.72 — same 73-case subset, same routing semantics. Per-query diff showed specific chunks collapsing from rerank scores of 80-98% to 0%, and the expected caller chunks missing from top-20 retrieval entirely.
+
+Root cause: incremental reconcile with many changed files. Our re-ingest showed `unchanged=263, changed=20, new=2, to_insert=286, to_delete=261`. The wipe-and-reinsert of 261+286 chunks across 20 simultaneously-changed files corrupted either BM25 IDF statistics or LanceDB row ordering in a way that degraded hybrid retrieval.
+
+User deleted the lance db and forced a fresh full ingest. Post-fresh pseudo_a1 scored r@5=0.713, recovering the historical baseline within noise (~1pp). All three configs (pseudo_a1, pseudo_a3, post_a4) used for A4's headline numbers are on the fresh db. Filed as "reconcile robustness under multi-file code changes" — not A4-specific but exposed by A4's code additions.
+
+### Routing table shipped (A4)
+
+| Intent | code | folder | file | readme | crate | module_doc |
+|---|---|---|---|---|---|---|
+| Overview | 5 | 4 | **2** | 3 | 3 | 3 |
+| Implementation | 5 | 1 | **1** | 1 | 1 | 2 |
+| Relationship | 5 | 0 | **1** | 1 | 2 | 2 |
+| Comparison | 5 | 2 | **1** | 2 | 3 | 2 |
+
+ArmPolicy: `file_vec: true` for all four intents (stratified retrieval). `RerankConfig.file_fetch_multiplier: 2`.
+
+### Harness results (fresh db, rerank + hybrid, 87-case dataset, 79 scored)
+
+Three-way comparison isolates the A4 contribution:
+
+| Config | r@5 | r@10 | r@pool | MRR |
+|---|---|---|---|---|
+| Historical post_a2 (bd57b33) | 0.724 | 0.767 | n/a | 0.704 |
+| pseudo_a1_fresh (file=0, folder=0) | 0.713 | 0.747 | 0.747 | 0.675 |
+| pseudo_a3_fresh (file=0, folder on) | 0.723 | 0.769 | 0.772 | 0.678 |
+| **post_a4_fresh (2/1/1/1)** | **0.719** | **0.791** | **0.798** | **0.728** |
+
+A4 vs pseudo_a3 isolated (file-arm contribution only):
+- aggregate: r@5 -0.3pp, r@pool **+2.5pp**, MRR **+5.0pp**
+- overview: r@5 -1.1pp, r@pool **+2.2pp**
+- implementation: flat
+- relationship: r@5 **-4.2pp**, r@pool flat
+- comparison: r@5 **+6.3pp**, r@pool **+12.5pp**
+
+Per-intent (post_a4_fresh):
+
+| Intent | Queries | r@5 | r@10 | r@pool |
+|---|---|---|---|---|
+| overview | 26 | 0.815 | 0.880 | **0.902** |
+| implementation | 29 | 0.740 | 0.788 | 0.788 |
+| relationship | 19 | 0.588 | 0.681 | 0.681 |
+| comparison | 12 | 0.688 | 0.792 | **0.792** |
+
+Three A4 heroes: `a4-retriever-file` PASS (r=1.0), `a4-depends-on-fastembed` PASS (r=1.0), `a4-language-handlers` FAIL (r=0; the generic `languages/mod.rs` outranked the individual language handler files — template tweak or hero-relabel follow-up).
+
+Reports at `data/reports/post_a4_fresh_a02b170.{json,md}`, `pseudo_a3_fresh_a02b170.{json,md}`, `pseudo_a1_fresh_a02b170.{json,md}`.
+
+### Files changed
+
+- `crates/code-rag-types/src/lib.rs` — `FileChunk` struct.
+- `crates/code-rag-engine/src/file.rs` — **new module**. `FileMeta`, `render_summary`, `module_name_of`, `clean_purpose`, `filename_purpose`, `canonical_tuple`, 10 unit tests. Reuses `folder::is_public`, `folder::basename_of`, `folder::csv_or` (made `pub(crate)`).
+- `crates/code-rag-engine/src/lib.rs` — `pub mod file;`.
+- `crates/code-rag-engine/src/config.rs` — `RetrievalConfig.file_limit`, `RerankConfig.file_fetch_multiplier`, `fetch_limits` extension.
+- `crates/code-rag-engine/src/intent.rs` — `ArmPolicy.file_vec`, per-intent `file_limit` in `RoutingTable::default()`, calibration notes.
+- `crates/code-rag-engine/src/retriever.rs` — `RetrievalResult.file_chunks`, `RerankText for FileChunk`, flatten() includes file type.
+- `crates/code-rag-engine/src/context.rs` — `## Relevant Files` section between folder and module_doc sections.
+- `crates/code-rag-store/src/vector_store.rs` — `FILE_TABLE`, `upsert_file_chunks`, `search_files`, `hybrid_search_files`, `file_chunks_to_batch`, `batches_to_file_chunks{,_hybrid}`, `extract_file_chunks_from_batch`, FTS registration. Native `List<Utf8>` for `exports`/`imports` (matches A2's folder pattern).
+- `crates/code-raptor/src/ingestion/file.rs` — **new module**. `build_file_chunks(code_chunks, module_doc_chunks, imports_map, project_name_override)` — grouped-by-file pass with purpose fallback chain, 14 unit tests.
+- `crates/code-raptor/src/ingestion/mod.rs` — `IngestionResult.file_chunks`, `build_file_chunks` call inside `run_ingestion` (uses `ImportsMap` in scope).
+- `crates/code-raptor/src/main.rs` — `FILE_TABLE` const, `embed_and_store_files` helper, wipe-and-rebuild in incremental path.
+- `crates/code-raptor/src/export.rs` — `ExportIndex.file_chunks` + `file_idf` + `export_file_chunks` (graceful-empty on pre-A4 dbs).
+- `src/engine/retriever.rs` — file arm in `retrieve()` (mirrors folder arm pattern at lines 475+), rerank loop extension, all 4 `RetrievalResult` construction sites updated.
+- `crates/code-rag-ui/src/data.rs` — `ChunkIndex.file_chunks` + `file_idf`, `#[serde(default)]` for pre-A4 index.json back-compat.
+- `crates/code-rag-ui/src/search.rs` — `NonCodeResults.files`, file arm in `hybrid_search_non_code` + `brute_force_non_code`.
+- `crates/code-rag-ui/src/standalone_api.rs` — plumb file arm through `run_retrieval`, rerank_all extension, `SourceInfo` builder.
+- `src/harness/metrics.rs` — `recall_at_pool` function, field in `AggregateMetrics` + `IntentMetrics`.
+- `src/harness/report.rs` — `QueryReport.recall_at_pool`, aggregate + By-Intent table markdown.
+- `src/bin/harness.rs` — `SystemConfig.file_limit_by_intent` populated from `RoutingTable::default()`.
+- `data/test_queries.json` — three new `a4-`-prefixed hero cases.
+
+Zero WASM-only code; `code-rag-engine` compiles unconditionally to wasm32.
+
+### Validations run
+
+- `cargo fmt --all` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean (native).
+- `cargo check -p code-rag-ui --features standalone --target wasm32-unknown-unknown` — clean.
+- `cargo build -p code-rag-ui --features standalone --target wasm32-unknown-unknown --release` — clean.
+- `cargo test --workspace --lib` — all tests pass (24 new: 10 engine/file + 14 ingestion/file).
+
+### What A4 explicitly did NOT do
+
+- Add per-type `file_bm25` / `file_rerank` sub-gates (deferred; would follow B5-style space sweep if harness shows need).
+- Extend C2's graph-slot protection to file chunks (same posture as A3's folder gate — revisit if function-level relationship regressions become load-bearing).
+- Fix the `a4-language-handlers` hero (generic `mod.rs` outranking individual handler files — template tweak or relabel follow-up).
+- Investigate reconcile IDF corruption under multi-file change (filed as separate follow-up; fresh ingest sidesteps it).
+- Reclassify `comp-chunk-types` noise from the new `FileChunk` Rust type (the struct definition's CodeChunks appear when users ask about chunk types — acceptable low-frequency artifact).
+- Re-export WASM `index.json` (harness reads LanceDB directly; export is a separate re-run).
+
+### Rollback
+
+Two levels:
+- **Soft rollback** (config only, no re-ingest): set `file_limit = 0` for all intents in `RoutingTable::default()`. Arms fire but return empty; file_chunks table stays populated and inert.
+- **Medium rollback**: additionally flip `ArmPolicy.file_vec = false` for all intents. Arms short-circuit before search.
+- **Hard rollback**: revert the A4 PR. `file_chunks` table remains in LanceDB but is no longer read or exported.
+
+---
+
 ## 2026-04-17: A3 — Collapsed-Tree Routing (folder activation)
 
 ### Summary

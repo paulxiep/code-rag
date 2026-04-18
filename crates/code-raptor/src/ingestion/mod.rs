@@ -1,3 +1,4 @@
+pub mod file;
 pub mod folder;
 pub mod language;
 pub mod languages;
@@ -345,6 +346,8 @@ pub struct IngestionResult {
     pub module_doc_chunks: Vec<ModuleDocChunk>,
     /// A2: folder-level summaries. One per non-empty, non-vendor directory.
     pub folder_chunks: Vec<code_rag_types::FolderChunk>,
+    /// A4: file-level summaries. One per source file that produced CodeChunks.
+    pub file_chunks: Vec<code_rag_types::FileChunk>,
 }
 
 /// Type aliases for ingestion side-channels.
@@ -410,6 +413,16 @@ pub fn run_ingestion(
     // duplication with the main walk.
     let folder_chunks = folder::build_folder_chunks(repo_path, &all_chunks, project_name_override);
 
+    // A4: Produce file-level summary chunks. Runs at the same seam as
+    // folder (after code chunks are assembled) and consumes the imports_map
+    // while it's still in scope — no need to thread it out.
+    let file_chunks = file::build_file_chunks(
+        &all_chunks,
+        &module_doc_chunks,
+        &all_imports,
+        project_name_override,
+    );
+
     (
         IngestionResult {
             code_chunks: all_chunks,
@@ -417,6 +430,7 @@ pub fn run_ingestion(
             crate_chunks,
             module_doc_chunks,
             folder_chunks,
+            file_chunks,
         },
         all_calls,
         all_imports,

@@ -2,7 +2,9 @@
 
 use arrow_array::{Array, Float32Array, ListArray, RecordBatch, StringArray, UInt64Array};
 use code_rag_engine::text::{IdfTable, build_searchable_text};
-use code_rag_types::{CodeChunk, CrateChunk, ExportEdge, FolderChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{
+    CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+};
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use serde::Serialize;
@@ -21,6 +23,9 @@ pub struct ExportIndex {
     /// on the UI side keeps old index.json forward-compatible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_chunks: Vec<EmbeddedChunk<FolderChunk>>,
+    /// A4: file summary chunks. Empty on pre-A4 bundles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_chunks: Vec<EmbeddedChunk<FileChunk>>,
     pub intent_prototypes: HashMap<String, Vec<Vec<f32>>>,
     pub projects: Vec<String>,
     /// IDF tables for browser-side BM25 (B2).
@@ -37,6 +42,9 @@ pub struct ExportIndex {
     /// on the UI side → None → folder BM25 arm short-circuits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder_idf: Option<IdfTable>,
+    /// A4: IDF table over file summary_text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_idf: Option<IdfTable>,
     /// C1: Call graph edges for browser-side graph traversal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_edges: Vec<ExportEdge>,
@@ -71,6 +79,9 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
 
     let folder_chunks = export_folder_chunks(&conn).await?;
     info!("Exported {} folder chunks", folder_chunks.len());
+
+    let file_chunks = export_file_chunks(&conn).await?;
+    info!("Exported {} file chunks", file_chunks.len());
 
     // Collect unique project names
     let mut projects: Vec<String> = code_chunks
@@ -123,6 +134,15 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         ))
     };
 
+    // A4: file IDF — same invariant as folder_idf.
+    let file_idf = if file_chunks.is_empty() {
+        None
+    } else {
+        Some(IdfTable::build(
+            file_chunks.iter().map(|ec| ec.chunk.summary_text.clone()),
+        ))
+    };
+
     // C1: Export call edges for browser-side graph traversal
     let call_edges = export_call_edges(&conn).await.unwrap_or_default();
     info!("Exported {} call edges", call_edges.len());
@@ -133,6 +153,7 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         crate_chunks,
         module_doc_chunks,
         folder_chunks,
+        file_chunks,
         intent_prototypes,
         projects,
         code_idf,
@@ -140,6 +161,7 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         crate_idf,
         module_doc_idf,
         folder_idf,
+        file_idf,
         call_edges,
     };
 
@@ -461,6 +483,81 @@ async fn export_folder_chunks(
                 key_types: extract(key_types_list, i),
                 key_functions: extract(key_functions_list, i),
                 subfolders: extract(subfolders_list, i),
+                summary_text: summary_texts.value(i).to_string(),
+                chunk_id: chunk_ids.value(i).to_string(),
+                content_hash: content_hashes.value(i).to_string(),
+                embedding_model_version: model_versions.value(i).to_string(),
+            };
+            result.push(EmbeddedChunk {
+                chunk,
+                embedding: get_embedding(batch, i),
+                signature_embedding: None,
+            });
+        }
+    }
+    Ok(result)
+}
+
+/// A4: Export file summary chunks + embeddings. Mirrors the A2 folder export
+/// pattern — graceful-empty when `file_chunks` table doesn't exist, native
+/// List<Utf8> deserialization for the two Vec<String> columns.
+async fn export_file_chunks(
+    conn: &lancedb::Connection,
+) -> anyhow::Result<Vec<EmbeddedChunk<FileChunk>>> {
+    let batches = match query_all(conn, "file_chunks").await {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut result = Vec::new();
+
+    for batch in &batches {
+        let file_paths = str_col(batch, "file_path")?;
+        let project_names = str_col(batch, "project_name")?;
+        let languages = str_col(batch, "language")?;
+        let summary_texts = str_col(batch, "summary_text")?;
+        let chunk_ids = str_col(batch, "chunk_id")?;
+        let content_hashes = str_col(batch, "content_hash")?;
+        let model_versions = str_col(batch, "embedding_model_version")?;
+        let purposes = opt_str_col(batch, "purpose");
+
+        let list_col = |name: &str| -> Option<&ListArray> {
+            batch
+                .column_by_name(name)
+                .and_then(|c: &Arc<dyn Array>| c.as_any().downcast_ref::<ListArray>())
+        };
+        let exports_list = list_col("exports");
+        let imports_list = list_col("imports");
+
+        let extract = |arr: Option<&ListArray>, i: usize| -> Vec<String> {
+            arr.filter(|a| !a.is_null(i))
+                .map(|a| {
+                    let v = a.value(i);
+                    v.as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|sa| {
+                            (0..sa.len())
+                                .filter_map(|j| {
+                                    if sa.is_null(j) {
+                                        None
+                                    } else {
+                                        Some(sa.value(j).to_string())
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+        };
+
+        for i in 0..batch.num_rows() {
+            let chunk = FileChunk {
+                file_path: file_paths.value(i).to_string(),
+                project_name: project_names.value(i).to_string(),
+                language: languages.value(i).to_string(),
+                exports: extract(exports_list, i),
+                imports: extract(imports_list, i),
+                purpose: opt_str(purposes, i),
                 summary_text: summary_texts.value(i).to_string(),
                 chunk_id: chunk_ids.value(i).to_string(),
                 content_hash: content_hashes.value(i).to_string(),

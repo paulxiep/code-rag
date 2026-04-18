@@ -204,6 +204,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -223,6 +224,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 

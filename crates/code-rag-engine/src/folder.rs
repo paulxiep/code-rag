@@ -38,7 +38,7 @@ pub fn render_summary(m: &FolderMeta<'_>) -> String {
     )
 }
 
-fn csv_or(items: &[String], fallback: &str) -> String {
+pub(crate) fn csv_or(items: &[String], fallback: &str) -> String {
     if items.is_empty() {
         fallback.to_string()
     } else {
@@ -47,11 +47,10 @@ fn csv_or(items: &[String], fallback: &str) -> String {
 }
 
 /// Last path component (treats both '/' and '\\' as separators for safety,
-/// though ingestion normalizes to '/'). Empty string if `folder_path` is
+/// though ingestion normalizes to '/'). Empty string if `path` is
 /// empty or ends in a separator with no trailing segment.
-fn basename_of(folder_path: &str) -> &str {
-    folder_path
-        .rsplit(['/', '\\'])
+pub(crate) fn basename_of(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
         .find(|s| !s.is_empty())
         .unwrap_or("")
 }

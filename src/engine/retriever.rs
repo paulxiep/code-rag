@@ -219,6 +219,11 @@ fn rerank_all(
         // Skip rerank-induced allocation when the arm is gated off.
         0
     };
+    let file_limit = if config.file_limit > 0 {
+        config.file_limit
+    } else {
+        0
+    };
     Ok(RetrievalResult {
         code_chunks: rerank_chunks(query, bundle.code_chunks, reranker, code_limit)?,
         readme_chunks: rerank_chunks(query, bundle.readme_chunks, reranker, config.readme_limit)?,
@@ -230,6 +235,7 @@ fn rerank_all(
             config.module_doc_limit,
         )?,
         folder_chunks: rerank_chunks(query, bundle.folder_chunks, reranker, folder_limit)?,
+        file_chunks: rerank_chunks(query, bundle.file_chunks, reranker, file_limit)?,
         intent: bundle.intent,
     })
 }
@@ -495,6 +501,31 @@ pub async fn retrieve(
             Vec::new()
         };
 
+    // A4: file arm. Same short-circuit pattern as folder. `file_vec` is true
+    // for all four intents (stratified SOTA); `file_limit` varies per intent.
+    let file_scored: Vec<ScoredChunk<code_rag_types::FileChunk>> =
+        if fetch_config.file_limit > 0 && policy.file_vec {
+            let raw = if use_hybrid {
+                store
+                    .hybrid_search_files(query, query_embedding, fetch_config.file_limit)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                store
+                    .search_files(query_embedding, fetch_config.file_limit)
+                    .await
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            to_scored_relevance(raw)
+        } else {
+            Vec::new()
+        };
+
     // C2: SOTA routing for structural queries. When the query has explicit
     // direction keywords ("what calls X", "called by", "depends on", etc.),
     // partition graph-confirmed chunks OUT of the rerank pipeline entirely.
@@ -565,6 +596,7 @@ pub async fn retrieve(
                 crate_chunks: crate_scored,
                 module_doc_chunks: module_doc_scored,
                 folder_chunks: folder_scored.clone(),
+                file_chunks: file_scored.clone(),
                 intent,
             };
             match rerank_all(query, bundle, reranker, config, code_keep_override) {
@@ -620,6 +652,7 @@ pub async fn retrieve(
                         crate_chunks: crate_raw,
                         module_doc_chunks: module_doc_raw,
                         folder_chunks: folder_scored.clone(),
+                        file_chunks: file_scored.clone(),
                         intent,
                     }
                 }
@@ -632,6 +665,7 @@ pub async fn retrieve(
                 crate_chunks: crate_scored,
                 module_doc_chunks: module_doc_scored,
                 folder_chunks: folder_scored,
+                file_chunks: file_scored,
                 intent,
             }
         }
@@ -642,6 +676,7 @@ pub async fn retrieve(
             crate_chunks: crate_scored,
             module_doc_chunks: module_doc_scored,
             folder_chunks: folder_scored,
+            file_chunks: file_scored,
             intent,
         }
     };

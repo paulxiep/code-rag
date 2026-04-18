@@ -408,6 +408,16 @@ pub struct ArmPolicy {
     pub bm25: bool,
     pub rerank: bool,
     pub folder_vec: bool,
+    /// A4: file-summary arm.
+    /// Stratified relationship retrieval (SOTA on code RAG — Sourcegraph Cody,
+    /// Aider, RepoCoder): file-level queries ("which files depend on X?") get
+    /// file-level answers. A3's `folder_vec=false` gate for Relationship was a
+    /// MISMATCHED-granularity fix (folder hijacked function-level queries);
+    /// same-granularity retrieval doesn't inherit that problem, so A4 keeps
+    /// `file_vec=true` for all four intents. If harness shows file chunks of
+    /// a query's own target file hijacking function-level Relationship
+    /// queries, flip Relationship to false — same mechanism as A3.
+    pub file_vec: bool,
 }
 
 /// Per-intent arm policy. Values are empirical — derived from the B5 space
@@ -426,6 +436,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             bm25: true,
             rerank: true,
             folder_vec: true,
+            file_vec: true,
         },
         // Implementation: hybrid HURTS (-4.2pp). BM25 over-matches identifier tokens
         // in test/caller chunks, swamping the real implementation chunk.
@@ -436,6 +447,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             bm25: false,
             rerank: true,
             folder_vec: true,
+            file_vec: true,
         },
         // Relationship: hybrid+rerank tied with body-vec-only at 0.485.
         // Keep BM25 on because caller/dependency queries benefit from term match.
@@ -453,6 +465,8 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             bm25: true,
             rerank: true,
             folder_vec: false,
+            // A4: true — stratified. See ArmPolicy.file_vec doc.
+            file_vec: true,
         },
         // Comparison: all arms off except body-vec. B3 finding preserved —
         // signature tokens + BM25 + rerank all over-rank ONE half of a pair.
@@ -463,6 +477,7 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             bm25: false,
             rerank: false,
             folder_vec: true,
+            file_vec: true,
         },
     }
 }
@@ -495,6 +510,10 @@ impl Default for RoutingTable {
                 crate_limit: 3,
                 module_doc_limit: 3,
                 folder_limit: 4,
+                // A4 calibration 2026-04-18 (on fresh db): file_limit=2 gives
+                // Overview r@pool 0.902 vs pseudo_a3 0.880 (+2.2pp).
+                // Slight r@5 regression (-1pp) offset by large pool gain.
+                file_limit: 2,
             },
         );
 
@@ -506,12 +525,22 @@ impl Default for RoutingTable {
                 crate_limit: 1,
                 module_doc_limit: 2,
                 folder_limit: 1,
+                // A4 calibration 2026-04-18 (fresh db): file_limit=1 is
+                // flat vs pseudo_a3 on Implementation (r@5 0.740, r@pool
+                // 0.788 both tracks). Kept at 1 to preserve file signal
+                // for file-level implementation queries.
+                file_limit: 1,
             },
         );
 
         // Relationship: folder_limit=0 — paired with folder_vec=false in
         // arm_policy. Harness empirics (post_a3) showed folder hijacks
-        // consumer-discovery queries. See arm_policy comment for detail.
+        // consumer-discovery queries.
+        // A4 calibration 2026-04-18 (fresh db): file_limit=1 gives r@5
+        // 0.588 vs pseudo_a3 0.630 (-4pp) but r@pool 0.681 matches.
+        // Kept at 1 to preserve a4-depends-on-fastembed hero (file-level
+        // relationship); consumer-discovery bottleneck is code/graph, not
+        // file displacement.
         routes.insert(
             QueryIntent::Relationship,
             RetrievalConfig {
@@ -520,6 +549,7 @@ impl Default for RoutingTable {
                 crate_limit: 2,
                 module_doc_limit: 2,
                 folder_limit: 0,
+                file_limit: 1,
             },
         );
 
@@ -531,6 +561,10 @@ impl Default for RoutingTable {
                 crate_limit: 3,
                 module_doc_limit: 2,
                 folder_limit: 2,
+                // A4 calibration 2026-04-18 (fresh db): file_limit=1 gives
+                // r@5 0.688 vs pseudo_a3 0.625 (+6pp) AND r@pool 0.792 vs
+                // 0.667 (+12pp). Biggest A4 win across intents.
+                file_limit: 1,
             },
         );
 

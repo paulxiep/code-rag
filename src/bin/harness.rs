@@ -227,11 +227,24 @@ async fn main() -> anyhow::Result<()> {
                 .map(|i| {
                     (
                         format!("{i:?}").to_lowercase(),
-                        table
-                            .routes
-                            .get(i)
-                            .map(|c| c.folder_limit)
-                            .unwrap_or(0),
+                        table.routes.get(i).map(|c| c.folder_limit).unwrap_or(0),
+                    )
+                })
+                .collect()
+            },
+            file_limit_by_intent: {
+                let table = RoutingTable::default();
+                [
+                    QueryIntent::Overview,
+                    QueryIntent::Implementation,
+                    QueryIntent::Relationship,
+                    QueryIntent::Comparison,
+                ]
+                .iter()
+                .map(|i| {
+                    (
+                        format!("{i:?}").to_lowercase(),
+                        table.routes.get(i).map(|c| c.file_limit).unwrap_or(0),
                     )
                 })
                 .collect()

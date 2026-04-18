@@ -1,5 +1,5 @@
 use super::retriever::{RetrievalResult, ScoredChunk};
-use code_rag_types::{CodeChunk, CrateChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
 
 /// System prompt - instructs the LLM how to behave
 pub const SYSTEM_PROMPT: &str = r#"You are a helpful assistant answering questions about a developer's portfolio of coding projects.
@@ -24,6 +24,12 @@ pub fn build_context(result: &RetrievalResult) -> String {
     // crates, above module-doc/code. Empty when folder_limit=0 (A2 default).
     if !result.folder_chunks.is_empty() {
         sections.push(format_folder_section(&result.folder_chunks));
+    }
+
+    // A4: file-level summaries — between folder and module_doc to preserve
+    // coarse→fine hierarchy ordering. Empty when file_limit=0.
+    if !result.file_chunks.is_empty() {
+        sections.push(format_file_section(&result.file_chunks));
     }
 
     // Module documentation (crate-level docs)
@@ -141,6 +147,20 @@ fn format_folder_section(chunks: &[ScoredChunk<FolderChunk>]) -> String {
     out
 }
 
+fn format_file_section(chunks: &[ScoredChunk<FileChunk>]) -> String {
+    let mut out = String::from("## Relevant Files\n");
+
+    for scored in chunks {
+        let chunk = &scored.chunk;
+        out.push_str(&format!(
+            "\n### `{}` ({})\n{}\n",
+            chunk.file_path, chunk.project_name, chunk.summary_text
+        ));
+    }
+
+    out
+}
+
 /// Build the complete prompt sent to the LLM
 pub fn build_prompt(query: &str, context: &str) -> String {
     format!(
@@ -235,6 +255,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -254,6 +275,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -271,6 +293,7 @@ mod tests {
             crate_chunks: vec![scored(sample_crate_chunk(), 0.7)],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -289,6 +312,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![scored(sample_module_doc_chunk(), 0.6)],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -323,6 +347,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![scored(sample_folder_chunk(), 0.5)],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let context = build_context(&result);
@@ -341,6 +366,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let context = build_context(&result);
@@ -355,6 +381,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -383,6 +410,7 @@ mod tests {
             crate_chunks: vec![],
             module_doc_chunks: vec![],
             folder_chunks: vec![],
+            file_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
