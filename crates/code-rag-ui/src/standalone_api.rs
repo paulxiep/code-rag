@@ -555,86 +555,67 @@ fn format_intent(intent: QueryIntent) -> String {
 
 fn build_source_list(result: &RetrievalResult) -> Vec<SourceInfo> {
     let mut sources: Vec<SourceInfo> = Vec::new();
-
-    for s in &result.code_chunks {
-        sources.push(SourceInfo {
-            chunk_type: "code".into(),
-            path: s.chunk.file_path.clone(),
-            label: s.chunk.identifier.clone(),
-            project: s.chunk.project_name.clone(),
-            relevance: s.score,
-            relevance_pct: (s.score * 100.0).round() as u8,
-            line: s.chunk.start_line,
-        });
-    }
-    for s in &result.readme_chunks {
-        sources.push(SourceInfo {
-            chunk_type: "readme".into(),
-            path: s.chunk.file_path.clone(),
-            label: s.chunk.project_name.clone(),
-            project: s.chunk.project_name.clone(),
-            relevance: s.score,
-            relevance_pct: (s.score * 100.0).round() as u8,
-            line: 0,
-        });
-    }
-    for s in &result.crate_chunks {
-        sources.push(SourceInfo {
-            chunk_type: "crate".into(),
-            path: s.chunk.crate_path.clone(),
-            label: s.chunk.crate_name.clone(),
-            project: s.chunk.project_name.clone(),
-            relevance: s.score,
-            relevance_pct: (s.score * 100.0).round() as u8,
-            line: 0,
-        });
-    }
-    for s in &result.module_doc_chunks {
-        sources.push(SourceInfo {
-            chunk_type: "module_doc".into(),
-            path: s.chunk.file_path.clone(),
-            label: s.chunk.module_name.clone(),
-            project: s.chunk.project_name.clone(),
-            relevance: s.score,
-            relevance_pct: (s.score * 100.0).round() as u8,
-            line: 0,
-        });
-    }
-    for s in &result.folder_chunks {
-        sources.push(SourceInfo {
-            chunk_type: "folder".into(),
-            path: s.chunk.folder_path.clone(),
-            // Label with just the basename for UI brevity; full path goes in `path`.
-            label: s
-                .chunk
-                .folder_path
-                .rsplit('/')
-                .find(|s| !s.is_empty())
-                .unwrap_or(&s.chunk.folder_path)
-                .to_string(),
-            project: s.chunk.project_name.clone(),
-            relevance: s.score,
-            relevance_pct: (s.score * 100.0).round() as u8,
-            line: 0,
-        });
-    }
-    for s in &result.file_chunks {
-        sources.push(SourceInfo {
-            chunk_type: "file".into(),
-            path: s.chunk.file_path.clone(),
-            label: s
-                .chunk
-                .file_path
-                .rsplit('/')
-                .find(|s| !s.is_empty())
-                .unwrap_or(&s.chunk.file_path)
-                .to_string(),
-            project: s.chunk.project_name.clone(),
-            relevance: s.score,
-            relevance_pct: (s.score * 100.0).round() as u8,
-            line: 0,
-        });
-    }
+    sources.extend(result.code_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "code".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.file_path.clone(),
+        label: s.chunk.identifier.clone(),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: s.chunk.start_line,
+    }));
+    sources.extend(result.readme_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "readme".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.file_path.clone(),
+        label: s.chunk.project_name.clone(),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: 0,
+    }));
+    sources.extend(result.crate_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "crate".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.crate_path.clone(),
+        label: s.chunk.crate_name.clone(),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: 0,
+    }));
+    sources.extend(result.module_doc_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "module_doc".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.file_path.clone(),
+        label: s.chunk.module_name.clone(),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: 0,
+    }));
+    sources.extend(result.folder_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "folder".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.folder_path.clone(),
+        // Label with just the basename for UI brevity; full path goes in `path`.
+        label: basename(&s.chunk.folder_path),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: 0,
+    }));
+    sources.extend(result.file_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "file".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.file_path.clone(),
+        label: basename(&s.chunk.file_path),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: 0,
+    }));
 
     sources.sort_by(|a, b| {
         b.relevance
@@ -643,4 +624,11 @@ fn build_source_list(result: &RetrievalResult) -> Vec<SourceInfo> {
     });
 
     sources
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }

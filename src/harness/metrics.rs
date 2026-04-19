@@ -249,6 +249,7 @@ mod tests {
     fn make_flat(file: &str, identifier: Option<&str>, relevance: f32) -> FlatChunk {
         FlatChunk {
             chunk_type: "code".to_string(),
+            chunk_id: format!("test-{}", file),
             file_path: file.to_string(),
             identifier: identifier.map(String::from),
             project: "proj".to_string(),

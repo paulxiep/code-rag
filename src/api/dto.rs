@@ -23,6 +23,9 @@ pub struct SourceInfo {
     /// Chunk type discriminator (code, readme, crate, module_doc)
     #[serde(rename = "type")]
     pub chunk_type: String,
+    /// Stable deterministic id; used by downstream tools (e.g. MCP
+    /// code_rag_neighbors) to refetch or expand a specific chunk.
+    pub chunk_id: String,
     /// File path or crate path
     pub path: String,
     /// Human-readable label (function name, crate name, module name)
@@ -45,6 +48,7 @@ pub fn build_sources(result: &RetrievalResult) -> Vec<SourceInfo> {
         .into_iter()
         .map(|flat| SourceInfo {
             chunk_type: flat.chunk_type,
+            chunk_id: flat.chunk_id,
             path: flat.file_path,
             label: flat.identifier.unwrap_or_else(|| flat.project.clone()),
             project: flat.project,

@@ -11,6 +11,7 @@ use code_raptor::{
     reconcile, run_ingestion,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tracing::info;
 
 /// Batch size for embedding processing to reduce peak memory usage
@@ -49,6 +50,13 @@ enum Commands {
         /// Explicit project name (defaults to repo directory name)
         #[arg(short, long)]
         project_name: Option<String>,
+
+        /// Treat the target path as a single repo: all chunks share one
+        /// project name (derived from repo dirname unless --project-name is
+        /// set) instead of the multi-project "parent dir with sibling
+        /// projects" default.
+        #[arg(long)]
+        single_repo: bool,
 
         /// Force full re-index (default: incremental)
         #[arg(long, conflicts_with = "dry_run")]
@@ -93,18 +101,40 @@ async fn main() -> anyhow::Result<()> {
             repo_path,
             db_path,
             project_name,
+            single_repo,
             full,
             dry_run,
         } => {
             info!("Ingesting repository: {}", repo_path);
             info!("Database path: {}", db_path);
-            if let Some(ref name) = project_name {
-                info!("Project name override: {}", name);
+
+            // Single-repo mode: derive project_name from the repo dirname when
+            // not explicitly set. The resolver in
+            // crates/code-raptor/src/ingestion/mod.rs treats any Some(name)
+            // override as authoritative, so forcing one here short-circuits
+            // the multi-project subdir extraction and gives every chunk the
+            // same project label.
+            let effective_project_name = match (single_repo, project_name.as_deref()) {
+                (true, None) => std::path::Path::new(&repo_path)
+                    .canonicalize()
+                    .ok()
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .and_then(|n| n.to_str())
+                    .map(String::from),
+                _ => project_name.clone(),
+            };
+            if let Some(ref name) = effective_project_name {
+                info!(
+                    "Project name: {}{}",
+                    name,
+                    if single_repo { " (single-repo)" } else { " (override)" }
+                );
             }
 
             // Step 1: Parse code into chunks (sync, no DB)
             let (result, calls_map, imports_map) =
-                run_ingestion(&repo_path, project_name.as_deref());
+                run_ingestion(&repo_path, effective_project_name.as_deref());
             info!(
                 "Parsed: {} code, {} readme, {} crate, {} module_doc chunks",
                 result.code_chunks.len(),
