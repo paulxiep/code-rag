@@ -4,6 +4,7 @@ A RAG chatbot that answers questions about code repositories. Ingests all siblin
 
 - [Executive Summary](docs/executive_summary.md)
 - [Technical Summary](docs/technical_summary.md)
+- [MCP server for Claude Code](crates/code-rag-mcp/README.md) — ship the retrieval brain as MCP tools; point it at any single repo
 
 ## Usage
 

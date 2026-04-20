@@ -3,6 +3,12 @@ name = "code-rag-mcp"
 version = "0.1.0"
 authors = ["paulxiep"]
 edition = "2024"
+description = "MCP server exposing local intent-routed semantic + graph retrieval over a single repository to Claude Code"
+license = "Apache-2.0"
+readme = "README.md"
+# Bundle the shipped Claude Code Skill file so `cargo publish` includes it and
+# external users can point at the skill via the crate's checkout.
+include = ["src/**/*", "skills/**/*", "README.md", "Cargo.toml"]
 
 [[bin]]
 name = "code-rag-mcp"

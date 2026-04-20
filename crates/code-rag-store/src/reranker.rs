@@ -35,7 +35,19 @@ pub struct Reranker {
 impl Reranker {
     /// Auto-download model from HuggingFace Hub and initialize.
     /// Files are cached locally (same cache mechanism as fastembed embedder).
+    ///
+    /// If the `CODE_RAG_RERANKER_DIR` env var is set, loads model files from
+    /// that directory instead of fetching from HF. This is the hook bundled
+    /// releases use to avoid network access on first run — point it at a
+    /// directory containing the ms-marco-MiniLM-L-6-v2 files (`model.onnx` or
+    /// `onnx/model.onnx`, plus `tokenizer.json`, `config.json`,
+    /// `special_tokens_map.json`, and optionally `tokenizer_config.json`).
     pub fn new() -> Result<Self, RerankError> {
+        if let Some(dir) = std::env::var_os("CODE_RAG_RERANKER_DIR") {
+            let path = std::path::PathBuf::from(dir);
+            return Self::from_dir(&path);
+        }
+
         let api = Api::new().map_err(|e| RerankError::Init(e.into()))?;
         let repo = api.model(HF_MODEL_ID.to_string());
 
