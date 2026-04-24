@@ -56,6 +56,7 @@
 | `code-rag-types` | Shared types — CodeChunk, ReadmeChunk, etc. with UUID, content_hash | `lib.rs` |
 | `code-rag-chat` | Query API — retrieval, LLM, quality harness, serves WASM UI | `api/`, `engine/`, `harness/`, `bin/harness.rs` |
 | `code-rag-ui` | Leptos WASM SPA — chat interface (default: backend API, standalone: in-browser RAG) | `components/`, `standalone_api.rs` |
+| `code-rag-mcp` | MCP stdio server exposing the retrieval brain to Claude Code as five tools (`code_rag_search`, `code_rag_graph`, `code_rag_overview`, `code_rag_neighbors`, `code_rag_reindex`); ships the [Claude Code skill](../crates/code-rag-mcp/skills/code-rag.md) that routes queries between Grep/Read and the MCP tools | `src/main.rs`, `skills/code-rag.md` |
 
 ## Query Pipeline
 
@@ -299,6 +300,41 @@ Three Track-C / Track-A query-side mechanisms compose on top of the policy witho
 - **Graph augmentation** fires on **Relationship + Implementation** intents only (44% Relationship classification accuracy means most relationship queries arrive misclassified as Implementation). Routing vs soft-reserve is selected per-query by `detect_direction`.
 - **Comparison decomposition** fires on **Comparison** intent only, conditional on `extract_comparators(query).len() >= 2`. Extraction failure falls through to the unchanged single-arm Comparison path.
 - **Hierarchy arms** (folder, file) are RRF-fused alongside the existing arms — the fusion code in `code-rag-engine::fusion` is N-ary and was extended with one new input each, no algorithm change.
+
+## MCP Server (Claude Code integration)
+
+The `code-rag-mcp` crate exposes the retrieval brain as a Model Context Protocol stdio server. Five tools, all read-only against the LanceDB index — no LLM calls (Claude Code is the LLM, this is the retriever).
+
+| Tool | Engine seam wrapped | Notes |
+|---|---|---|
+| `code_rag_search(query, intent?)` | `code-rag-chat::engine::retriever::retrieve` (server-side, [src/engine/retriever.rs:253](../src/engine/retriever.rs#L253)) | Full no-LLM pipeline — embed → classify (or accept hint) → route → vector + BM25 + rerank + RRF + graph augment + comparison decomposition. Returns ranked chunks shaped via `build_sources` ([src/api/dto.rs](../src/api/dto.rs)) with the new `chunk_id` field. |
+| `code_rag_graph(identifier, direction?)` | Loads all `CallEdge`s via `VectorStore::get_all_edges`, builds an in-memory `code-rag-engine::graph::CallGraph`, resolves identifier → chunk_id via `unique_chunk_for_identifier`, then queries `VectorStore::get_callers` / `get_callees` for the metadata-rich edge views. | Bypasses vector search entirely — pure graph query. Cross-project resolution works in workspace mode. |
+| `code_rag_overview(topic?)` | Same `retrieve` path as `code_rag_search`, with `intent` forced to `QueryIntent::Overview`. | Surfaces README / crate / folder / module-doc / file-summary chunks ahead of code. |
+| `code_rag_neighbors(chunk_id, window?)` | `VectorStore::get_chunks_by_ids` followed by a line-windowed file read. | Resolves code chunks only today; non-code chunk_ids return "not found". Path resolution falls back from direct join to first-component-stripped to handle both `--single-repo` and multi-project layouts. |
+| `code_rag_reindex(mode?)` | Subprocess: `tokio::process::Command::new(code-raptor).args(["ingest", repo_path, "--db-path", db_path, ...])`. Adds `--single-repo` unless `--workspace` was passed at MCP startup; adds `--full` only when `mode: "full"` (default `incremental`). Blocks until exit. | Subprocess isolation means an ingest panic doesn't take down the search-serving process. LanceDB tables are opened per-query in `VectorStore`, so no explicit reload is needed after the subprocess exits. |
+
+**SDK and tool registration.** Built on `rmcp` 1.5 (the official Rust SDK from the MCP org). Tool handlers are plain `async fn`s on `CodeRagServer` annotated with `#[tool(description = "...")]` inside a `#[tool_router]` impl block. `#[tool_handler]` on `impl ServerHandler` wires the router to the rmcp dispatch loop. Parameters arrive via `Parameters<T>` wrappers where `T: Deserialize + JsonSchema`; rmcp generates the JSON Schema advertised in `tools/list` from the schemars derivation.
+
+**Process model.** Single-request-at-a-time inside the search path. The embedder and reranker live in `Mutex<...>` on the existing `AppState` (reused from `code-rag-chat::api::state::AppState` to avoid duplicating 746 lines of native orchestration). Stdout is the JSON-RPC channel — `tracing_subscriber::fmt().with_writer(std::io::stderr)` is load-bearing; any debug output to stdout corrupts the protocol stream.
+
+**chunk_id plumbing.** A `chunk_id: String` field exists on every chunk type in `code-rag-types` (deterministic SHA-based via `deterministic_chunk_id`) but was originally dropped during `RetrievalResult::flatten()`. The MCP work added it back to `FlatChunk`, propagated through both `SourceInfo`s (server `src/api/dto.rs` and WASM `crates/code-rag-ui/src/api.rs`), and exposed it on every search result so `code_rag_neighbors` can refetch a specific chunk by id without re-querying.
+
+**Two ingestion layouts.** The MCP works against either:
+- A `--single-repo` index (one project, repo-relative paths) — the standalone external-user case.
+- A multi-project parent-dir index (the portfolio's existing layout, paths prefixed by project name) — opt-in via `--workspace`.
+
+`code_rag_neighbors` handles both layouts transparently: it tries the direct path under `--repo-path` first, then on `ENOENT` retries with the first path component stripped.
+
+**Distribution.** Single binary, three-step install, no terminal commands once the exe is on disk.
+
+- The release zip ([cut by .github/workflows/release.yml](../.github/workflows/release.yml), `workflow_dispatch`-triggered, matrix-built for `x86_64-unknown-linux-gnu` / `aarch64-apple-darwin` / `x86_64-pc-windows-msvc`) ships exactly one binary, `code-rag-mcp`, plus a `code-rag-mcp.config.yaml` template and a `README.txt`.
+- The binary has three behaviours, dispatched by argv:
+  - **Bare run** (`code-rag-mcp` with no args, e.g. double-click) — reads `code-rag-mcp.config.yaml` from `current_exe().parent()`, parses `target_path` + `workspace`, then writes `.claude/skills/code-rag.md` (skill embedded via `include_str!("../skills/code-rag.md")` at compile time), merges a `code-rag` entry into `.mcp.json`'s `mcpServers` (preserving any existing servers via `serde_json::Value` round-trip), and appends `.code-rag-mcp/` to `.gitignore` (idempotent). On first run with no config present, writes the template there and exits with instructions.
+  - **Serve** (top-level flags like `--db-path`, `--repo-path`, `--workspace`) — runs the rmcp stdio server. This is what Claude Code spawns via `.mcp.json`.
+  - **`ingest <path>` subcommand** — calls `code_raptor::ingest_repo(IngestOpts { … })`, the lib entrypoint promoted from `code-raptor`'s `main.rs` to [crates/code-raptor/src/orchestrate.rs](../crates/code-raptor/src/orchestrate.rs). Used by `code_rag_reindex` to spawn `std::env::current_exe()` recursively, which is why the release ships only one binary instead of two.
+- `code-raptor` still exists as a workspace crate for the harness + GitHub Pages export but is not in the user-facing release.
+
+End-user install is: download zip → extract → edit `target_path` in the YAML → run the exe. Open Claude Code in the target dir; the bundled skill instructs the agent to call `code_rag_reindex mode=full` for the initial ingest. Ship details: [docs/release.md](release.md).
 
 ## Build & Run
 

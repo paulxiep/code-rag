@@ -25,58 +25,32 @@ Plus a bundled Claude Code [skill](skills/code-rag.md) that tells Claude when to
 
 That's it. The pipeline runs fully local: no API keys, no cloud dependencies.
 
-## Install
+## Install — three steps, no terminal commands once the exe is on disk
 
-### From source (workspace clone)
+1. **Download** the zip for your platform from the [GitHub Release page](https://github.com/paulxiep/code-rag/releases). Extract somewhere persistent (e.g. `C:\tools\code-rag-mcp\` or `~/.local/share/code-rag-mcp/`). The archive contains a single `code-rag-mcp` binary plus a `code-rag-mcp.config.yaml` template.
+2. **Edit** `code-rag-mcp.config.yaml` (lives next to the exe) in any text editor:
+
+   ```yaml
+   target_path: C:/Users/me/projects/my-repo   # or "." if you're running the exe from inside the repo
+   workspace: false                            # set true if target_path is a parent of many sub-projects
+   ```
+
+3. **Run** the exe (double-click works). It writes `.claude/skills/code-rag.md`, `.mcp.json`, and a `.gitignore` entry into your target dir, then exits.
+
+That's installation. To use it: open Claude Code in the target dir. The first conceptual question triggers the agent to call `code_rag_reindex mode=full` for the initial ingest automatically — no terminal commands needed.
+
+> **Note on PATH.** Claude Code spawns `code-rag-mcp` via the generated `.mcp.json`, which uses the bare command name. Either put `code-rag-mcp` on your PATH (drag it into `~/.local/bin/`, or add the install dir to your Windows PATH), or hand-edit the generated `.mcp.json` to use the absolute path.
+
+### From source (alternative, if you prefer building)
 
 ```bash
 git clone https://github.com/paulxiep/code-rag
 cd code-rag
-cargo build --release -p code-rag-mcp -p code-raptor
-# Binaries land in target/release/code-rag-mcp and target/release/code-raptor
-# Copy them onto PATH, e.g.:
-cp target/release/code-rag-mcp target/release/code-raptor ~/.local/bin/
+cargo build --release -p code-rag-mcp
+# Binary lands in target/release/code-rag-mcp; place it where you want it.
 ```
 
-### Via cargo install (once published)
-
-```bash
-cargo install code-rag-mcp code-raptor
-```
-
-## Set up against a repository
-
-One-time ingest + wire Claude Code:
-
-```bash
-cd /path/to/your/repo
-
-# 1. Build the index (tens of seconds to a few minutes depending on repo size).
-#    First run downloads the BGE-small embedder and the reranker ONNX from HF.
-code-raptor ingest . --db-path ./.code-rag/index.lance --single-repo --full
-
-# 2. Drop the Skill file into your repo so Claude Code routes queries correctly.
-#    Skill path in this repo: crates/code-rag-mcp/skills/code-rag.md
-mkdir -p .claude/skills
-cp /path/to/code-rag/crates/code-rag-mcp/skills/code-rag.md .claude/skills/
-
-# 3. Register the MCP server with Claude Code. Write .mcp.json in the repo:
-cat > .mcp.json <<'JSON'
-{
-  "mcpServers": {
-    "code-rag": {
-      "command": "code-rag-mcp",
-      "args": [
-        "--db-path", "./.code-rag/index.lance",
-        "--repo-path", "."
-      ]
-    }
-  }
-}
-JSON
-```
-
-Launch Claude Code in the repo. Verify the server is connected via `/mcp` — you should see `code-rag` with 5 tools. Ask a conceptual question like "how is this codebase organised?" and the skill will route it to `code_rag_overview`.
+`cargo install code-rag-mcp` will work once the crate is published.
 
 ## After editing code
 
@@ -90,15 +64,20 @@ By default this runs an **incremental** ingest — only files whose `content_has
 
 ## CLI flags
 
+The exe has three modes — bare run for setup, the Claude-Code-spawn case for serve, and the internal `ingest` subcommand `code_rag_reindex` calls. The flags below are for the serve case.
+
 ```
 code-rag-mcp [OPTIONS]
 
-  --db-path <PATH>           Path to the LanceDB index (default: ./.code-rag/index.lance)
-  --repo-path <PATH>         Repo directory for code_rag_neighbors and reindex (default: .)
-  --code-raptor-bin <NAME>   Binary for code_rag_reindex to spawn (default: code-raptor)
-  --model <NAME>             LLM model name (unused — MCP never calls the LLM)
-  --no-rerank                Disable the cross-encoder reranker
+  --db-path <PATH>     Path to the LanceDB index (default: ./.code-rag-mcp/index.lance)
+  --repo-path <PATH>   Repo directory for code_rag_neighbors and reindex (default: .)
+  --workspace          Multi-project mode: code_rag_reindex omits --single-repo so each
+                       sibling subdirectory becomes its own project. Default is single-repo.
+  --model <NAME>       LLM model name (unused — MCP never calls the LLM)
+  --no-rerank          Disable the cross-encoder reranker
 ```
+
+The setup-mode YAML config has a `workspace: bool` field that flows into the generated `.mcp.json` as `--workspace`, so you don't normally hand-set this flag.
 
 ## Offline / bundled reranker model
 
@@ -113,7 +92,6 @@ The reranker auto-downloads `cross-encoder/ms-marco-MiniLM-L-6-v2` from HuggingF
 #   tokenizer_config.json  (optional)
 
 export CODE_RAG_RERANKER_DIR=/path/to/ms-marco-MiniLM-L-6-v2
-code-rag-mcp --db-path ./.code-rag/index.lance
 ```
 
 Or disable the reranker entirely with `--no-rerank` (recall drops ~5 points but startup is instant).
@@ -128,7 +106,7 @@ The ingestion pipeline uses tree-sitter parsers for Rust, Python, TypeScript, an
 
 **Reranker download hangs on first run** — large network fetch (~90 MB). Disable with `--no-rerank` or set `CODE_RAG_RERANKER_DIR`.
 
-**`code_rag_reindex` fails: "failed to spawn code-raptor"** — the binary isn't on PATH. Either add it, or pass `--code-raptor-bin /full/path/to/code-raptor`.
+**`code_rag_reindex` fails: "failed to spawn ..."** — the running MCP server can't find its own binary path. This usually only happens in unusual sandboxes (e.g. a container that's deleted the on-disk exe). Restart Claude Code so it spawns a fresh server.
 
 **`code_rag_neighbors` error: "chunk_id not found"** — neighbors currently supports code chunks only; README/folder/module-doc chunks aren't resolvable by chunk_id yet. Read the file directly.
 

@@ -60,15 +60,13 @@ const SCHEMA_VERSION_FILE: &str = "_schema_version";
 fn read_schema_version(db_path: &std::path::Path) -> Result<Option<u32>, StoreError> {
     let path = db_path.join(SCHEMA_VERSION_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(s) => s
-            .trim()
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|e| StoreError::SchemaMismatch(format!(
+        Ok(s) => s.trim().parse::<u32>().map(Some).map_err(|e| {
+            StoreError::SchemaMismatch(format!(
                 "{} is not a valid schema version: {}",
                 path.display(),
                 e
-            ))),
+            ))
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(StoreError::SchemaMismatch(format!(
             "could not read {}: {}",
@@ -219,7 +217,8 @@ impl VectorStore {
         let batch = module_doc_chunks_to_batch(chunks, embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(MODULE_DOC_TABLE, "chunk_id", batch).await?;
+        self.upsert_batch(MODULE_DOC_TABLE, "chunk_id", batch)
+            .await?;
         Ok(count)
     }
 
@@ -1039,7 +1038,8 @@ impl VectorStore {
 
         let batch = call_edges_to_batch(edges)?;
         let count = batch.num_rows();
-        self.upsert_batch(CALL_EDGES_TABLE, "edge_id", batch).await?;
+        self.upsert_batch(CALL_EDGES_TABLE, "edge_id", batch)
+            .await?;
         Ok(count)
     }
 

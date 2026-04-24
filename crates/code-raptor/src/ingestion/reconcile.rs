@@ -505,10 +505,7 @@ mod tests {
 
         let existing = ExistingFileIndex {
             folder_entries: HashMap::from([
-                (
-                    "repo/src".into(),
-                    ("hash_src".into(), "id-src".into()),
-                ),
+                ("repo/src".into(), ("hash_src".into(), "id-src".into())),
                 (
                     "repo/src/engine".into(),
                     ("hash_engine_OLD".into(), "id-engine-OLD".into()),
