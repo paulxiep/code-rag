@@ -53,6 +53,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install protoc
+        # lance-encoding (transitive LanceDB dep) needs protoc at build time.
+        # arduino/setup-protoc handles Linux/macOS/Windows uniformly.
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
