@@ -5,6 +5,20 @@ A RAG chatbot that answers questions about code repositories. Ingests all siblin
 - [Executive Summary](docs/executive_summary.md)
 - [Technical Summary](docs/technical_summary.md)
 
+## Use as MCP server with Claude Code
+
+The retrieval brain ships as `code-rag-mcp`, a single-binary MCP server you can drop into any of your own repos to give Claude Code intent-routed retrieval, call-graph traversal, and architecture overviews — no API keys, no cloud.
+
+Install is three steps, no terminal commands once the exe is on disk:
+
+1. **Download** the zip for your platform from the [GitHub Release page](https://github.com/paulxiep/code-rag/releases) and extract it. You get one binary plus a `code-rag-mcp.config.yaml` template.
+2. **Edit** the YAML — set `target_path` to your repo (or a parent folder with `workspace: true` for many sub-projects).
+3. **Run** the exe (double-click works). It writes `.claude/skills/code-rag.md`, `.mcp.json`, and a `.gitignore` entry into your target dir, then exits.
+
+Open Claude Code in the target dir. The bundled skill instructs the agent to run `code_rag_reindex mode=full` for the initial ingest automatically.
+
+Full walkthrough: [crates/code-rag-mcp/README.md](crates/code-rag-mcp/README.md). Release process: [docs/release.md](docs/release.md).
+
 ## Usage
 
 Place this repo alongside the projects you want to index:
@@ -60,6 +74,7 @@ To clean, run `sh clean_docker.sh`.
 | **A2** | 2026-04-17 | Folder-level embeddings — `FolderChunk` (5-line template, 118 chunks) shipped dark for A3 activation |
 | **A3** | 2026-04-17 | Collapsed-tree routing — folder arm activated for Overview/Implementation/Comparison (comparison 0.31→0.67 +36pp) |
 | **A4** | 2026-04-18 | File-level embeddings — `FileChunk` (4-line template, 247 chunks) + stratified relationship retrieval (`recall@pool` metric introduced) |
+| **MCP** | 2026-04-24 | Claude Code MCP server (`code-rag-mcp`) — five tools (`search`, `graph`, `overview`, `neighbors`, `reindex`) on rmcp 1.5; bundled Skill; single-binary install (download → edit `code-rag-mcp.config.yaml` → run exe); subsumes `code-raptor` via internal `ingest` subcommand; manually-triggered cross-platform release pipeline; agent-driven first ingest |
 
 ## Purpose
 

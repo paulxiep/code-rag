@@ -24,6 +24,9 @@ pub struct ChatResponse {
 pub struct SourceInfo {
     #[serde(rename = "type")]
     pub chunk_type: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub chunk_id: String,
     pub path: String,
     pub label: String,
     pub project: String,

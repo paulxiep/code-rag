@@ -186,6 +186,7 @@ pub fn to_retrieval_result(
 #[derive(Debug, Clone)]
 pub struct FlatChunk {
     pub chunk_type: String,
+    pub chunk_id: String,
     pub file_path: String,
     pub identifier: Option<String>,
     pub project: String,
@@ -197,67 +198,61 @@ impl RetrievalResult {
     /// Flatten all chunk types into a single sorted list.
     /// Single source of truth — survives new chunk types with only ONE modification point.
     pub fn flatten(&self) -> Vec<FlatChunk> {
-        let mut items = Vec::new();
-        for s in &self.code_chunks {
-            items.push(FlatChunk {
-                chunk_type: "code".into(),
-                file_path: s.chunk.file_path.clone(),
-                identifier: Some(s.chunk.identifier.clone()),
-                project: s.chunk.project_name.clone(),
-                relevance: s.score,
-                line: Some(s.chunk.start_line),
-            });
-        }
-        for s in &self.readme_chunks {
-            items.push(FlatChunk {
-                chunk_type: "readme".into(),
-                file_path: s.chunk.file_path.clone(),
-                identifier: None,
-                project: s.chunk.project_name.clone(),
-                relevance: s.score,
-                line: None,
-            });
-        }
-        for s in &self.crate_chunks {
-            items.push(FlatChunk {
-                chunk_type: "crate".into(),
-                file_path: s.chunk.crate_path.clone(),
-                identifier: Some(s.chunk.crate_name.clone()),
-                project: s.chunk.project_name.clone(),
-                relevance: s.score,
-                line: None,
-            });
-        }
-        for s in &self.module_doc_chunks {
-            items.push(FlatChunk {
-                chunk_type: "module_doc".into(),
-                file_path: s.chunk.file_path.clone(),
-                identifier: Some(s.chunk.module_name.clone()),
-                project: s.chunk.project_name.clone(),
-                relevance: s.score,
-                line: None,
-            });
-        }
-        for s in &self.folder_chunks {
-            items.push(FlatChunk {
-                chunk_type: "folder".into(),
-                file_path: s.chunk.folder_path.clone(),
-                identifier: None,
-                project: s.chunk.project_name.clone(),
-                relevance: s.score,
-                line: None,
-            });
-        }
-        for s in &self.file_chunks {
-            items.push(FlatChunk {
-                chunk_type: "file".into(),
-                file_path: s.chunk.file_path.clone(),
-                identifier: None,
-                project: s.chunk.project_name.clone(),
-                relevance: s.score,
-                line: None,
-            });
-        }
+        let mut items: Vec<FlatChunk> = Vec::new();
+        items.extend(self.code_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "code".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            file_path: s.chunk.file_path.clone(),
+            identifier: Some(s.chunk.identifier.clone()),
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: Some(s.chunk.start_line),
+        }));
+        items.extend(self.readme_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "readme".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            file_path: s.chunk.file_path.clone(),
+            identifier: None,
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: None,
+        }));
+        items.extend(self.crate_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "crate".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            file_path: s.chunk.crate_path.clone(),
+            identifier: Some(s.chunk.crate_name.clone()),
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: None,
+        }));
+        items.extend(self.module_doc_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "module_doc".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            file_path: s.chunk.file_path.clone(),
+            identifier: Some(s.chunk.module_name.clone()),
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: None,
+        }));
+        items.extend(self.folder_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "folder".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            file_path: s.chunk.folder_path.clone(),
+            identifier: None,
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: None,
+        }));
+        items.extend(self.file_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "file".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            file_path: s.chunk.file_path.clone(),
+            identifier: None,
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: None,
+        }));
         items.sort_by(|a, b| {
             b.relevance
                 .partial_cmp(&a.relevance)

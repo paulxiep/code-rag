@@ -1,0 +1,208 @@
+# Manually-triggered release builder. Click "Run workflow" in the Actions
+# tab, type the version (e.g. v0.1.0), and the workflow builds the single
+# `code-rag-mcp` binary for Linux/macOS/Windows, zips it alongside a
+# config.yaml template, and creates a draft GitHub Release with the zips
+# attached. Trigger only — no auto-release on tag push or commit.
+#
+# Per-release prereqs (do these BEFORE clicking Run):
+#   1. Bump version in crates/code-rag-mcp/Cargo.toml.
+#   2. Update development_log.md.
+#   3. Commit + push to the default branch.
+#   4. Trigger this workflow with the new version string.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v0.1.0). Must match the version in Cargo.toml."
+        required: true
+        type: string
+      draft:
+        description: "Create as draft (recommended; you publish after smoke-testing)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build code-rag-mcp
+        run: cargo build --release --target ${{ matrix.target }} -p code-rag-mcp
+
+      - name: Stage release artifacts
+        shell: bash
+        run: |
+          STAGE="staging/code-rag-mcp-${{ inputs.version }}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/code-rag-mcp${{ matrix.ext }}" "$STAGE/"
+          [ -f LICENSE ] && cp LICENSE "$STAGE/" || true
+
+          # Ship the YAML config template alongside the exe so the user only
+          # has to edit one file before running. The exe writes this same
+          # template on its first run if missing, but bundling avoids a
+          # confusing first-run "exited without doing anything" experience.
+          cat > "$STAGE/code-rag-mcp.config.yaml" <<'YAML'
+          # code-rag-mcp setup config — edit this file, then run code-rag-mcp again.
+          #
+          # When you run code-rag-mcp.exe with no arguments (e.g. by double-clicking),
+          # it reads this file from the same directory as the exe and sets up the
+          # directory at `target_path` for use with Claude Code:
+          #   - writes `.claude/skills/code-rag.md`
+          #   - registers `code-rag` in `.mcp.json` (merging with any existing servers)
+          #   - appends `.code-rag-mcp/` to `.gitignore`
+          # The first ingest happens later, automatically — when you open Claude Code
+          # in the target directory and ask any conceptual question.
+
+          # REQUIRED. Path to the repo (or umbrella folder) you want indexed.
+          # Examples:
+          #   target_path: .                              # the dir the exe is in
+          #   target_path: C:/Users/me/projects/my-repo
+          #   target_path: /home/me/projects/my-repo
+          target_path: .
+
+          # OPTIONAL. Set to true if `target_path` is a parent folder containing many
+          # sibling sub-projects (each becomes its own project in the index). Default
+          # false (single repo).
+          workspace: false
+          YAML
+
+          cat > "$STAGE/README.txt" <<EOF
+          code-rag-mcp ${{ inputs.version }} (${{ matrix.target }})
+
+          This archive contains:
+            - code-rag-mcp${{ matrix.ext }}        MCP server + setup + ingest in one binary
+            - code-rag-mcp.config.yaml             Setup config — EDIT BEFORE RUNNING
+            - LICENSE                              Apache-2.0
+
+          INSTALL (3 steps, no terminal needed once the exe is in place)
+            1. Extract this archive into a directory that stays put.
+            2. Open code-rag-mcp.config.yaml in any editor and set
+               \`target_path\` to your repo. Set \`workspace: true\` if it's a
+               parent folder containing many sub-projects.
+            3. Double-click code-rag-mcp${{ matrix.ext }}. It writes
+               .claude/skills/code-rag.md, .mcp.json, and a .gitignore entry
+               into your target dir, then exits.
+            Then open Claude Code in the target dir. The first conceptual
+            question triggers the agent to run \`code_rag_reindex mode=full\`
+            for the initial ingest automatically.
+
+          (For Claude Code's .mcp.json to find the binary, the exe also has to
+          be on PATH — or use the absolute path in the generated .mcp.json.)
+
+          FIRST-RUN NOTES
+            - On the first \`code_rag_reindex\` call, the binary downloads
+              cross-encoder/ms-marco-MiniLM-L-6-v2 (~90 MB) from HuggingFace
+              and caches it under your home dir.
+            - Offline / corporate proxy: pre-download the model and set
+              CODE_RAG_RERANKER_DIR, or run with --no-rerank to skip reranking.
+          EOF
+
+      - name: Zip
+        shell: bash
+        run: |
+          cd staging
+          NAME="code-rag-mcp-${{ inputs.version }}-${{ matrix.target }}"
+          if command -v zip >/dev/null 2>&1; then
+            zip -r "../$NAME.zip" "$NAME"
+          else
+            # Windows runner: use PowerShell as fallback
+            pwsh -Command "Compress-Archive -Path '$NAME' -DestinationPath '../$NAME.zip' -Force"
+          fi
+          cd ..
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$NAME.zip" > "$NAME.zip.sha256"
+          else
+            shasum -a 256 "$NAME.zip" > "$NAME.zip.sha256"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-rag-mcp-${{ inputs.version }}-${{ matrix.target }}
+          path: |
+            code-rag-mcp-${{ inputs.version }}-${{ matrix.target }}.zip
+            code-rag-mcp-${{ inputs.version }}-${{ matrix.target }}.zip.sha256
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build release notes
+        run: |
+          {
+            echo "## code-rag-mcp ${{ inputs.version }}"
+            echo
+            echo "Single-binary MCP server + Claude Code skill for local intent-routed code retrieval."
+            echo
+            echo "### Install"
+            echo
+            echo "1. Download the zip for your platform from the assets below."
+            echo "2. Extract somewhere persistent, and put \`code-rag-mcp\` on your PATH so Claude Code can spawn it from \`.mcp.json\`."
+            echo "3. Edit \`code-rag-mcp.config.yaml\` next to the exe — set \`target_path\` to your repo, plus \`workspace: true\` if it's a parent folder of sub-projects."
+            echo "4. Run the exe (double-click works). It writes the Claude Code skill + \`.mcp.json\` + \`.gitignore\` entry into your target dir, then exits."
+            echo "5. Open Claude Code in the target dir. The skill instructs the agent to run \`code_rag_reindex mode=full\` for the initial ingest automatically."
+            echo
+            echo "### Checksums"
+            echo
+            echo '```'
+            for f in artifacts/*.sha256; do
+              cat "$f"
+            done
+            echo '```'
+          } > release-notes.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          body_path: release-notes.md
+          draft: ${{ inputs.draft }}
+          files: |
+            artifacts/*.zip
+            artifacts/*.sha256

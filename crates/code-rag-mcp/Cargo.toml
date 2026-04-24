@@ -1,0 +1,51 @@
+[package]
+name = "code-rag-mcp"
+version = "0.1.0"
+authors = ["paulxiep"]
+edition = "2024"
+description = "MCP server exposing local intent-routed semantic + graph retrieval over a single repository to Claude Code"
+license = "Apache-2.0"
+readme = "README.md"
+# Bundle the shipped Claude Code Skill file so `cargo publish` includes it and
+# external users can point at the skill via the crate's checkout.
+include = ["src/**/*", "skills/**/*", "README.md", "Cargo.toml"]
+
+[[bin]]
+name = "code-rag-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# MCP SDK — official, features enable stdio server + tool macros
+rmcp = { version = "1.5", features = ["server", "macros", "transport-io", "schemars"] }
+
+# Retrieval brain — reuse the chat server's AppState + retriever wrapper rather
+# than duplicating 746 lines of orchestration. Future cleanup: extract the
+# shared native retrieve() into its own library crate so the MCP crate doesn't
+# transitively depend on the chat server's HTTP plumbing.
+code-rag-chat = { path = "../.." }
+code-rag-engine = { path = "../code-rag-engine" }
+code-rag-store = { path = "../code-rag-store" }
+code-rag-types = { path = "../code-rag-types" }
+# code-raptor's `ingest_repo` lib entrypoint — lets the MCP do everything
+# code-raptor.exe used to do without shipping a second binary.
+code-raptor = { path = "../code-raptor" }
+
+# Async runtime
+tokio = { version = "1.48", features = ["full"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization — rmcp tool params require JsonSchema
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+schemars = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging — MUST route to stderr because stdout is the MCP protocol channel
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

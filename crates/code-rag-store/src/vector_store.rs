@@ -41,23 +41,102 @@ pub const FOLDER_TABLE: &str = "folder_chunks";
 /// A4: file-level summary chunks.
 pub const FILE_TABLE: &str = "file_chunks";
 
+/// Bump when the Arrow schema of any persisted table changes (column added,
+/// removed, renamed, or retyped). The bump invalidates existing indexes —
+/// `VectorStore::new()` refuses to open a DB whose `_schema_version` sidecar
+/// disagrees with this constant. Recovery is `rm -rf <db_path>` followed by
+/// a fresh `code-raptor ingest --full`.
+///
+/// Distinct from `code_rag_types::DERIVATION_VERSION`: derivation governs
+/// chunk-content hashing (forces re-embed of unchanged source), schema
+/// governs the on-disk column layout (forces a wipe).
+pub const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION_FILE: &str = "_schema_version";
+
+/// Read the on-disk schema version from `<db_path>/_schema_version`. Returns
+/// `Ok(None)` if the sidecar doesn't exist (fresh DB or pre-sentinel DB);
+/// `Ok(Some(N))` otherwise. Garbage in the file → `SchemaMismatch` so we
+/// fail closed.
+fn read_schema_version(db_path: &std::path::Path) -> Result<Option<u32>, StoreError> {
+    let path = db_path.join(SCHEMA_VERSION_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s.trim().parse::<u32>().map(Some).map_err(|e| {
+            StoreError::SchemaMismatch(format!(
+                "{} is not a valid schema version: {}",
+                path.display(),
+                e
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(StoreError::SchemaMismatch(format!(
+            "could not read {}: {}",
+            path.display(),
+            e
+        ))),
+    }
+}
+
+/// Write the current `SCHEMA_VERSION` sidecar. Idempotent — no-op if the
+/// file already exists with the matching value.
+fn write_schema_version(db_path: &std::path::Path) -> Result<(), StoreError> {
+    if matches!(read_schema_version(db_path)?, Some(v) if v == SCHEMA_VERSION) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(db_path).ok();
+    let path = db_path.join(SCHEMA_VERSION_FILE);
+    std::fs::write(&path, SCHEMA_VERSION.to_string()).map_err(|e| {
+        StoreError::SchemaMismatch(format!("could not write {}: {}", path.display(), e))
+    })
+}
+
+/// Refuse to open a DB whose on-disk schema disagrees with this binary.
+/// Skips the check on a fresh / pre-sentinel DB (returns Ok); the first
+/// successful table creation will write the sentinel.
+///
+/// On mismatch the error message tells the user how to recover (wipe + full
+/// re-ingest). We deliberately don't auto-migrate — a schema bump means a
+/// column changed, so existing rows are unreadable as-is.
+fn check_schema_version_compat(db_path: &std::path::Path) -> Result<(), StoreError> {
+    match read_schema_version(db_path)? {
+        None => Ok(()), // fresh or legacy DB; first write stamps the sentinel
+        Some(v) if v == SCHEMA_VERSION => Ok(()),
+        Some(v) => Err(StoreError::SchemaMismatch(format!(
+            "schema v{} on disk at {}, this binary expects v{}. Recover with: \
+             rm -rf {} && code-raptor ingest <repo> --db-path {} --single-repo --full",
+            v,
+            db_path.display(),
+            SCHEMA_VERSION,
+            db_path.display(),
+            db_path.display()
+        ))),
+    }
+}
+
 /// LanceDB-backed vector store for code and readme chunks.
 pub struct VectorStore {
     conn: Connection,
     dimension: usize,
+    db_path: std::path::PathBuf,
 }
 
 impl VectorStore {
     /// Connect to LanceDB at the given path (creates if not exists).
+    ///
+    /// If the directory already contains data, verifies the on-disk schema
+    /// version matches `SCHEMA_VERSION` and refuses to open on mismatch.
+    /// First write to a fresh DB will write the sentinel.
     pub async fn new(db_path: &str, embedding_dimension: usize) -> Result<Self, StoreError> {
         // Ensure parent directory exists (important for Docker bind mounts)
         if let Some(parent) = std::path::Path::new(db_path).parent() {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = connect(db_path).execute().await?;
+        let db_path_buf = std::path::PathBuf::from(db_path);
+        check_schema_version_compat(&db_path_buf)?;
         Ok(Self {
             conn,
             dimension: embedding_dimension,
+            db_path: db_path_buf,
         })
     }
 
@@ -87,7 +166,7 @@ impl VectorStore {
         let batch = code_chunks_to_batch(chunks, embeddings, signature_embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(CODE_TABLE, batch).await?;
+        self.upsert_batch(CODE_TABLE, "chunk_id", batch).await?;
         Ok(count)
     }
 
@@ -104,7 +183,7 @@ impl VectorStore {
         let batch = readme_chunks_to_batch(chunks, embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(README_TABLE, batch).await?;
+        self.upsert_batch(README_TABLE, "chunk_id", batch).await?;
         Ok(count)
     }
 
@@ -121,7 +200,7 @@ impl VectorStore {
         let batch = crate_chunks_to_batch(chunks, embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(CRATE_TABLE, batch).await?;
+        self.upsert_batch(CRATE_TABLE, "chunk_id", batch).await?;
         Ok(count)
     }
 
@@ -138,7 +217,8 @@ impl VectorStore {
         let batch = module_doc_chunks_to_batch(chunks, embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(MODULE_DOC_TABLE, batch).await?;
+        self.upsert_batch(MODULE_DOC_TABLE, "chunk_id", batch)
+            .await?;
         Ok(count)
     }
 
@@ -156,7 +236,7 @@ impl VectorStore {
         let batch = folder_chunks_to_batch(chunks, embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(FOLDER_TABLE, batch).await?;
+        self.upsert_batch(FOLDER_TABLE, "chunk_id", batch).await?;
         Ok(count)
     }
 
@@ -174,7 +254,7 @@ impl VectorStore {
         let batch = file_chunks_to_batch(chunks, embeddings, self.dimension)?;
         let count = batch.num_rows();
 
-        self.upsert_batch(FILE_TABLE, batch).await?;
+        self.upsert_batch(FILE_TABLE, "chunk_id", batch).await?;
         Ok(count)
     }
 
@@ -896,14 +976,30 @@ impl VectorStore {
     // Internal helpers
     // ========================================================================
 
-    async fn upsert_batch(&self, table_name: &str, batch: RecordBatch) -> Result<(), StoreError> {
+    /// Upsert a record batch into `table_name`, merging on `key_column`.
+    /// On an existing table, rows whose `key_column` value matches an
+    /// existing row are updated in place; new keys are inserted. This is
+    /// the actual upsert semantics the public `upsert_*` API names imply
+    /// — the previous implementation called plain `table.add()`, which
+    /// silently appended duplicate rows whenever a chunk_id collided
+    /// (very common because chunk_id is content-deterministic).
+    async fn upsert_batch(
+        &self,
+        table_name: &str,
+        key_column: &str,
+        batch: RecordBatch,
+    ) -> Result<(), StoreError> {
         let schema = batch.schema();
 
         // Try to open existing table, create if not exists
         match self.conn.open_table(table_name).execute().await {
             Ok(table) => {
                 let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-                table.add(batches).execute().await?;
+                let mut merge = table.merge_insert(&[key_column]);
+                merge
+                    .when_matched_update_all(None)
+                    .when_not_matched_insert_all();
+                merge.execute(Box::new(batches)).await?;
             }
             Err(_) => {
                 let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
@@ -911,6 +1007,10 @@ impl VectorStore {
                     .create_table(table_name, batches)
                     .execute()
                     .await?;
+                // Stamp the schema version on first successful table
+                // creation. Idempotent — `write_schema_version` is a no-op
+                // if the sidecar already exists with the same value.
+                write_schema_version(&self.db_path)?;
             }
         }
 
@@ -938,7 +1038,8 @@ impl VectorStore {
 
         let batch = call_edges_to_batch(edges)?;
         let count = batch.num_rows();
-        self.upsert_batch(CALL_EDGES_TABLE, batch).await?;
+        self.upsert_batch(CALL_EDGES_TABLE, "edge_id", batch)
+            .await?;
         Ok(count)
     }
 
@@ -2468,6 +2569,63 @@ fn extract_module_doc_chunks_from_batch_with_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Schema-version sentinel -------------------------------------------
+
+    #[test]
+    fn schema_version_check_passes_on_fresh_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No sidecar yet → compat check is a no-op.
+        check_schema_version_compat(tmp.path()).expect("fresh dir must be accepted");
+    }
+
+    #[test]
+    fn schema_version_check_passes_when_sidecar_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_schema_version(tmp.path()).expect("write sidecar");
+        check_schema_version_compat(tmp.path()).expect("matching sidecar must be accepted");
+    }
+
+    #[test]
+    fn schema_version_check_rejects_older_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(SCHEMA_VERSION_FILE), "0").unwrap();
+        let err = check_schema_version_compat(tmp.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("schema v0") && msg.contains(&format!("v{}", SCHEMA_VERSION)),
+            "error should mention both versions; got: {msg}"
+        );
+        assert!(
+            msg.contains("rm -rf") && msg.contains("--full"),
+            "error should give the recovery command; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn schema_version_check_rejects_garbage_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(SCHEMA_VERSION_FILE), "not-a-number").unwrap();
+        let err = check_schema_version_compat(tmp.path()).unwrap_err();
+        assert!(matches!(err, StoreError::SchemaMismatch(_)));
+    }
+
+    #[test]
+    fn write_schema_version_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_schema_version(tmp.path()).unwrap();
+        let mtime1 = std::fs::metadata(tmp.path().join(SCHEMA_VERSION_FILE))
+            .unwrap()
+            .modified()
+            .unwrap();
+        // Second call with the matching version must be a no-op (no rewrite).
+        write_schema_version(tmp.path()).unwrap();
+        let mtime2 = std::fs::metadata(tmp.path().join(SCHEMA_VERSION_FILE))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(mtime1, mtime2, "second write must not touch the file");
+    }
 
     fn sample_code_chunk() -> CodeChunk {
         CodeChunk {

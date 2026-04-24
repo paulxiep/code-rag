@@ -13,7 +13,8 @@ pub use reconcile::{
 
 use self::parser::{CodeAnalyzer, parse_cargo_toml};
 use code_rag_types::{
-    CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk, content_hash, deterministic_chunk_id,
+    CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk, code_chunk_file_hash, content_hash,
+    deterministic_chunk_id,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -226,7 +227,16 @@ fn process_code_file(
 
     let path_str = normalize_path(entry.path(), repo_root);
     let project_name = resolve_project_name(entry.path(), repo_root, project_name_override);
-    let file_hash = content_hash(&content);
+    // Mix per-chunk signature/docstring + DERIVATION_VERSION into the file
+    // hash so reconcile re-fires when extraction logic or downstream
+    // derivation (searchable_text, signature_vector) changes — not just
+    // when source bytes change.
+    let file_hash = code_chunk_file_hash(
+        &content,
+        pairs
+            .iter()
+            .map(|(c, _)| (c.signature.as_deref(), c.docstring.as_deref())),
+    );
 
     // C1: Extract file-level imports for edge resolution
     let file_imports = {

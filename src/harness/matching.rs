@@ -141,6 +141,7 @@ mod tests {
     ) -> FlatChunk {
         FlatChunk {
             chunk_type: chunk_type.to_string(),
+            chunk_id: format!("test-{}", file_path),
             file_path: file_path.to_string(),
             identifier: identifier.map(|s| s.to_string()),
             project: project.to_string(),

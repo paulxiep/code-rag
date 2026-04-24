@@ -9,6 +9,7 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **Portfolio showcase**: Demonstrates Rust, RAG architecture, and chatbot development skills
 - **Meta-project**: Can answer questions about itself and other portfolio projects
 - **Code understanding**: Semantic search over function-level code chunks
+- **Releasable dev tool (MCP server)**: The retrieval brain ships as `code-rag-mcp`, a single-binary Model Context Protocol server any developer can install in three steps (download exe → edit one YAML → run exe) to give Claude Code intent-routed retrieval, call-graph traversal, and architecture overviews — no terminal commands, no API keys.
 
 ## Key Features
 
@@ -38,6 +39,7 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **Web UI**: Leptos WASM SPA (Rust compiled to WebAssembly)
 - **GitHub Pages demo**: Full RAG pipeline runs in-browser via `standalone` feature — no backend needed
 - **Shared engine**: `code-rag-engine` crate compiles to both native and wasm32
+- **Claude Code MCP server**: Five tools (`code_rag_search`, `code_rag_graph`, `code_rag_overview`, `code_rag_neighbors`, `code_rag_reindex`) plus a bundled Claude Code skill that routes queries between built-in Grep/Read and the MCP tools. Single-binary install: download `code-rag-mcp` from the GitHub Release, edit a YAML config (`target_path` + `workspace: true|false`), run the exe — it writes the skill + `.mcp.json` + `.gitignore` entry into the target dir, then exits. The first ingest happens transparently when the agent makes its first MCP call. Manually-triggered release workflow ships matrix-built binaries for Linux / macOS / Windows; the embedded `ingest` subcommand subsumes the standalone index-builder so end users only need one binary.
 
 ## Quick Start
 

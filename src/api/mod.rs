@@ -3,6 +3,7 @@ mod error;
 mod handlers;
 mod state;
 
+pub use dto::{SourceInfo, build_sources};
 pub use state::AppState;
 
 use axum::{

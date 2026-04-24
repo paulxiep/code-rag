@@ -5,12 +5,14 @@
 
 pub mod edge_resolution;
 pub mod ingestion;
+pub mod orchestrate;
 
 pub use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
 pub use ingestion::{
     CallsMap, DEFAULT_EMBEDDING_MODEL, DeletionsByTable, ExistingFileIndex, ImportsMap,
     IngestionResult, IngestionStats, ReconcileResult, reconcile, run_ingestion,
 };
+pub use orchestrate::{IngestOpts, ingest_repo};
 
 // Re-export store functionality for convenience
 pub use code_rag_store::{
