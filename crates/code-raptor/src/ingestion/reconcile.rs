@@ -14,6 +14,10 @@ pub struct ExistingFileIndex {
     pub crate_entries: HashMap<String, (String, String)>,
     /// file_path → (content_hash, chunk_id) for module_doc_chunks
     pub module_doc_files: HashMap<String, (String, String)>,
+    /// folder_path → (content_hash, chunk_id) for folder_chunks (A2)
+    pub folder_entries: HashMap<String, (String, String)>,
+    /// file_path → (content_hash, chunk_id) for file_chunks (A4)
+    pub file_entries: HashMap<String, (String, String)>,
 }
 
 /// Output of reconcile() — what to insert and what to delete.
@@ -31,6 +35,8 @@ pub struct DeletionsByTable {
     pub readme_chunk_ids: Vec<String>,
     pub crate_chunk_ids: Vec<String>,
     pub module_doc_chunk_ids: Vec<String>,
+    pub folder_chunk_ids: Vec<String>,
+    pub file_chunk_ids: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -55,6 +61,7 @@ pub fn reconcile(current: &IngestionResult, existing: &ExistingFileIndex) -> Rec
         &current.code_chunks,
         |c| &c.file_path,
         |c| &c.content_hash,
+        |c| &c.chunk_id,
         &existing.code_files,
         &mut to_insert.code_chunks,
         &mut to_delete.code_chunk_ids,
@@ -66,6 +73,7 @@ pub fn reconcile(current: &IngestionResult, existing: &ExistingFileIndex) -> Rec
         &current.readme_chunks,
         |c| &c.file_path,
         |c| &c.content_hash,
+        |c| &c.chunk_id,
         &existing.readme_files,
         &mut to_insert.readme_chunks,
         &mut to_delete.readme_chunk_ids,
@@ -77,6 +85,7 @@ pub fn reconcile(current: &IngestionResult, existing: &ExistingFileIndex) -> Rec
         &current.module_doc_chunks,
         |c| &c.file_path,
         |c| &c.content_hash,
+        |c| &c.chunk_id,
         &existing.module_doc_files,
         &mut to_insert.module_doc_chunks,
         &mut to_delete.module_doc_chunk_ids,
@@ -92,14 +101,42 @@ pub fn reconcile(current: &IngestionResult, existing: &ExistingFileIndex) -> Rec
         &mut stats,
     );
 
+    // Folder summary chunks (A2): 1:1 by folder_path
+    reconcile_single_per_file(
+        &current.folder_chunks,
+        |c| &c.folder_path,
+        |c| &c.content_hash,
+        |c| &c.chunk_id,
+        &existing.folder_entries,
+        &mut to_insert.folder_chunks,
+        &mut to_delete.folder_chunk_ids,
+        &mut stats,
+    );
+
+    // File summary chunks (A4): 1:1 by file_path
+    reconcile_single_per_file(
+        &current.file_chunks,
+        |c| &c.file_path,
+        |c| &c.content_hash,
+        |c| &c.chunk_id,
+        &existing.file_entries,
+        &mut to_insert.file_chunks,
+        &mut to_delete.file_chunk_ids,
+        &mut stats,
+    );
+
     stats.chunks_to_insert = to_insert.code_chunks.len()
         + to_insert.readme_chunks.len()
         + to_insert.crate_chunks.len()
-        + to_insert.module_doc_chunks.len();
+        + to_insert.module_doc_chunks.len()
+        + to_insert.folder_chunks.len()
+        + to_insert.file_chunks.len();
     stats.chunks_to_delete = to_delete.code_chunk_ids.len()
         + to_delete.readme_chunk_ids.len()
         + to_delete.crate_chunk_ids.len()
-        + to_delete.module_doc_chunk_ids.len();
+        + to_delete.module_doc_chunk_ids.len()
+        + to_delete.folder_chunk_ids.len()
+        + to_delete.file_chunk_ids.len();
 
     ReconcileResult {
         to_insert,
@@ -110,10 +147,17 @@ pub fn reconcile(current: &IngestionResult, existing: &ExistingFileIndex) -> Rec
 
 /// Reconcile chunks grouped by file_path (many chunks per file, e.g. CodeChunk).
 /// Compares file-level content hash. If hash matches → skip all. If differs → nuke + replace.
+///
+/// `get_id` is used to subtract new chunk IDs from the delete list when a
+/// changed file's new chunks share IDs with old chunks (deterministic IDs:
+/// unchanged function bodies → same chunk_id). Without this subtraction, the
+/// orchestrator's insert-then-delete order would clobber the just-upserted
+/// row whenever a chunk_id collided with an old one.
 fn reconcile_by_file<T: Clone>(
     current_chunks: &[T],
     get_path: impl Fn(&T) -> &str,
     get_hash: impl Fn(&T) -> &str,
+    get_id: impl Fn(&T) -> &str,
     existing: &HashMap<String, (String, Vec<String>)>,
     insert_buf: &mut Vec<T>,
     delete_buf: &mut Vec<String>,
@@ -141,9 +185,19 @@ fn reconcile_by_file<T: Clone>(
                 if current_hash == stored_hash {
                     stats.files_unchanged += 1;
                 } else {
-                    // Changed: delete old chunks, insert new
+                    // Changed: delete old chunks not present in the new set,
+                    // upsert all new chunks. Subtracting new IDs from the
+                    // delete set protects chunks whose code body is unchanged
+                    // (same deterministic chunk_id) from being clobbered by
+                    // the insert-then-delete order in run_incremental_ingestion.
                     stats.files_changed += 1;
-                    delete_buf.extend(old_ids.iter().cloned());
+                    let new_ids: HashSet<&str> = chunks.iter().map(|c| get_id(c)).collect();
+                    delete_buf.extend(
+                        old_ids
+                            .iter()
+                            .filter(|id| !new_ids.contains(id.as_str()))
+                            .cloned(),
+                    );
                     insert_buf.extend(chunks.iter().map(|c| (*c).clone()));
                 }
             }
@@ -164,11 +218,21 @@ fn reconcile_by_file<T: Clone>(
     }
 }
 
-/// Reconcile chunks with 1:1 file mapping (e.g. ModuleDocChunk — one chunk per file).
+/// Reconcile chunks with 1:1 file mapping (e.g. ModuleDocChunk, FolderChunk,
+/// FileChunk — one chunk per path).
+///
+/// `get_id` lets the caller skip deleting the old chunk when the new chunk's
+/// deterministic id matches it (e.g. a CodeChunk for an unchanged function in
+/// a changed file): without this guard the orchestrator's insert-then-delete
+/// order would clobber the just-upserted row. For ModuleDocChunk in
+/// particular this is the latent case where a file's `//!` doc is unchanged
+/// but the surrounding source bytes shifted (chunk_id is derived from
+/// doc_content, content_hash from full file).
 fn reconcile_single_per_file<T: Clone>(
     current_chunks: &[T],
     get_path: impl Fn(&T) -> &str,
     get_hash: impl Fn(&T) -> &str,
+    get_id: impl Fn(&T) -> &str,
     existing: &HashMap<String, (String, String)>,
     insert_buf: &mut Vec<T>,
     delete_buf: &mut Vec<String>,
@@ -186,7 +250,9 @@ fn reconcile_single_per_file<T: Clone>(
                     stats.files_unchanged += 1;
                 } else {
                     stats.files_changed += 1;
-                    delete_buf.push(old_id.clone());
+                    if get_id(chunk) != old_id.as_str() {
+                        delete_buf.push(old_id.clone());
+                    }
                     insert_buf.push(chunk.clone());
                 }
             }
@@ -206,6 +272,9 @@ fn reconcile_single_per_file<T: Clone>(
 }
 
 /// Reconcile crate chunks by crate_name (not file_path).
+/// Same id-subtract guard as `reconcile_single_per_file`: when a crate's
+/// metadata changes but the deterministic chunk_id happens to coincide with
+/// the stored one, skip the delete so the upsert isn't clobbered.
 fn reconcile_crates(
     current_chunks: &[code_rag_types::CrateChunk],
     existing: &HashMap<String, (String, String)>,
@@ -224,7 +293,9 @@ fn reconcile_crates(
                     stats.files_unchanged += 1;
                 } else {
                     stats.files_changed += 1;
-                    delete_buf.push(old_id.clone());
+                    if chunk.chunk_id != *old_id {
+                        delete_buf.push(old_id.clone());
+                    }
                     insert_buf.push(chunk.clone());
                 }
             }
@@ -246,7 +317,9 @@ fn reconcile_crates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk, new_chunk_id};
+    use code_rag_types::{
+        CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk, new_chunk_id,
+    };
 
     const MODEL: &str = "BGESmallENV15_384";
 
@@ -286,6 +359,37 @@ mod tests {
             dependencies: vec![],
             project_name: "test".into(),
             chunk_id: new_chunk_id(),
+            content_hash: hash.into(),
+            embedding_model_version: MODEL.into(),
+        }
+    }
+
+    fn folder_chunk(folder: &str, id: &str, hash: &str) -> FolderChunk {
+        FolderChunk {
+            folder_path: folder.into(),
+            project_name: "test".into(),
+            file_count: 0,
+            languages: vec![],
+            key_types: vec![],
+            key_functions: vec![],
+            subfolders: vec![],
+            summary_text: format!("Folder: {}", folder),
+            chunk_id: id.into(),
+            content_hash: hash.into(),
+            embedding_model_version: MODEL.into(),
+        }
+    }
+
+    fn file_chunk(file: &str, id: &str, hash: &str) -> FileChunk {
+        FileChunk {
+            file_path: file.into(),
+            project_name: "test".into(),
+            language: "rust".into(),
+            exports: vec![],
+            imports: vec![],
+            purpose: None,
+            summary_text: format!("File: {}", file),
+            chunk_id: id.into(),
             content_hash: hash.into(),
             embedding_model_version: MODEL.into(),
         }
@@ -331,6 +435,8 @@ mod tests {
                 "src/lib.rs".into(),
                 ("hash_m".into(), "old-m".into()),
             )]),
+            folder_entries: HashMap::default(),
+            file_entries: HashMap::default(),
         };
 
         let result = reconcile(&current, &existing);
@@ -343,6 +449,117 @@ mod tests {
         assert_eq!(result.stats.files_unchanged, 4); // 1 code file + 1 readme + 1 crate + 1 module_doc
         assert_eq!(result.stats.chunks_to_insert, 0);
         assert_eq!(result.stats.chunks_to_delete, 0);
+    }
+
+    #[test]
+    fn test_reconcile_changed_file_does_not_clobber_unchanged_chunks() {
+        // Regression: chunk_id is deterministic from (path, code_content),
+        // so unchanged function bodies in a changed file produce the same
+        // chunk_id as their existing DB row. The orchestrator runs insert
+        // before delete; before this fix, the delete pass clobbered the
+        // just-upserted unchanged chunks because their IDs were still in
+        // the old_ids list. Verify the unchanged-ID is excluded from the
+        // delete buffer.
+        let mut keep = code_chunk("src/lib.rs", "kept", "hash_NEW");
+        keep.chunk_id = "stable-id-kept".into();
+        let mut new_one = code_chunk("src/lib.rs", "added", "hash_NEW");
+        new_one.chunk_id = "fresh-id-added".into();
+
+        let current = IngestionResult {
+            code_chunks: vec![keep, new_one],
+            ..Default::default()
+        };
+
+        let existing = ExistingFileIndex {
+            code_files: HashMap::from([(
+                "src/lib.rs".into(),
+                (
+                    "hash_OLD".into(),
+                    vec!["stable-id-kept".into(), "old-id-removed".into()],
+                ),
+            )]),
+            ..Default::default()
+        };
+
+        let result = reconcile(&current, &existing);
+
+        assert_eq!(result.to_insert.code_chunks.len(), 2);
+        // Only the genuinely-removed chunk gets deleted; the stable-id one
+        // stays because the upsert path will refresh it in place.
+        assert_eq!(result.to_delete.code_chunk_ids, vec!["old-id-removed"]);
+        assert_eq!(result.stats.files_changed, 1);
+    }
+
+    #[test]
+    fn test_reconcile_folder_chunks_unchanged_changed_new_deleted() {
+        // Combined coverage: a folder unchanged, one changed, one new, one
+        // orphaned. Verifies the FolderChunk path through reconcile().
+        let current = IngestionResult {
+            folder_chunks: vec![
+                folder_chunk("repo/src", "id-src", "hash_src"),
+                folder_chunk("repo/src/engine", "id-engine-NEW", "hash_engine_NEW"),
+                folder_chunk("repo/src/added", "id-added", "hash_added"),
+            ],
+            ..Default::default()
+        };
+
+        let existing = ExistingFileIndex {
+            folder_entries: HashMap::from([
+                (
+                    "repo/src".into(),
+                    ("hash_src".into(), "id-src".into()),
+                ),
+                (
+                    "repo/src/engine".into(),
+                    ("hash_engine_OLD".into(), "id-engine-OLD".into()),
+                ),
+                (
+                    "repo/src/orphan".into(),
+                    ("hash_orphan".into(), "id-orphan".into()),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let result = reconcile(&current, &existing);
+
+        // Inserts: changed (engine) + new (added) = 2; unchanged is skipped.
+        assert_eq!(result.to_insert.folder_chunks.len(), 2);
+        // Deletes: changed (id-engine-OLD, since new id differs) + orphan = 2.
+        let mut deletes = result.to_delete.folder_chunk_ids.clone();
+        deletes.sort();
+        assert_eq!(deletes, vec!["id-engine-OLD", "id-orphan"]);
+        // Stats roll-up.
+        assert_eq!(result.stats.files_unchanged, 1);
+        assert_eq!(result.stats.files_changed, 1);
+        assert_eq!(result.stats.files_new, 1);
+        assert_eq!(result.stats.files_deleted, 1);
+    }
+
+    #[test]
+    fn test_reconcile_file_chunk_changed_skips_self_delete_when_id_collides() {
+        // FileChunk's chunk_id is deterministic from (file_path, summary_text).
+        // If only the canonical metadata (content_hash input) changes but
+        // summary_text stays identical, chunk_id is unchanged. Make sure the
+        // delete pass doesn't clobber the just-upserted row.
+        let current = IngestionResult {
+            file_chunks: vec![file_chunk("repo/src/lib.rs", "stable-file-id", "hash_NEW")],
+            ..Default::default()
+        };
+
+        let existing = ExistingFileIndex {
+            file_entries: HashMap::from([(
+                "repo/src/lib.rs".into(),
+                ("hash_OLD".into(), "stable-file-id".into()),
+            )]),
+            ..Default::default()
+        };
+
+        let result = reconcile(&current, &existing);
+
+        assert_eq!(result.to_insert.file_chunks.len(), 1);
+        assert!(result.to_delete.file_chunk_ids.is_empty());
+        assert_eq!(result.stats.files_changed, 1);
     }
 
     #[test]

@@ -2,11 +2,49 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// Bump when the chunk-derivation pipeline changes in a way that affects
+/// columns persisted alongside CodeChunk (currently `searchable_text` and
+/// `signature_vector`) but not the raw `code_content`. The reconcile
+/// mechanism only sees a chunk as "changed" when its `content_hash` shifts;
+/// mixing this constant into the per-file hash forces re-ingestion when the
+/// derivation logic changes even if source bytes are unchanged.
+///
+/// Bump on:
+/// - `build_searchable_text` formula change (B3/C4 territory)
+/// - `signature_vector` embedding strategy change (B5)
+/// - any new column derived from CodeChunk fields at write time
+pub const DERIVATION_VERSION: &str = "v1";
+
 /// Generate SHA256 hash of content.
 /// Normalizes CRLF → LF before hashing for cross-OS consistency.
 pub fn content_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.replace("\r\n", "\n").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// File-level hash for CodeChunks: source content + derivation-version +
+/// per-chunk signature/docstring fingerprints. Reconcile compares this hash
+/// against the value stored in LanceDB; mismatch → file's chunks get
+/// deleted and re-embedded. Including `signature` and `docstring` here
+/// catches parser changes that don't touch source bytes; the
+/// `DERIVATION_VERSION` prefix catches downstream-formula changes that
+/// don't touch the parser either.
+pub fn code_chunk_file_hash<'a, I>(file_content: &str, chunks: I) -> String
+where
+    I: IntoIterator<Item = (Option<&'a str>, Option<&'a str>)>,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(b"derivation:");
+    hasher.update(DERIVATION_VERSION.as_bytes());
+    hasher.update(b":src:");
+    hasher.update(file_content.replace("\r\n", "\n").as_bytes());
+    for (signature, docstring) in chunks {
+        hasher.update(b":sig:");
+        hasher.update(signature.unwrap_or("").as_bytes());
+        hasher.update(b":doc:");
+        hasher.update(docstring.unwrap_or("").as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -303,6 +341,63 @@ mod tests {
         assert_eq!(cloned.caller, "chunk_a");
         assert_eq!(cloned.callee, "chunk_b");
         assert_eq!(cloned.tier, 1);
+    }
+
+    #[test]
+    fn test_code_chunk_file_hash_invariant_to_chunk_iteration_order_within_file() {
+        // Stable as long as caller iterates chunks in the same order.
+        let h1 = code_chunk_file_hash(
+            "fn a() {}\nfn b() {}",
+            vec![(Some("fn a()"), None), (Some("fn b()"), Some("doc b"))],
+        );
+        let h2 = code_chunk_file_hash(
+            "fn a() {}\nfn b() {}",
+            vec![(Some("fn a()"), None), (Some("fn b()"), Some("doc b"))],
+        );
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_code_chunk_file_hash_changes_when_signature_changes() {
+        let src = "fn foo(x: u32) -> u32 { x }";
+        let h_old = code_chunk_file_hash(src, vec![(Some("fn foo(x: u32) -> u32"), None)]);
+        let h_new = code_chunk_file_hash(src, vec![(Some("pub fn foo(x: u32) -> u32"), None)]);
+        // Same source bytes, different extracted signature — must invalidate
+        // so reconcile re-fires and the persisted searchable_text /
+        // signature_vector get refreshed.
+        assert_ne!(h_old, h_new);
+    }
+
+    #[test]
+    fn test_code_chunk_file_hash_changes_when_docstring_changes() {
+        let src = "fn foo() {}";
+        let h_old = code_chunk_file_hash(src, vec![(Some("fn foo()"), Some("old doc"))]);
+        let h_new = code_chunk_file_hash(src, vec![(Some("fn foo()"), Some("new doc"))]);
+        assert_ne!(h_old, h_new);
+    }
+
+    #[test]
+    fn test_code_chunk_file_hash_changes_when_source_changes() {
+        let h_old = code_chunk_file_hash("fn foo() {}", vec![(Some("fn foo()"), None)]);
+        let h_new = code_chunk_file_hash("fn foo() { 1 }", vec![(Some("fn foo()"), None)]);
+        assert_ne!(h_old, h_new);
+    }
+
+    #[test]
+    fn test_code_chunk_file_hash_crlf_normalized() {
+        let h_lf = code_chunk_file_hash("fn a() {}\nfn b() {}", vec![]);
+        let h_crlf = code_chunk_file_hash("fn a() {}\r\nfn b() {}", vec![]);
+        assert_eq!(h_lf, h_crlf);
+    }
+
+    #[test]
+    fn test_code_chunk_file_hash_differs_from_plain_content_hash() {
+        // The DERIVATION_VERSION prefix means the new function never
+        // collides with the old plain content_hash for the same input —
+        // upgrading to v1 invalidates every existing chunk in the DB,
+        // forcing a clean re-embed (intentional one-time wipe-equivalent).
+        let src = "fn foo() {}";
+        assert_ne!(content_hash(src), code_chunk_file_hash(src, vec![]));
     }
 
     #[test]

@@ -502,30 +502,38 @@ impl CodeRagServer {
     }
 
     #[tool(
-        description = "Full re-ingest of the repo into the LanceDB index. Runs `code-raptor ingest <repo> --db-path <db> --single-repo --full` as a subprocess and blocks until it finishes (tens of seconds on a typical repo). Incremental mode is intentionally not exposed — full re-ingest is the stable path. Call this after editing many files this session; for a single just-edited symbol prefer Grep."
+        description = "Re-ingest the repo into the LanceDB index. Defaults to incremental mode — only files whose content_hash changed are re-embedded (typically single-digit seconds). Pass `mode: \"full\"` to wipe and rebuild the project's chunks from scratch (tens of seconds; use when the index looks corrupted). After a live edit, ask for `code_rag_reindex` to make the change visible to search; for a one-shot lookup of a just-edited symbol, prefer Grep."
     )]
     async fn code_rag_reindex(
         &self,
-        // Tool takes no args in v1 by design — see plan decision #3.
-        // rmcp still needs a Parameters<_> wrapper to generate a schema.
-        Parameters(_ignored): Parameters<ReindexParams>,
+        Parameters(params): Parameters<ReindexParams>,
     ) -> Result<CallToolResult, McpError> {
         let started = std::time::Instant::now();
+        let mode = params.mode.unwrap_or_default();
+        let mode_str = match mode {
+            ReindexMode::Incremental => "incremental",
+            ReindexMode::Full => "full",
+        };
         tracing::info!(
             repo = %self.repo_path,
             db = %self.db_path,
+            mode = mode_str,
             "code_rag_reindex: spawning code-raptor"
         );
 
+        let mut args: Vec<&str> = vec![
+            "ingest",
+            &self.repo_path,
+            "--db-path",
+            &self.db_path,
+            "--single-repo",
+        ];
+        if mode == ReindexMode::Full {
+            args.push("--full");
+        }
+
         let output = tokio::process::Command::new(&self.code_raptor_bin)
-            .args([
-                "ingest",
-                &self.repo_path,
-                "--db-path",
-                &self.db_path,
-                "--single-repo",
-                "--full",
-            ])
+            .args(&args)
             .output()
             .await
             .map_err(|e| {
@@ -557,6 +565,7 @@ impl CodeRagServer {
         // reload needed to see the new data on the next tool call.
         let body = serde_json::to_string_pretty(&serde_json::json!({
             "status": "ok",
+            "mode": mode_str,
             "elapsed_ms": elapsed_ms,
             "repo_path": self.repo_path,
             "db_path": self.db_path,
@@ -569,9 +578,29 @@ impl CodeRagServer {
     }
 }
 
-/// Placeholder param struct for `code_rag_reindex` — rmcp requires a schema type.
+/// Reindex mode for `code_rag_reindex`. Default is `incremental`.
+#[derive(Debug, Deserialize, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum ReindexMode {
+    /// Diff against the existing index — only re-embed files whose
+    /// content_hash changed. Fast (single-digit seconds for a one-file
+    /// edit). The default; use this after live edits in a session.
+    #[default]
+    Incremental,
+    /// Wipe the project's chunks and re-embed everything from scratch.
+    /// Slower (tens of seconds) but the recovery path when the index
+    /// looks corrupted or the chunk-derivation pipeline has changed.
+    Full,
+}
+
+/// Parameters for `code_rag_reindex`.
 #[derive(Debug, Deserialize, JsonSchema, Default)]
-struct ReindexParams {}
+struct ReindexParams {
+    /// Reindex mode. `incremental` (default) only re-embeds changed
+    /// files; `full` wipes and rebuilds the project.
+    #[serde(default)]
+    mode: Option<ReindexMode>,
+}
 
 fn tail(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();

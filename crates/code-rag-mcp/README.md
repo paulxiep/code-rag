@@ -86,7 +86,7 @@ The index is a snapshot. When you've made meaningful edits and want retrieval to
 Ask Claude Code: "run code_rag_reindex"
 ```
 
-It invokes `code-raptor ingest . --db-path ./.code-rag/index.lance --single-repo --full` under the hood and blocks until done. For one-off lookups in a single just-edited file, prefer `Grep` / `Read` — they're faster and free.
+By default this runs an **incremental** ingest — only files whose `content_hash` changed are re-embedded (typically single-digit seconds for a small edit). To wipe and rebuild the project's chunks from scratch (tens of seconds; recovery path when the index looks corrupted), pass `mode: "full"`. For one-off lookups in a single just-edited file, prefer `Grep` / `Read` — they're faster and free.
 
 ## CLI flags
 

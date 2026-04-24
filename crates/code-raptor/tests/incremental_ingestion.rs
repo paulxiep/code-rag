@@ -42,6 +42,20 @@ fn simulate_stored_index(result: &IngestionResult) -> ExistingFileIndex {
         );
     }
 
+    for chunk in &result.folder_chunks {
+        index.folder_entries.insert(
+            chunk.folder_path.clone(),
+            (chunk.content_hash.clone(), chunk.chunk_id.clone()),
+        );
+    }
+
+    for chunk in &result.file_chunks {
+        index.file_entries.insert(
+            chunk.file_path.clone(),
+            (chunk.content_hash.clone(), chunk.chunk_id.clone()),
+        );
+    }
+
     index
 }
 

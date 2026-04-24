@@ -16,7 +16,7 @@ Before using any `code_rag_*` tool, check that the index exists:
   ```
   code-raptor ingest . --db-path ./.code-rag/index.lance --single-repo --full
   ```
-- If the user just edited files this session, the index is stale — call `code_rag_reindex` (full re-ingest, tens of seconds) OR prefer Grep for the specific files they edited.
+- If the user just edited files this session, the index is stale — call `code_rag_reindex` (incremental by default, single-digit seconds for a small edit) OR prefer Grep for the specific files they edited.
 
 ## When to use which tool
 
@@ -57,12 +57,12 @@ Forces Overview intent — READMEs, folder summaries, module docs, and crate des
 
 Given a `chunk_id` from a previous hit, returns a `window`-line excerpt (default 20) around the chunk's start line. Cheaper than `Read` on the whole file and preserves the chunk's line numbering. Use it before escalating to `Read`.
 
-### `code_rag_reindex()` — refresh the index after edits
+### `code_rag_reindex(mode?)` — refresh the index after edits
 *Call this after a batch of edits if the user is asking questions that depend on the new code.*
 
-Runs a full re-ingest via `code-raptor ingest . --single-repo --full` and blocks until it finishes (tens of seconds depending on repo size). Incremental mode is intentionally **not** exposed — full is the stable path.
+Defaults to `mode: "incremental"` — only files whose content changed are re-embedded (typically single-digit seconds). Pass `mode: "full"` to wipe and rebuild the project's chunks (tens of seconds; use this when the index looks corrupted or the chunk-derivation pipeline has changed and you've upgraded the binary).
 
-Don't reindex after every small edit — for one-off lookups in a just-edited file, `Grep` / `Read` are faster and free.
+Don't reindex after every small edit — for one-off lookups in a just-edited file, `Grep` / `Read` are still faster.
 
 ## Decision cheat-sheet
 

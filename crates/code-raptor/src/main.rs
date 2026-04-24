@@ -264,41 +264,13 @@ async fn run_incremental_ingestion(
         return Ok(());
     }
 
-    // Insert new chunks first (safer on crash: duplicates > missing data)
+    // Insert new chunks first (safer on crash: duplicates > missing data).
+    // Folder summaries (A2) and file summaries (A4) flow through this path
+    // too — they're reconciled by path+content_hash like the other tables.
     embed_and_store_all(&diff.to_insert, store, embedder, calls_map).await?;
 
     // Then delete old chunks
     apply_deletions(store, &diff.to_delete).await?;
-
-    // A2: Folder summary chunks aren't tracked by reconcile. Take the simple
-    // route (matches C1 call_edges): wipe folder chunks for each affected
-    // project and re-upsert from the full current ingestion result. Folder
-    // chunks are ~1 per directory and cheap to embed, so full rebuild is
-    // fine. Skipping this in incremental would leave stale summaries when
-    // a folder's key_types/key_functions change.
-    if !result.folder_chunks.is_empty() {
-        for project in &projects {
-            store
-                .delete_chunks_by_project(FOLDER_TABLE, project)
-                .await?;
-        }
-        let n = embed_and_store_folders(&result.folder_chunks, store, embedder).await?;
-        if n > 0 {
-            info!("Rebuilt {} folder chunks (incremental)", n);
-        }
-    }
-
-    // A4: Same wipe-and-rebuild pattern for file summaries. ~300-500 per
-    // portfolio, one embed batch per 25 — trivial cost vs CodeChunks.
-    if !result.file_chunks.is_empty() {
-        for project in &projects {
-            store.delete_chunks_by_project(FILE_TABLE, project).await?;
-        }
-        let n = embed_and_store_files(&result.file_chunks, store, embedder).await?;
-        if n > 0 {
-            info!("Rebuilt {} file chunks (incremental)", n);
-        }
-    }
 
     // Rebuild FTS indices for hybrid search (B2)
     info!("Rebuilding FTS indices...");
@@ -383,6 +355,26 @@ async fn build_existing_index(
                 index.module_doc_files.insert(path, (hash, id));
             }
         }
+
+        // Folder summary chunks (A2): folder_path → (content_hash, single chunk_id)
+        for (path, (hash, ids)) in store
+            .get_file_index(FOLDER_TABLE, project, "folder_path")
+            .await?
+        {
+            if let Some(id) = ids.into_iter().next() {
+                index.folder_entries.insert(path, (hash, id));
+            }
+        }
+
+        // File summary chunks (A4): file_path → (content_hash, single chunk_id)
+        for (path, (hash, ids)) in store
+            .get_file_index(FILE_TABLE, project, "file_path")
+            .await?
+        {
+            if let Some(id) = ids.into_iter().next() {
+                index.file_entries.insert(path, (hash, id));
+            }
+        }
     }
 
     Ok(index)
@@ -403,6 +395,7 @@ async fn delete_project_from_all_tables(
         CRATE_TABLE,
         MODULE_DOC_TABLE,
         FOLDER_TABLE,
+        FILE_TABLE,
     ] {
         store.delete_chunks_by_project(table, project_name).await?;
     }
@@ -436,6 +429,21 @@ async fn apply_deletions(store: &VectorStore, deletions: &DeletionsByTable) -> a
             "Deleted {} module doc chunks",
             deletions.module_doc_chunk_ids.len()
         );
+    }
+    if !deletions.folder_chunk_ids.is_empty() {
+        store
+            .delete_chunks_by_ids(FOLDER_TABLE, &deletions.folder_chunk_ids)
+            .await?;
+        info!(
+            "Deleted {} folder chunks",
+            deletions.folder_chunk_ids.len()
+        );
+    }
+    if !deletions.file_chunk_ids.is_empty() {
+        store
+            .delete_chunks_by_ids(FILE_TABLE, &deletions.file_chunk_ids)
+            .await?;
+        info!("Deleted {} file chunks", deletions.file_chunk_ids.len());
     }
     Ok(())
 }
