@@ -702,7 +702,20 @@ async fn main() -> Result<()> {
     // double-click in Explorer, or run from a terminal with no flags. We
     // detect it pre-clap so it stays unambiguous.
     if std::env::args().len() == 1 {
-        return run_yaml_setup();
+        // Run setup, then pause on a TTY so double-click users on Windows
+        // can read the output before the console window closes. Claude
+        // Code's spawn case never reaches here (it always passes args), so
+        // the pause is safe to gate purely on TTY-ness.
+        let result = run_yaml_setup();
+        if let Err(ref e) = result {
+            eprintln!("\nError: {e}");
+        }
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            println!("\nPress Enter to close...");
+            let mut buf = String::new();
+            let _ = std::io::stdin().read_line(&mut buf);
+        }
+        return result;
     }
 
     let cli = Cli::parse();
@@ -875,11 +888,15 @@ fn run_yaml_setup() -> Result<()> {
     if cfg.workspace {
         args.push("--workspace".into());
     }
+    // Use the absolute path of the running exe so Claude Code doesn't depend
+    // on PATH being set up. JSON tolerates forward slashes on Windows, so we
+    // normalize to avoid backslash-escape pain in the generated file.
+    let command_path = exe.to_string_lossy().replace('\\', "/");
     let server_existed = servers.contains_key("code-rag");
     servers.insert(
         "code-rag".into(),
         serde_json::json!({
-            "command": "code-rag-mcp",
+            "command": command_path,
             "args": args,
         }),
     );
