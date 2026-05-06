@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script>
+        (function () {
+            var p = new URL(location.href).searchParams.get('theme');
+            var t = p || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+            document.documentElement.dataset.theme = t;
+            addEventListener('message', function (e) {
+                if (e.data && e.data.type === 'theme') {
+                    document.documentElement.dataset.theme = e.data.value;
+                }
+            });
+        })();
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Code RAG Chat</title>
