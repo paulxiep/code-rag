@@ -71,7 +71,7 @@ struct Cli {
 
     /// LLM model name — AppState requires one even though MCP never calls the
     /// LLM. Value is unused at tool-call time; any string is fine.
-    #[arg(long, default_value = "gemini-2.5-flash", global = true)]
+    #[arg(long, default_value = "gemini-3.1-flash-lite", global = true)]
     model: String,
 
     /// Disable the cross-encoder reranker. Useful when running on machines

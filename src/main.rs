@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Configuration
     let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "./data/portfolio.lance".into());
-    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".into());
+    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.1-flash-lite".into());
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port: u16 = std::env::var("PORT")
         .ok()
