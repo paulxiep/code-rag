@@ -1,7 +1,9 @@
+mod go;
 mod python;
 mod rust;
 mod typescript;
 
+pub use go::GoHandler;
 pub use python::PythonHandler;
 pub use rust::RustHandler;
 pub use typescript::TypeScriptHandler;
@@ -19,6 +21,7 @@ fn get_handlers() -> &'static Vec<Box<dyn LanguageHandler>> {
             Box::new(RustHandler),
             Box::new(PythonHandler),
             Box::new(TypeScriptHandler),
+            Box::new(GoHandler),
         ]
     })
 }

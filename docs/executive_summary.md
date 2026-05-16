@@ -2,7 +2,7 @@
 
 ## What It Is
 
-A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code repositories. Parses Rust, Python, and TypeScript codebases with tree-sitter, extracts docstrings and call graphs, generates embeddings with FastEmbed, stores in LanceDB, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies, and retrieval traces surface all sources with relevance scores.
+A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code repositories. Parses Rust, Python, TypeScript, and Go codebases with tree-sitter, extracts docstrings and call graphs, generates embeddings with FastEmbed, stores in LanceDB, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies, and retrieval traces surface all sources with relevance scores.
 
 ## Why It Matters
 
@@ -13,8 +13,8 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 
 ## Key Features
 
-- **Multi-language parsing**: Rust, Python, and TypeScript via tree-sitter AST queries
-- **Docstring extraction**: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc) — enriches embeddings and LLM context
+- **Multi-language parsing**: Rust, Python, TypeScript, and Go via tree-sitter AST queries
+- **Docstring extraction**: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc), `//` (Go) — enriches embeddings and LLM context
 - **Hierarchy chunks (Track A)**: `FolderChunk` (1 per directory; 5-line template — folder/files+languages/key types/key functions/subfolders, ~118 in portfolio) and `FileChunk` (1 per source file; 4-line template — file/exports/imports/purpose, ~247 in portfolio). Built deterministically at ingest from CodeChunk metadata + C1 imports map — no LLM. Pure render functions in `code-rag-engine::{folder,file}` keep server-embedded bytes byte-identical to browser BM25 bytes
 - **Single text module (A1)**: `code-rag-engine::text` is the sole home for `tokenize`, `IdfTable`, BM25 kernel, `build_searchable_text`, `split_camel_case`, and intent prototype texts — compiles to native + wasm32. No more drift between server / store / raptor / UI
 - **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table (~3011 edges), 3-tier resolver (same-file → import-based → unique-global), graph traversal (callers/callees/path) augments retrieval at query time. AST scoped-identifier (`module::function()`) extraction added
@@ -86,6 +86,6 @@ The lifts came from the retrieval infrastructure: cross-encoder reranking (B1), 
 - **LLM**: Google Gemini (rig-core 0.27)
 - **Vector Database**: LanceDB
 - **Embeddings**: FastEmbed (BGE-small-en-v1.5)
-- **Code Parsing**: tree-sitter (Rust, Python, TypeScript/TSX)
+- **Code Parsing**: tree-sitter (Rust, Python, TypeScript/TSX, Go)
 - **Frontend**: Leptos 0.8 (Rust WASM, CSR)
 - **Deployment**: Docker (local) + GitHub Pages (static demo)

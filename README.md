@@ -1,6 +1,6 @@
 # Code RAG
 
-A RAG chatbot that answers questions about code repositories. Ingests all sibling project directories, parses Rust, Python, and TypeScript codebases with tree-sitter, extracts docstrings and a persistent AST call graph, generates embeddings, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies — including graph augmentation for relationship queries and per-comparator decomposition for comparison queries. Retrieval traces surface all sources with relevance scores — the system shows its work.
+A RAG chatbot that answers questions about code repositories. Ingests all sibling project directories, parses Rust, Python, TypeScript, and Go codebases with tree-sitter, extracts docstrings and a persistent AST call graph, generates embeddings, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies — including graph augmentation for relationship queries and per-comparator decomposition for comparison queries. Retrieval traces surface all sources with relevance scores — the system shows its work.
 
 - [Executive Summary](docs/executive_summary.md)
 - [Technical Summary](docs/technical_summary.md)
@@ -119,8 +119,8 @@ To clean, run `sh clean_docker.sh`.
 ## Current State
 
 - Function-level chunking: 1 function/class → 1 vector (BGE-small, 384 dim)
-- Supports Rust, Python, and TypeScript via tree-sitter AST parsing
-- Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc)
+- Supports Rust, Python, TypeScript, and Go via tree-sitter AST parsing
+- Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc), `//` (Go)
 - Declaration signatures extracted: functions + structs/enums/traits/interfaces/classes
 - **Hierarchy chunks (Track A)**: `FolderChunk` (1 per directory, 5-line template — folder/files+languages/key types/key functions/subfolders) and `FileChunk` (1 per source file, 4-line template — file/exports/imports/purpose). Built deterministically at ingest from existing CodeChunk metadata + C1 imports map — no LLM. Both render through pure `code-rag-engine::{folder,file}` functions, so server-embedded bytes and browser BM25 bytes are byte-identical
 - **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table (~3011 edges), 3-tier resolver (same-file → import-based → unique-global), AST scoped-identifier (`module::function()`) extraction

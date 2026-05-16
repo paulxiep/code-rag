@@ -140,7 +140,7 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
     │
     ▼
 ┌─────────────────┐
-│  LanguageHandler │  Trait-based: RustHandler, PythonHandler, TypeScriptHandler
+│  LanguageHandler │  Trait-based: RustHandler, PythonHandler, TypeScriptHandler, GoHandler
 │  (OnceLock reg.) │  Grammar + query patterns + docstring + call extraction per language
 └────────┬────────┘
          │
@@ -177,6 +177,7 @@ Source Files (.rs, .py, .ts, .tsx, .js, .jsx)
 | Rust | Scan backwards from node | `///` outer doc, `#[doc = "..."]` attribute form |
 | Python | AST traversal into body | `"""..."""` / `'''...'''` first expression_statement |
 | TypeScript | Scan backwards for JSDoc | `/** ... */`, filters out `@param`/`@returns` |
+| Go | Scan backwards for `//` block | contiguous `//` lines, blank-line breaks association, `//go:` directives skipped |
 
 ## Key Design Decisions
 

@@ -167,6 +167,7 @@ fn is_type_node(node_type: &str) -> bool {
             | "interface_declaration"
             | "type_alias_declaration"
             | "enum_declaration"
+            | "type_declaration"
     )
 }
 
@@ -177,6 +178,7 @@ fn is_function_node(node_type: &str) -> bool {
             | "function_definition"
             | "function_declaration"
             | "method_definition"
+            | "method_declaration"
             | "lexical_declaration"
     )
 }
