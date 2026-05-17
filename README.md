@@ -2,8 +2,8 @@
 
 A RAG chatbot that answers questions about code repositories. Ingests all sibling project directories, parses Rust, Python, and TypeScript codebases with tree-sitter, extracts docstrings and a persistent AST call graph, generates embeddings, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies — including graph augmentation for relationship queries and per-comparator decomposition for comparison queries. Retrieval traces surface all sources with relevance scores — the system shows its work.
 
-- [Executive Summary](docs/executive_summary.md)
-- [Technical Summary](docs/technical_summary.md)
+- [Executive Summary](https://github.com/paulxiep/code-rag/blob/main/docs/executive_summary.md)
+- [Technical Summary](https://github.com/paulxiep/code-rag/blob/main/docs/technical_summary.md)
 
 ## Use as MCP server with Claude Code
 
@@ -17,7 +17,7 @@ Install is three steps, no terminal commands once the exe is on disk:
 
 Open Claude Code in the target dir. The bundled skill instructs the agent to run `code_rag_reindex mode=full` for the initial ingest automatically.
 
-Full walkthrough: [crates/code-rag-mcp/README.md](crates/code-rag-mcp/README.md). Release process: [docs/release.md](docs/release.md).
+Full walkthrough: [crates/code-rag-mcp/README.md](https://github.com/paulxiep/code-rag/blob/main/crates/code-rag-mcp/README.md). Release process: [docs/release.md](https://github.com/paulxiep/code-rag/blob/main/docs/release.md).
 
 ## Usage
 
@@ -40,9 +40,9 @@ To clean, run `sh clean_docker.sh`.
 
 ## Development Roadmap
 
-- [Development Log](development_log.md)
-- [Development Plan](development_plan.md)
-- [Project Vision](project-vision.md)
+- [Development Log](https://github.com/paulxiep/code-rag/blob/main/development_log.md)
+- [Development Plan](https://github.com/paulxiep/code-rag/blob/main/development_plan.md)
+- [Project Vision](https://github.com/paulxiep/code-rag/blob/main/project-vision.md)
 
 | Version | Date | Focus |
 |---------|------|-------|
@@ -150,7 +150,7 @@ To clean, run `sh clean_docker.sh`.
 
 ## Planned Features
 
-See [project-vision.md](project-vision.md) and [development_plan.md](development_plan.md) for roadmap.
+See [project-vision.md](https://github.com/paulxiep/code-rag/blob/main/project-vision.md) and [development_plan.md](https://github.com/paulxiep/code-rag/blob/main/development_plan.md) for roadmap.
 
 ---
 
