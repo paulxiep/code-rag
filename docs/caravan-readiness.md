@@ -8,7 +8,7 @@ Scope: evaluation only, treating the Caravan SDK as hypothetical. Four candidate
 
 ## 1. Caravan's Thesis in One Paragraph
 
-Caravan is a **backend** application-definition compiler. The same source code deploys across three **orthogonal** axes — *packaging* (monolith / multi-container / multi-service), *placement* (local docker-compose / Fargate / Lambda / batch), and *composition* (local OSS engine / cloud managed service / referenced existing resource) — by reading a single `caravan.yaml`. The compiler emits HCL (Terraform) and Compose projections of an IR. The structural contract user code must obey is the `caravan-rpc-<lang>` SDK at inter-component seams: a call site written as `client::<Interface>().method()` dispatches as **inproc / HTTP / Lambda** based on a compiler-injected `CARAVAN_RPC_PEERS` table. **Frontend deployment — bundles, hosting, browser-sandbox concerns — is explicitly outside Caravan's scope.** FE is inherently monolithic from Caravan's vantage; Caravan makes no claims about it.
+Caravan is a **backend** application-definition compiler. The same source code deploys across three **orthogonal** axes — *packaging* (monolith / multi-container / multi-service), *placement* (local docker-compose / Fargate / Lambda / batch), and *composition* (local OSS engine / cloud managed service / referenced existing resource) — by reading a single `caravan.yaml`. The compiler emits HCL (Terraform) and Compose projections of an IR. The structural contract user code must obey is the `caravan-rpc` SDK at inter-component seams: a call site written as `client::<Interface>().method()` dispatches as **inproc / HTTP / Lambda** based on a compiler-injected `CARAVAN_RPC_PEERS` table. **Frontend deployment — bundles, hosting, browser-sandbox concerns — is explicitly outside Caravan's scope.** FE is inherently monolithic from Caravan's vantage; Caravan makes no claims about it.
 
 **State today:** thesis + evidence catalogs + PoC specs. No CLI, no SDK packages, no compiler. The Caravan stub CLI prints "not implemented yet" and points users to docs.
 
@@ -125,7 +125,7 @@ These are properties code-rag already has that would make Caravan adoption mecha
 
 These are the concrete obstacles to Caravan dispatch over code-rag's seams:
 
-- **No trait boundaries at the seams.** Embedder/Reranker/VectorStore are concrete structs. Caravan's `@interface ... -> impl Trait` model needs a Rust `trait` per seam. None exists today.
+- **No trait boundaries at the seams.** Embedder/Reranker/VectorStore are concrete structs. Caravan's `@wagon ... -> impl Trait` model needs a Rust `trait` per seam. None exists today.
 - **AppState is a god-struct holding concrete components.** [src/api/state.rs](../src/api/state.rs) directly owns each component by concrete type. Under Caravan, callers should hold `dyn Trait` (or generics) so the SDK can swap inproc/HTTP implementations.
 - **code-rag-mcp depends on code-rag-chat for AppState.** Pulls in Axum/rig-core/tokio that MCP doesn't strictly need. The standard fix (extract a `code-rag-core` crate holding `AppState`) is also a prerequisite for Caravan: that core is where the trait-typed seams would live.
 - **VectorStore conflates three things.** Per §4.3 — (a) reader + writer in one struct, (b) vector-search and call-graph-edges as one resource. The interface split (`VectorReader`/`VectorWriter`) and the resource split (search resource vs. graph-edges resource) are independent, mechanical refactors.
@@ -148,7 +148,7 @@ Distilled:
 
 **code-rag would not have to be redesigned to adopt Caravan's SDK. It would need to be refactored — roughly one well-defined PR per seam, plus one core-extraction PR.** The thesis-level fit is good and the FE-driven engine purity gives it a free head start on Caravan readiness.
 
-**Caveat.** Caravan is pre-implementation. The PoC RPC spec is the most likely shape, but until the SDK exists in Rust, any concrete preparation in code-rag would be premature. The right time to act on this evaluation is when `caravan-rpc-rust` ships v0.1 — at which point this document becomes the input to a focused refactor plan.
+**Caveat.** Caravan is pre-implementation. The PoC RPC spec is the most likely shape, but until the SDK exists in Rust, any concrete preparation in code-rag would be premature. The right time to act on this evaluation is when `caravan-rpc` ships v0.1 — at which point this document becomes the input to a focused refactor plan.
 
 ---
 
