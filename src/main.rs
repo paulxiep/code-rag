@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     // Warmup mode - just download model and exit
     if std::env::args().any(|a| a == "--warmup") {
         println!("Warming up embedding model...");
-        let _ = crate::store::Embedder::new();
+        let _ = crate::store::FastEmbedImpl::new();
         println!("Warmup complete");
         return Ok(());
     }

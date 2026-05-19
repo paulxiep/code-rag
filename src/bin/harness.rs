@@ -6,7 +6,7 @@ use code_rag_chat::harness::dataset::TestDataset;
 use code_rag_chat::harness::metrics;
 use code_rag_chat::harness::report::{self, HarnessReport, SystemConfig};
 use code_rag_chat::harness::runner;
-use code_rag_chat::store::{Embedder, Reranker, VectorStore};
+use code_rag_chat::store::{Embedder, FastEmbedImpl, MsMarcoRerankerImpl, Reranker, VectorStore};
 
 #[derive(Parser)]
 #[command(
@@ -106,8 +106,10 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Loaded {} test cases from {}", cases.len(), cli.dataset);
 
-    // 3. Initialize engine (mirrors AppState::from_config, minus LlmClient and Mutex)
-    let mut embedder = Embedder::new()?;
+    // 3. Initialize engine (mirrors AppState::from_config, minus LlmClient).
+    // The seam trait `Embedder` is `&self`-only; interior `Mutex<TextEmbedding>`
+    // lives inside `FastEmbedImpl`. Run through the trait to mirror the chat path.
+    let embedder: Box<dyn Embedder> = Box::new(FastEmbedImpl::new()?);
     let mut classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
     if let Ok(Ok(v)) = std::env::var("INTENT_THRESHOLD").map(|s| s.parse::<f32>()) {
         println!("Overriding intent threshold: {}", v);
@@ -126,15 +128,15 @@ async fn main() -> anyhow::Result<()> {
     let mut config = EngineConfig::default();
 
     // Initialize reranker if enabled (auto-downloads model on first use)
-    let mut reranker = if cli.rerank {
+    let reranker: Option<Box<dyn Reranker>> = if cli.rerank {
         println!("Initializing reranker (ms-marco-MiniLM-L-6-v2)...");
-        let r = Reranker::new()?;
+        let r = MsMarcoRerankerImpl::new()?;
         config.rerank = RerankConfig {
             enabled: true,
             code_fetch_multiplier: cli.code_fetch_multiplier,
             ..Default::default()
         };
-        Some(r)
+        Some(Box::new(r))
     } else {
         None
     };
@@ -157,9 +159,9 @@ async fn main() -> anyhow::Result<()> {
     let owned_cases: Vec<_> = cases.into_iter().cloned().collect();
     let query_results = runner::run_all(
         &owned_cases,
-        &mut embedder,
+        embedder.as_ref(),
         &classifier,
-        reranker.as_mut(),
+        reranker.as_deref(),
         &store,
         &config,
         runner::RunOptions {

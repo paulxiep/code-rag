@@ -1,7 +1,7 @@
 // Re-export types from shared engine crate
 pub use code_rag_engine::retriever::{RetrievalResult, to_retrieval_result};
 
-use crate::store::{Embedder, Reranker, VectorStore};
+use crate::store::{Embedder, Reranker, VectorReader};
 use code_rag_engine::comparison::fuse_comparator_lists;
 use code_rag_engine::config::{EngineConfig, RetrievalConfig, fetch_limits};
 use code_rag_engine::fusion::rrf_fuse;
@@ -17,7 +17,7 @@ use super::EngineError;
 /// Returns (chunk, relevance_score) tuples where higher=better so downstream
 /// `to_scored_relevance` can wrap them uniformly.
 async fn fetch_code_arm(
-    store: &VectorStore,
+    store: &dyn VectorReader,
     query: &str,
     query_embedding: &[f32],
     limit: usize,
@@ -69,7 +69,7 @@ async fn fetch_code_arm(
 async fn augment_with_graph(
     query: &str,
     code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
-    store: &VectorStore,
+    store: &dyn VectorReader,
 ) -> (
     Vec<ScoredChunk<code_rag_types::CodeChunk>>,
     std::collections::HashSet<String>,
@@ -170,7 +170,7 @@ async fn augment_with_graph(
 fn rerank_chunks<T: RerankText + Clone>(
     query: &str,
     chunks: Vec<ScoredChunk<T>>,
-    reranker: &mut Reranker,
+    reranker: &dyn Reranker,
     limit: usize,
 ) -> Result<Vec<ScoredChunk<T>>, EngineError> {
     if chunks.is_empty() {
@@ -208,7 +208,7 @@ fn rerank_chunks<T: RerankText + Clone>(
 fn rerank_all(
     query: &str,
     bundle: RetrievalResult,
-    reranker: &mut Reranker,
+    reranker: &dyn Reranker,
     config: &RetrievalConfig,
     code_keep_override: Option<usize>,
 ) -> Result<RetrievalResult, EngineError> {
@@ -252,11 +252,11 @@ pub struct QueryContext<'a> {
 /// When hybrid is enabled, uses BM25+semantic via RRF fusion (scores are higher=better).
 pub async fn retrieve(
     qctx: QueryContext<'_>,
-    store: &VectorStore,
-    embedder: &mut Embedder,
+    store: &dyn VectorReader,
+    embedder: &dyn Embedder,
     config: &RetrievalConfig,
     engine_config: &EngineConfig,
-    reranker: Option<&mut Reranker>,
+    reranker: Option<&dyn Reranker>,
 ) -> Result<RetrievalResult, EngineError> {
     let QueryContext {
         query,

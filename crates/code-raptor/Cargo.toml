@@ -8,6 +8,7 @@ edition = "2024"
 code-rag-types = { path = "../code-rag-types" }
 code-rag-engine = { path = "../code-rag-engine" }
 code-rag-store = { path = "../code-rag-store" }
+caravan-rpc = { workspace = true }
 
 # Parsing
 tree-sitter = "0.26"

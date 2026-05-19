@@ -26,6 +26,7 @@ code-rag-chat = { path = "../.." }
 code-rag-engine = { path = "../code-rag-engine" }
 code-rag-store = { path = "../code-rag-store" }
 code-rag-types = { path = "../code-rag-types" }
+caravan-rpc = { workspace = true }
 # code-raptor's `ingest_repo` lib entrypoint — lets the MCP do everything
 # code-raptor.exe used to do without shipping a second binary.
 code-raptor = { path = "../code-raptor" }

@@ -233,8 +233,12 @@ impl CodeRagServer {
         query: &str,
         forced_intent: Option<QueryIntent>,
     ) -> Result<(QueryIntent, Vec<SearchHit>), McpError> {
-        let mut embedder_guard = self.state.embedder.lock().await;
-        let query_embedding = embedder_guard
+        // Pull seam handles from the Caravan RPC registry.
+        let embedder = caravan_rpc::client::<dyn code_rag_store::seams::Embedder>();
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let reranker = caravan_rpc::try_client::<dyn code_rag_store::seams::Reranker>();
+
+        let query_embedding = embedder
             .embed_one(query)
             .map_err(|e| McpError::internal_error(format!("embed failed: {e}"), None))?;
 
@@ -247,26 +251,20 @@ impl CodeRagServer {
         };
         let retrieval_config = intent::route(query_intent, &self.state.config.routing);
 
-        let mut reranker_guard = match &self.state.reranker {
-            Some(r) => Some(r.lock().await),
-            None => None,
-        };
         let result = retriever::retrieve(
             retriever::QueryContext {
                 query,
                 embedding: &query_embedding,
                 intent: query_intent,
             },
-            &self.state.store,
-            &mut embedder_guard,
+            store.as_ref(),
+            embedder.as_ref(),
             &retrieval_config,
             &self.state.config,
-            reranker_guard.as_deref_mut(),
+            reranker.as_deref(),
         )
         .await
         .map_err(|e| McpError::internal_error(format!("retrieve failed: {e}"), None))?;
-        drop(reranker_guard);
-        drop(embedder_guard);
 
         let hits: Vec<SearchHit> = build_sources(&result)
             .into_iter()
@@ -289,14 +287,15 @@ impl CodeRagServer {
     /// DBs get combined into one graph. chunk_ids are SHA-deterministic so
     /// combining across projects is safe.
     async fn load_call_graph(&self) -> Result<CallGraph, McpError> {
-        let projects =
-            self.state.store.list_projects().await.map_err(|e| {
-                McpError::internal_error(format!("list_projects failed: {e}"), None)
-            })?;
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let projects = store
+            .list_projects()
+            .await
+            .map_err(|e| McpError::internal_error(format!("list_projects failed: {e}"), None))?;
 
         let mut all_edges = Vec::new();
         for project in &projects {
-            let edges = self.state.store.get_all_edges(project).await.map_err(|e| {
+            let edges = store.get_all_edges(project).await.map_err(|e| {
                 McpError::internal_error(format!("get_all_edges failed: {e}"), None)
             })?;
             all_edges.extend(edges);
@@ -428,15 +427,12 @@ impl CodeRagServer {
 
         // Pull edges that touch the target so we can surface callee/caller
         // identifier + file metadata without a second lookup.
-        let callers = self
-            .state
-            .store
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let callers = store
             .get_callers(&target, None)
             .await
             .map_err(|e| McpError::internal_error(format!("get_callers failed: {e}"), None))?;
-        let callees = self
-            .state
-            .store
+        let callees = store
             .get_callees(&target, None)
             .await
             .map_err(|e| McpError::internal_error(format!("get_callees failed: {e}"), None))?;
@@ -485,10 +481,9 @@ impl CodeRagServer {
             return Err(McpError::invalid_params("chunk_id must not be empty", None));
         }
 
-        let chunks = self
-            .state
-            .store
-            .get_chunks_by_ids(&[chunk_id.clone()])
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let chunks = store
+            .get_chunks_by_ids(std::slice::from_ref(&chunk_id))
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("get_chunks_by_ids failed: {e}"), None)

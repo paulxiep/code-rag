@@ -5,7 +5,7 @@ use code_rag_engine::intent::{self, IntentClassifier, QueryIntent};
 use code_rag_engine::retriever::{FlatChunk, RetrievalResult};
 
 use crate::engine::retriever::{QueryContext, retrieve};
-use crate::store::{Embedder, Reranker, VectorStore};
+use crate::store::{Embedder, Reranker, VectorReader};
 
 use super::dataset::TestCase;
 
@@ -72,10 +72,10 @@ pub struct RunOptions {
 /// skipped with a warning.
 pub async fn run_all(
     cases: &[TestCase],
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
     classifier: &IntentClassifier,
-    mut reranker: Option<&mut Reranker>,
-    store: &VectorStore,
+    reranker: Option<&dyn Reranker>,
+    store: &dyn VectorReader,
     config: &EngineConfig,
     opts: RunOptions,
 ) -> anyhow::Result<Vec<QueryResult>> {
@@ -132,8 +132,6 @@ pub async fn run_all(
         let retrieval_config = intent::route(classified_intent, &config.routing);
 
         // 4. Retrieve (with optional reranking)
-        // Reborrow to allow reuse across loop iterations
-        let reranker_ref = reranker.as_deref_mut();
         let retrieval_result = retrieve(
             QueryContext {
                 query: &case.query,
@@ -144,7 +142,7 @@ pub async fn run_all(
             embedder,
             &retrieval_config,
             config,
-            reranker_ref,
+            reranker,
         )
         .await?;
 

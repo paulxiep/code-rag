@@ -1334,6 +1334,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 
 [[package]]
+name = "caravan-rpc"
+version = "0.0.1"
+source = "git+https://github.com/paulxiep/caravan.git?branch=implement-rust-python-aws-poc#5f4cf1dfbc2a7fa85f7f354b3d926067df76da25"
+dependencies = [
+ "caravan-rpc-macros",
+]
+
+[[package]]
+name = "caravan-rpc-macros"
+version = "0.0.1"
+source = "git+https://github.com/paulxiep/caravan.git?branch=implement-rust-python-aws-poc#5f4cf1dfbc2a7fa85f7f354b3d926067df76da25"
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1469,7 +1482,9 @@ name = "code-rag-chat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "caravan-rpc",
  "chrono",
  "clap",
  "code-rag-engine",
@@ -1503,6 +1518,7 @@ name = "code-rag-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "caravan-rpc",
  "clap",
  "code-rag-chat",
  "code-rag-engine",
@@ -1528,12 +1544,16 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
+ "async-trait",
+ "caravan-rpc",
  "code-rag-engine",
  "code-rag-types",
  "fastembed",
  "futures",
  "hf-hub",
  "lancedb",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -1578,6 +1598,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-buffer",
+ "caravan-rpc",
  "clap",
  "code-rag-engine",
  "code-rag-store",

@@ -10,25 +10,40 @@ use lancedb::{
 };
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::warn;
 
 use code_rag_engine::text::build_searchable_text;
 use code_rag_types::{
     CallEdge, CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
 };
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
 pub enum StoreError {
     #[error("database error: {0}")]
-    Database(#[from] lancedb::Error),
+    Database(String),
 
     #[error("arrow error: {0}")]
-    Arrow(#[from] arrow_schema::ArrowError),
+    Arrow(String),
 
     #[error("table '{0}' not found")]
     TableNotFound(String),
 
     #[error("schema mismatch: {0}")]
     SchemaMismatch(String),
+}
+
+impl From<lancedb::Error> for StoreError {
+    fn from(e: lancedb::Error) -> Self {
+        warn!(error = format!("{e:#}"), "lancedb operation failed");
+        StoreError::Database(e.to_string())
+    }
+}
+
+impl From<arrow_schema::ArrowError> for StoreError {
+    fn from(e: arrow_schema::ArrowError) -> Self {
+        warn!(error = format!("{e:#}"), "arrow operation failed");
+        StoreError::Arrow(e.to_string())
+    }
 }
 
 const CODE_TABLE: &str = "code_chunks";
@@ -2566,9 +2581,180 @@ fn extract_module_doc_chunks_from_batch_with_score(
     Ok(chunks)
 }
 
+// ============================================================================
+// Caravan RPC seam impl
+// ============================================================================
+//
+// `VectorReader` (declared in `crate::seams`) is the read-side of the vector
+// store. Each trait method delegates to the inherent method of the same name
+// via UFCS — Rust's name resolution prefers inherent methods inside a trait
+// impl body, but UFCS makes the intent unambiguous to readers.
+//
+// Writes (`upsert_*`, `delete_*`, `create_fts_indices`,
+// `get_embedding_model_version`) are NOT part of the trait — they stay on the
+// concrete `VectorStore` because code-raptor's ingest path doesn't dispatch
+// them as RPC.
+
+#[async_trait::async_trait]
+impl crate::seams::VectorReader for VectorStore {
+    async fn search_code(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        VectorStore::search_code(self, query_embedding, limit).await
+    }
+
+    async fn search_code_signatures(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        VectorStore::search_code_signatures(self, query_embedding, limit).await
+    }
+
+    async fn search_readme(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+        VectorStore::search_readme(self, query_embedding, limit).await
+    }
+
+    async fn search_crates(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+        VectorStore::search_crates(self, query_embedding, limit).await
+    }
+
+    async fn search_module_docs(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+        VectorStore::search_module_docs(self, query_embedding, limit).await
+    }
+
+    async fn search_folders(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+        VectorStore::search_folders(self, query_embedding, limit).await
+    }
+
+    async fn search_files(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+        VectorStore::search_files(self, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_code(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CodeChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_code(self, query_text, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_readme(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ReadmeChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_readme(self, query_text, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_crates(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CrateChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_crates(self, query_text, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_module_docs(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ModuleDocChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_module_docs(self, query_text, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_folders(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FolderChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_folders(self, query_text, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_files(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(FileChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_files(self, query_text, query_embedding, limit).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, StoreError> {
+        VectorStore::list_projects(self).await
+    }
+
+    async fn get_chunks_by_ids(&self, chunk_ids: &[String]) -> Result<Vec<CodeChunk>, StoreError> {
+        VectorStore::get_chunks_by_ids(self, chunk_ids).await
+    }
+
+    async fn get_all_edges(&self, project_name: &str) -> Result<Vec<CallEdge>, StoreError> {
+        VectorStore::get_all_edges(self, project_name).await
+    }
+
+    async fn get_callers(
+        &self,
+        callee_chunk_id: &str,
+        project: Option<&str>,
+    ) -> Result<Vec<CallEdge>, StoreError> {
+        VectorStore::get_callers(self, callee_chunk_id, project).await
+    }
+
+    async fn get_callees(
+        &self,
+        caller_chunk_id: &str,
+        project: Option<&str>,
+    ) -> Result<Vec<CallEdge>, StoreError> {
+        VectorStore::get_callees(self, caller_chunk_id, project).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Serde roundtrip ---------------------------------------------------
+
+    #[test]
+    fn store_error_serde_roundtrip() {
+        for err in [
+            StoreError::Database("db down".into()),
+            StoreError::Arrow("arrow oops".into()),
+            StoreError::TableNotFound("code_chunks".into()),
+            StoreError::SchemaMismatch("v0 vs v1".into()),
+        ] {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: StoreError = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{err:?}"));
+        }
+    }
 
     // ---- Schema-version sentinel -------------------------------------------
 

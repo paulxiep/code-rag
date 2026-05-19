@@ -8,7 +8,8 @@ pub use code_rag_engine::intent;
 pub use code_rag_engine::config::RetrievalConfig;
 pub use code_rag_engine::config::{DualEmbeddingConfig, EngineConfig, HybridConfig, RerankConfig};
 pub use code_rag_engine::retriever::FlatChunk;
-pub use generator::LlmClient;
+pub use code_rag_store::seams::LlmClient;
+pub use generator::RigGeminiImpl;
 
 use thiserror::Error;
 
@@ -22,6 +23,9 @@ pub enum EngineError {
 
     #[error("generation failed: {0}")]
     Generation(String),
+
+    #[error("LLM seam error: {0}")]
+    Llm(#[from] code_rag_store::LlmError),
 
     #[error("reranking failed: {0}")]
     Rerank(String),

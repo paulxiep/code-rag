@@ -4,7 +4,8 @@ use std::sync::Arc;
 use super::dto::{self, *};
 use super::error::ApiError;
 use super::state::AppState;
-use crate::engine::{context, generator, intent, retriever};
+use crate::engine::{LlmClient, context, intent, retriever};
+use crate::store::{Embedder, Reranker, VectorReader};
 
 /// POST /chat - Ask a question about the portfolio
 pub async fn chat(
@@ -16,12 +17,16 @@ pub async fn chat(
         return Err(ApiError::BadRequest("Query cannot be empty".into()));
     }
 
-    // C3: hold the embedder lock through retrieve() — Comparison decomposition
-    // needs to embed augmented per-comparator sub-queries inside the retriever.
-    // Lock window grows from ~5ms to retrieve()-duration but the embedder is
-    // process-local and contention is low.
-    let mut embedder_guard = state.embedder.lock().await;
-    let query_embedding = embedder_guard.embed_one(query)?;
+    // Pull seam handles from the Caravan RPC registry. When
+    // `CARAVAN_RPC_PEERS` is unset (normal local-run / compose), each
+    // `client::<dyn I>()` is a registry lookup that returns the `Arc`
+    // registered at AppState::from_config — no overhead.
+    let embedder = caravan_rpc::client::<dyn Embedder>();
+    let store = caravan_rpc::client::<dyn VectorReader>();
+    let llm = caravan_rpc::client::<dyn LlmClient>();
+    let reranker = caravan_rpc::try_client::<dyn Reranker>();
+
+    let query_embedding = embedder.embed_one(query)?;
 
     // Keyword pre-filter for unambiguous comparison cues, else embedding classification.
     let intent = if let Some(pre) = intent::pre_classify_comparison(query) {
@@ -34,33 +39,26 @@ pub async fn chat(
     };
     let retrieval_config = intent::route(intent, &state.config.routing);
 
-    // Retrieve with optional reranking
-    let mut reranker_guard = match &state.reranker {
-        Some(r) => Some(r.lock().await),
-        None => None,
-    };
     let result = retriever::retrieve(
         retriever::QueryContext {
             query,
             embedding: &query_embedding,
             intent,
         },
-        &state.store,
-        &mut embedder_guard,
+        store.as_ref(),
+        embedder.as_ref(),
         &retrieval_config,
         &state.config,
-        reranker_guard.as_deref_mut(),
+        reranker.as_deref(),
     )
     .await?;
-    drop(reranker_guard); // Release lock before LLM call
-    drop(embedder_guard); // Release embedder lock before LLM call
 
     // Build context (pure function)
     let context = context::build_context(&result);
     let prompt = context::build_prompt(query, &context);
 
     // LLM call runs without any lock (slow: 2-5 seconds)
-    let answer = generator::generate(&prompt, &state.llm).await?;
+    let answer = llm.generate(&prompt).await?;
 
     // Build response
     let sources = dto::build_sources(&result);
@@ -74,9 +72,10 @@ pub async fn chat(
 }
 
 pub async fn list_projects(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> Result<Json<ProjectsResponse>, ApiError> {
-    let projects = state.store.list_projects().await?;
+    let store = caravan_rpc::client::<dyn VectorReader>();
+    let projects = store.list_projects().await?;
     let count = projects.len();
 
     Ok(Json(ProjectsResponse { projects, count }))

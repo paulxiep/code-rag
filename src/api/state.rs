@@ -1,22 +1,19 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::engine::intent::IntentClassifier;
-use crate::engine::{EngineConfig, LlmClient, RerankConfig};
-use crate::store::{Embedder, Reranker, VectorStore};
+use crate::engine::{EngineConfig, LlmClient, RerankConfig, RigGeminiImpl};
+use crate::store::{Embedder, FastEmbedImpl, MsMarcoRerankerImpl, Reranker, VectorReader};
 
-/// Shared state for all handlers
+/// Shared state for all handlers.
+///
+/// Caravan-RPC seam impls (`Embedder`, `Reranker`, `VectorReader`,
+/// `LlmClient`) are registered with the SDK in [`AppState::from_config`] via
+/// `caravan_rpc::provide`. Callers reach them through
+/// `caravan_rpc::client::<dyn I>()`; AppState carries only the non-seam
+/// state (the prototype classifier built once at startup, plus run config).
 pub struct AppState {
-    // Only embedder and reranker need mutation (fastembed requires &mut self)
-    pub embedder: Mutex<Embedder>,
-    pub reranker: Option<Mutex<Reranker>>,
-
-    // Pre-computed prototype embeddings for intent classification
+    /// Pre-computed prototype embeddings for intent classification.
     pub classifier: IntentClassifier,
-
-    // These are safe to share (internal connection pooling)
-    pub store: VectorStore,
-    pub llm: LlmClient,
     pub config: EngineConfig,
 }
 
@@ -26,35 +23,42 @@ impl AppState {
         model: &str,
         enable_reranker: bool,
     ) -> anyhow::Result<Arc<Self>> {
-        let mut embedder = Embedder::new()?;
+        // 1. Build seam impls.
+        let embedder: Arc<dyn Embedder> = Arc::new(FastEmbedImpl::new()?);
 
-        // Build classifier BEFORE wrapping embedder in Mutex
+        // Build the intent classifier with the embedder we just built — this
+        // happens before `provide()` so we don't have to round-trip through the
+        // registry for an initialization-only call.
         let classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
 
-        let store = VectorStore::new(db_path, embedder.dimension()).await?;
-        let llm = LlmClient::from_env(model)?;
+        let store: Arc<dyn VectorReader> =
+            Arc::new(crate::store::VectorStore::new(db_path, embedder.dimension()).await?);
+        let llm: Arc<dyn LlmClient> = Arc::new(RigGeminiImpl::from_env(model)?);
 
         let mut config = EngineConfig::default();
 
-        let reranker = if enable_reranker {
+        let reranker: Option<Arc<dyn Reranker>> = if enable_reranker {
             tracing::info!("initializing reranker (auto-downloading ms-marco-MiniLM-L-6-v2)");
-            let r = Reranker::new()?;
+            let r = MsMarcoRerankerImpl::new()?;
             config.rerank = RerankConfig {
                 enabled: true,
                 ..Default::default()
             };
-            Some(Mutex::new(r))
+            Some(Arc::new(r))
         } else {
             None
         };
 
-        Ok(Arc::new(Self {
-            embedder: Mutex::new(embedder),
-            reranker,
-            classifier,
-            store,
-            llm,
-            config,
-        }))
+        // 2. Register with the Caravan RPC SDK. Once registered,
+        // `caravan_rpc::client::<dyn I>()` returns the same `Arc` we
+        // constructed above (no overhead when `CARAVAN_RPC_PEERS` is unset).
+        caravan_rpc::provide::<dyn Embedder>(embedder);
+        caravan_rpc::provide::<dyn VectorReader>(store);
+        caravan_rpc::provide::<dyn LlmClient>(llm);
+        if let Some(r) = reranker {
+            caravan_rpc::provide::<dyn Reranker>(r);
+        }
+
+        Ok(Arc::new(Self { classifier, config }))
     }
 }
