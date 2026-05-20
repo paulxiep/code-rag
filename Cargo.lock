@@ -1335,16 +1335,27 @@ checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 
 [[package]]
 name = "caravan-rpc"
-version = "0.0.1"
-source = "git+https://github.com/paulxiep/caravan.git?branch=implement-rust-python-aws-poc#5f4cf1dfbc2a7fa85f7f354b3d926067df76da25"
+version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum",
  "caravan-rpc-macros",
+ "inventory",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
 name = "caravan-rpc-macros"
 version = "0.0.1"
-source = "git+https://github.com/paulxiep/caravan.git?branch=implement-rust-python-aws-poc#5f4cf1dfbc2a7fa85f7f354b3d926067df76da25"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
 
 [[package]]
 name = "castaway"
@@ -4270,6 +4281,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71dd52191aae121e8611f1e8dc3e324dd0dd1dee1e6dd91d10ee07a3cfb4d9d8"
 
 [[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7085,6 +7105,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.12",

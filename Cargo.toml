@@ -3,11 +3,9 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
-# Caravan RPC SDK — git-pinned to the in-progress caravan branch during B0p
-# iteration. After the 0.0.2 publish lands (at PR/MR merge), this becomes a
-# real version pin (`caravan-rpc = "0.0.2"`). See
-# ../caravan/docs/development_plan.md milestone B0p.
-caravan-rpc = { git = "https://github.com/paulxiep/caravan.git", branch = "implement-rust-python-aws-poc" }
+# Caravan RPC SDK — path-dep until Phase 2 close, then a real version pin.
+# See ../caravan/docs/development_plan.md milestone B0p.
+caravan-rpc = { path = "../caravan/rpc/rust/caravan-rpc" }
 
 [package]
 name = "code-rag-chat"

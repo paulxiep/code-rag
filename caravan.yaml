@@ -1,0 +1,79 @@
+# Caravan application descriptor for code-rag.
+#
+# The user-authored input to `caravan compile --target=<name>`. Maps
+# the existing code-rag Rust crates onto Caravan's vocabulary:
+# entries (deploy units), seams (synchronous abstraction boundaries
+# inside the codebase), and per-target dispatch overrides.
+#
+# Status: M2 seed. Only the Embedder seam + the chat entry are fully
+# declared — enough to drive the dev-monolith + dev-split-light
+# targets that prove the Rust SDK's HTTP flip. Other seams declared
+# in `crates/code-rag-store/src/seams.rs` (Reranker, VectorReader,
+# LlmClient) stay inproc-only at M2: Reranker needs a RerankResultWire
+# shim (M5); VectorReader + LlmClient need async-trait macro support
+# (M2 Session 4-async or M3). All three remain functionally available
+# via `caravan_rpc::client::<dyn …>()` calls that dispatch inproc.
+
+name: code-rag
+default_target: dev-monolith
+
+# Deploy units. `code-rag-chat` matches the existing
+# docker-compose.yaml service name so the M2 override layers cleanly
+# on top: docker compose -f docker-compose.yaml -f infra/<target>/
+# generated/docker-compose.override.generated.yaml up.
+entries:
+  code-rag-chat:
+    path: .
+    dockerfile: dockerfile/Dockerfile
+    # Multi-stage Dockerfile has two targets (chat, raptor); Caravan
+    # reuses the chat image for the peer service when a Rust seam
+    # flips to `container` mode (via `caravan_rpc::run_or_serve`
+    # detouring based on CARAVAN_RPC_ROLE).
+    runtime_target: chat
+    # `.env` (path-style relative to compose project dir = code-rag/)
+    # holds GEMINI_API_KEY + other runtime secrets. The chat container
+    # already pulls this via the hand-authored base compose; Caravan
+    # also inherits it onto Rust peer services that reuse the chat
+    # image, because the peer runs the same binary and AppState init
+    # constructs the same impls (which read the same env vars).
+    env_file: .env
+
+# Seam declarations match the #[wagon] traits in
+# crates/code-rag-store/src/seams.rs. M2 enables container-mode flip
+# for Embedder (sync, +borrowed args). The other three traits (Reranker,
+# LlmClient, VectorReader) stay inproc at M2 for different reasons:
+#   * Reranker: fastembed::RerankResult lacks serde derives (M5 shim);
+#   * LlmClient: the RigGeminiImpl impl lives in the chat binary crate
+#     (code-rag-chat/src/engine/generator.rs), not a library — the
+#     synthetic peer crate can't import it. Move-to-library at M3+.
+#   * VectorReader: technically full-codegen-eligible (CodeChunk et al.
+#     have serde), but not exercised by any M2 demo target.
+seams:
+  Embedder:
+    # Rust impl path: `code_rag_store::FastEmbedImpl` is the public
+    # name of the impl exposed at the crate root.
+    impl: code_rag_store::FastEmbedImpl
+    service_name: embedder
+
+# Targets. The thesis claim is provable across these three:
+#
+# * dev-monolith: all seams inproc. Baseline; verifies no-config
+#   inertness (criterion 7/8 from poc_yaml_spec.md §Testability).
+# * dev-split-light: Embedder runs as its own compose service via
+#   HTTP. Same source code, yaml line change, recompile + recompose
+#   → `curl /query` byte-identical to dev-monolith but `docker logs
+#   embedder` shows real RPC traffic (the thesis flip).
+# * dev-split-mixed: parked. Will land once async-trait support
+#   lets LlmClient flip too. Per-seam mixability is the principle;
+#   light proves it for one seam, mixed will prove it for two
+#   simultaneously without per-call-site duplication.
+targets:
+  dev-monolith:
+    runtime: docker-compose
+    entries: { code-rag-chat: container }
+    # seams omitted → all inproc
+
+  dev-split-light:
+    runtime: docker-compose
+    entries: { code-rag-chat: container }
+    seams: { Embedder: container }

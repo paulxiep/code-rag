@@ -59,7 +59,13 @@ pub trait Embedder: Send + Sync {
 
 /// Cross-encoder reranker. Optional seam — the chat target may run without it
 /// (config flag); callers should reach for it via `try_client::<dyn Reranker>()`.
-#[wagon]
+///
+/// `#[wagon(identity)]` is transitional: the trait's return type is
+/// `Result<Vec<fastembed::RerankResult>, RerankError>` and `RerankResult`
+/// is a third-party type without `serde::Serialize`. Full HTTP codegen
+/// will land at M5 when `RerankResult` gets a wire-mirror shim. Reranker
+/// isn't in any M2 demo target, so identity is correct for now.
+#[wagon(identity)]
 pub trait Reranker: Send + Sync {
     /// Documents are passed by value because the cross-encoder consumes them;
     /// callers must already materialize the candidate string set.

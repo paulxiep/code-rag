@@ -8,7 +8,7 @@
 #   docker build --target raptor -t code-raptor .
 
 # Builder stage: compile the Rust application
-FROM rust:1.92-slim AS builder
+FROM rust:1.95-slim AS builder
 
 # Install necessary build dependencies
 RUN apt-get update && apt-get install -y \
@@ -32,6 +32,15 @@ COPY code-rag/crates/code-rag-engine/Cargo.toml ./crates/code-rag-engine/
 COPY code-rag/crates/code-rag-store/Cargo.toml ./crates/code-rag-store/
 COPY code-rag/crates/code-raptor/Cargo.toml ./crates/code-raptor/
 COPY code-rag/crates/code-rag-ui/Cargo.toml ./crates/code-rag-ui/
+
+# Copy the caravan-rpc SDK + its proc-macro crate — code-rag's
+# Cargo.toml references them as path-dep `../caravan/rpc/rust/caravan-rpc`
+# (added at B0p). Place them at /caravan/... so the relative path
+# resolves from /build/Cargo.toml.
+COPY caravan/rpc/rust/caravan-rpc/Cargo.toml /caravan/rpc/rust/caravan-rpc/
+COPY caravan/rpc/rust/caravan-rpc/src /caravan/rpc/rust/caravan-rpc/src
+COPY caravan/rpc/rust/caravan-rpc-macros/Cargo.toml /caravan/rpc/rust/caravan-rpc-macros/
+COPY caravan/rpc/rust/caravan-rpc-macros/src /caravan/rpc/rust/caravan-rpc-macros/src
 
 # Create dummy sources for dependency caching
 RUN mkdir -p src/bin crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
