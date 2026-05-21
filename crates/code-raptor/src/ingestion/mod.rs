@@ -342,6 +342,10 @@ pub(crate) fn should_skip(entry: &DirEntry, repo_root: &Path) -> bool {
         {
             return true;
         }
+        // Go: *_test.go (the standard `go test` convention)
+        if name_lower.ends_with("_test.go") {
+            return true;
+        }
     }
 
     false

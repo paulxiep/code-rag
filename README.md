@@ -11,7 +11,7 @@ The retrieval brain ships as `code-rag-mcp`, a single-binary MCP server you can 
 
 Install is three steps, no terminal commands once the exe is on disk:
 
-1. **Download** the zip for your platform from the [GitHub Release page](https://github.com/paulxiep/code-rag/releases) and extract it. You get one binary plus a `code-rag-mcp.config.yaml` template.
+1. **Download** the zip for your platform from the [GitHub Release page](releases) and extract it. You get one binary plus a `code-rag-mcp.config.yaml` template.
 2. **Edit** the YAML — set `target_path` to your repo (or a parent folder with `workspace: true` for many sub-projects).
 3. **Run** the exe (double-click works). It writes `.claude/skills/code-rag.md`, `.mcp.json`, and a `.gitignore` entry into your target dir, then exits.
 

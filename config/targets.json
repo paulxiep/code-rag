@@ -1,5 +1,6 @@
 [
   { "repo": "https://github.com/paulxiep/code-rag.git", "name": "code-rag" },
   { "repo": "https://github.com/paulxiep/quant-trading-gym.git", "name": "quant-trading-gym" },
-  { "repo": "https://github.com/paulxiep/invoice-parse.git", "name": "invoice-parse" }
+  { "repo": "https://github.com/paulxiep/invoice-parse.git", "name": "invoice-parse" },
+  { "repo": "https://github.com/paulxiep/caravan.git", "name": "caravan" }
 ]

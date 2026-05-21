@@ -27,7 +27,7 @@ That's it. The pipeline runs fully local: no API keys, no cloud dependencies.
 
 ## Install — three steps, no terminal commands once the exe is on disk
 
-1. **Download** the zip for your platform from the [GitHub Release page](https://github.com/paulxiep/code-rag/releases). Extract somewhere persistent (e.g. `C:\tools\code-rag-mcp\` or `~/.local/share/code-rag-mcp/`). The archive contains a single `code-rag-mcp` binary plus a `code-rag-mcp.config.yaml` template.
+1. **Download** the zip for your platform from the [GitHub Release page](../../releases). Extract somewhere persistent (e.g. `C:\tools\code-rag-mcp\` or `~/.local/share/code-rag-mcp/`). The archive contains a single `code-rag-mcp` binary plus a `code-rag-mcp.config.yaml` template.
 2. **Edit** `code-rag-mcp.config.yaml` (lives next to the exe) in any text editor:
 
    ```yaml
