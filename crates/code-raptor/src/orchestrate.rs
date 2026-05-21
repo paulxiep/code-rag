@@ -9,10 +9,10 @@ use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChu
 use tracing::info;
 
 use crate::{
-    DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, IngestionResult,
-    IngestionStats, VectorStore, format_code_for_embedding, format_crate_for_embedding,
-    format_module_doc_for_embedding, format_readme_for_embedding, format_signature_for_embedding,
-    reconcile, run_ingestion,
+    DEFAULT_EMBEDDING_MODEL, DeletionsByTable, Embedder, ExistingFileIndex, FastEmbedImpl,
+    IngestionResult, IngestionStats, VectorStore, format_code_for_embedding,
+    format_crate_for_embedding, format_module_doc_for_embedding, format_readme_for_embedding,
+    format_signature_for_embedding, reconcile, run_ingestion,
 };
 
 /// Batch size for embedding processing to reduce peak memory usage.
@@ -96,15 +96,15 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
     );
 
     // Step 2: Initialize embedder + store.
-    let mut embedder = Embedder::new()?;
+    let embedder: Box<dyn Embedder> = Box::new(FastEmbedImpl::new()?);
     let dimension = embedder.dimension();
     let store = VectorStore::new(&db_path, dimension).await?;
 
     // Step 3: Run the appropriate ingestion mode.
     if full {
-        run_full_ingestion(&result, &store, &mut embedder, &calls_map).await?;
+        run_full_ingestion(&result, &store, embedder.as_ref(), &calls_map).await?;
     } else {
-        run_incremental_ingestion(&result, &store, &mut embedder, dry_run, &calls_map).await?;
+        run_incremental_ingestion(&result, &store, embedder.as_ref(), dry_run, &calls_map).await?;
     }
 
     // Step 4: C1 — Resolve call edges and persist them.
@@ -133,7 +133,7 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
 async fn run_full_ingestion(
     result: &IngestionResult,
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
     calls_map: &HashMap<String, Vec<String>>,
 ) -> anyhow::Result<()> {
     info!("Mode: full re-index");
@@ -168,7 +168,7 @@ async fn run_full_ingestion(
 async fn run_incremental_ingestion(
     result: &IngestionResult,
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
     dry_run: bool,
     calls_map: &HashMap<String, Vec<String>>,
 ) -> anyhow::Result<()> {
@@ -369,7 +369,7 @@ async fn apply_deletions(store: &VectorStore, deletions: &DeletionsByTable) -> a
 async fn embed_and_store_all(
     result: &IngestionResult,
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
     calls_map: &HashMap<String, Vec<String>>,
 ) -> anyhow::Result<()> {
     let code_count = embed_and_store_code(&result.code_chunks, store, embedder, calls_map).await?;
@@ -425,7 +425,7 @@ fn log_reconcile_stats(stats: &IngestionStats) {
 async fn embed_and_store_code(
     chunks: &[CodeChunk],
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
     calls_map: &HashMap<String, Vec<String>>,
 ) -> anyhow::Result<usize> {
     if chunks.is_empty() {
@@ -471,10 +471,7 @@ async fn embed_and_store_code(
         let sig_texts: Vec<&str> = sig_text_indices.iter().map(|(_, t)| t.as_str()).collect();
         let sig_embeddings_dense = embedder.embed_batch(&sig_texts)?;
         let mut signature_embeddings: Vec<Option<Vec<f32>>> = vec![None; batch.len()];
-        for ((idx, _), emb) in sig_text_indices
-            .iter()
-            .zip(sig_embeddings_dense.into_iter())
-        {
+        for ((idx, _), emb) in sig_text_indices.iter().zip(sig_embeddings_dense) {
             signature_embeddings[*idx] = Some(emb);
         }
 
@@ -488,7 +485,7 @@ async fn embed_and_store_code(
 async fn embed_and_store_readme(
     chunks: &[ReadmeChunk],
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
 ) -> anyhow::Result<usize> {
     if chunks.is_empty() {
         return Ok(0);
@@ -511,7 +508,7 @@ async fn embed_and_store_readme(
 async fn embed_and_store_crates(
     chunks: &[CrateChunk],
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
 ) -> anyhow::Result<usize> {
     if chunks.is_empty() {
         return Ok(0);
@@ -536,7 +533,7 @@ async fn embed_and_store_crates(
 async fn embed_and_store_module_docs(
     chunks: &[ModuleDocChunk],
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
 ) -> anyhow::Result<usize> {
     if chunks.is_empty() {
         return Ok(0);
@@ -563,7 +560,7 @@ async fn embed_and_store_module_docs(
 async fn embed_and_store_folders(
     chunks: &[FolderChunk],
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
 ) -> anyhow::Result<usize> {
     if chunks.is_empty() {
         return Ok(0);
@@ -585,7 +582,7 @@ async fn embed_and_store_folders(
 async fn embed_and_store_files(
     chunks: &[FileChunk],
     store: &VectorStore,
-    embedder: &mut Embedder,
+    embedder: &dyn Embedder,
 ) -> anyhow::Result<usize> {
     if chunks.is_empty() {
         return Ok(0);

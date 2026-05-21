@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     // Warmup mode - just download model and exit
     if std::env::args().any(|a| a == "--warmup") {
         println!("Warming up embedding model...");
-        let _ = crate::store::Embedder::new();
+        let _ = crate::store::FastEmbedImpl::new();
         println!("Warmup complete");
         return Ok(());
     }
@@ -45,18 +45,31 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(db_path, model, enable_reranker, "Initializing application");
 
-    // Build application state
+    // Build application state. `from_config` calls `caravan_rpc::provide()`
+    // for each #[wagon] trait — must happen BEFORE `run_or_serve` so the
+    // SDK has registered impls available in peer mode.
     let state = api::AppState::from_config(&db_path, &model, enable_reranker).await?;
 
-    // Build router
-    let app = api::router(state);
-
-    // Start server
-    let addr = format!("{}:{}", host, port);
-    tracing::info!("Starting server on http://{}", addr);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // Caravan-RPC contract: dispatches to peer-serve mode when
+    // CARAVAN_RPC_ROLE=peer-<Interface> is set, otherwise runs the chat
+    // server. Same binary serves both roles; the SDK picks via env var.
+    caravan_rpc::run_or_serve(|| async move {
+        let app = api::router(state);
+        let addr = format!("{}:{}", host, port);
+        tracing::info!("Starting server on http://{}", addr);
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| caravan_rpc::RpcError::Transport(
+                caravan_rpc::RpcTransportError::Http(e.to_string()),
+            ))?;
+        axum::serve(listener, app).await.map_err(|e| {
+            caravan_rpc::RpcError::Transport(
+                caravan_rpc::RpcTransportError::Http(e.to_string()),
+            )
+        })?;
+        Ok(())
+    })
+    .await?;
 
     Ok(())
 }

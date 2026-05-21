@@ -1,0 +1,27 @@
+[package]
+name = "code-rag-llm"
+version = "0.1.0"
+authors = ["paulxiep"]
+edition = "2024"
+
+# Houses the concrete LlmClient seam impls (rig-core-backed Gemini today;
+# future providers slot in alongside). Extracted at M5 from the chat
+# binary crate so synthetic Caravan peer services can load the impl
+# (Caravan compile builds peer entries against library crates, not the
+# host binary). Mirrors the shape of code-rag-store: trait declared
+# in seams, concrete impl lives next to it in a sibling module.
+
+[dependencies]
+# Trait declaration (LlmClient + LlmError) lives in code-rag-store::seams.
+code-rag-store = { path = "../code-rag-store" }
+
+# LLM provider SDK. Drives the Gemini impl; future providers can be
+# added as separate modules without touching downstream crates.
+rig-core = "0.27"
+
+async-trait = "0.1"
+anyhow = "1"
+
+[dev-dependencies]
+# For the #[ignore]'d Gemini integration test that needs a runtime.
+tokio = { version = "1.48", features = ["macros", "rt"] }
