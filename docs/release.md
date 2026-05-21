@@ -16,7 +16,7 @@ Releases are built by the manually-triggered [release.yml](../.github/workflows/
    - Leave "Create as draft" checked.
    - Click "Run workflow".
 
-5. **Wait** for the build (~3-5 min for the matrix). When it finishes, a draft release appears at https://github.com/paulxiep/code-rag/releases.
+5. **Wait** for the build (~3-5 min for the matrix). When it finishes, a draft release appears at [releases](../releases).
 
 6. **Smoke-test** on a fresh dir or scratch machine:
    - Download the zip for your platform from the draft release.

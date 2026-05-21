@@ -57,15 +57,11 @@ async fn main() -> anyhow::Result<()> {
         let app = api::router(state);
         let addr = format!("{}:{}", host, port);
         tracing::info!("Starting server on http://{}", addr);
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| caravan_rpc::RpcError::Transport(
-                caravan_rpc::RpcTransportError::Http(e.to_string()),
-            ))?;
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            caravan_rpc::RpcError::Transport(caravan_rpc::RpcTransportError::Http(e.to_string()))
+        })?;
         axum::serve(listener, app).await.map_err(|e| {
-            caravan_rpc::RpcError::Transport(
-                caravan_rpc::RpcTransportError::Http(e.to_string()),
-            )
+            caravan_rpc::RpcError::Transport(caravan_rpc::RpcTransportError::Http(e.to_string()))
         })?;
         Ok(())
     })

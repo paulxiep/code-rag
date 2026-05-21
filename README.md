@@ -1,6 +1,6 @@
 # Code RAG
 
-A RAG chatbot that answers questions about code repositories. Ingests all sibling project directories, parses Rust, Python, and TypeScript codebases with tree-sitter, extracts docstrings and a persistent AST call graph, generates embeddings, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies — including graph augmentation for relationship queries and per-comparator decomposition for comparison queries. Retrieval traces surface all sources with relevance scores — the system shows its work.
+A RAG chatbot that answers questions about code repositories. Ingests all sibling project directories, parses Rust, Python, TypeScript, and Go codebases with tree-sitter, extracts docstrings and a persistent AST call graph, generates embeddings, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies — including graph augmentation for relationship queries and per-comparator decomposition for comparison queries. Retrieval traces surface all sources with relevance scores — the system shows its work.
 
 - [Executive Summary](docs/executive_summary.md)
 - [Technical Summary](docs/technical_summary.md)
@@ -11,7 +11,7 @@ The retrieval brain ships as `code-rag-mcp`, a single-binary MCP server you can 
 
 Install is three steps, no terminal commands once the exe is on disk:
 
-1. **Download** the zip for your platform from the [GitHub Release page](https://github.com/paulxiep/code-rag/releases) and extract it. You get one binary plus a `code-rag-mcp.config.yaml` template.
+1. **Download** the zip for your platform from the [GitHub Release page](releases) and extract it. You get one binary plus a `code-rag-mcp.config.yaml` template.
 2. **Edit** the YAML — set `target_path` to your repo (or a parent folder with `workspace: true` for many sub-projects).
 3. **Run** the exe (double-click works). It writes `.claude/skills/code-rag.md`, `.mcp.json`, and a `.gitignore` entry into your target dir, then exits.
 
@@ -166,8 +166,8 @@ See [caravan.yaml](caravan.yaml) for the full seam declarations and four mix-and
 ## Current State
 
 - Function-level chunking: 1 function/class → 1 vector (BGE-small, 384 dim)
-- Supports Rust, Python, and TypeScript via tree-sitter AST parsing
-- Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc)
+- Supports Rust, Python, TypeScript, and Go via tree-sitter AST parsing
+- Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc), `//` (Go)
 - Declaration signatures extracted: functions + structs/enums/traits/interfaces/classes
 - **Hierarchy chunks (Track A)**: `FolderChunk` (1 per directory, 5-line template — folder/files+languages/key types/key functions/subfolders) and `FileChunk` (1 per source file, 4-line template — file/exports/imports/purpose). Built deterministically at ingest from existing CodeChunk metadata + C1 imports map — no LLM. Both render through pure `code-rag-engine::{folder,file}` functions, so server-embedded bytes and browser BM25 bytes are byte-identical
 - **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table (~3011 edges), 3-tier resolver (same-file → import-based → unique-global), AST scoped-identifier (`module::function()`) extraction
