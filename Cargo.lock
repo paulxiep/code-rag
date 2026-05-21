@@ -1334,6 +1334,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 
 [[package]]
+name = "caravan-rpc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba5353d50f7e0003b95641e8e6f5490a8f8e0f98dfbee77b7916e7694ce2bf54"
+dependencies = [
+ "async-trait",
+ "axum",
+ "caravan-rpc-macros",
+ "inventory",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "caravan-rpc-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03526f30542ba0f9ef32af4d9811561722f824395aaa2abbb5133b537ee2e9d3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1469,15 +1497,18 @@ name = "code-rag-chat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "caravan-rpc",
  "chrono",
  "clap",
+ "code-rag-core",
  "code-rag-engine",
+ "code-rag-llm",
  "code-rag-store",
  "code-rag-types",
  "dotenvy",
  "futures",
- "rig-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -1486,6 +1517,23 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "code-rag-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "caravan-rpc",
+ "code-rag-engine",
+ "code-rag-llm",
+ "code-rag-store",
+ "code-rag-types",
+ "serde",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1499,12 +1547,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-rag-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "code-rag-store",
+ "rig-core",
+ "tokio",
+]
+
+[[package]]
 name = "code-rag-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "caravan-rpc",
  "clap",
- "code-rag-chat",
+ "code-rag-core",
  "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
@@ -1528,12 +1588,16 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
+ "async-trait",
+ "caravan-rpc",
  "code-rag-engine",
  "code-rag-types",
  "fastembed",
  "futures",
  "hf-hub",
  "lancedb",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -1578,6 +1642,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-buffer",
+ "caravan-rpc",
  "clap",
  "code-rag-engine",
  "code-rag-store",
@@ -4248,6 +4313,15 @@ name = "interpolator"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71dd52191aae121e8611f1e8dc3e324dd0dd1dee1e6dd91d10ee07a3cfb4d9d8"
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "ipnet"
@@ -7065,6 +7139,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.12",

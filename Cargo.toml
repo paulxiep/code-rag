@@ -2,6 +2,13 @@
 members = ["crates/*"]
 resolver = "2"
 
+[workspace.dependencies]
+# Caravan RPC SDK — published to crates.io at M9 Phase 1 close (2026-05-21).
+# Was a sibling path-dep through M5 (the local caravan/ next to code-rag/);
+# the published pin removes that CI gotcha so gh-pages + release workflows
+# resolve the dep from a single-repo checkout.
+caravan-rpc = "0.1.0"
+
 [package]
 name = "code-rag-chat"
 version = "0.1.0"
@@ -20,9 +27,18 @@ path = "src/bin/harness.rs"
 code-rag-types = { path = "crates/code-rag-types" }
 code-rag-engine = { path = "crates/code-rag-engine" }
 code-rag-store = { path = "crates/code-rag-store" }
+# M5: LLM impls + chat-side core (AppState, retrieve, EngineError, SourceInfo)
+# live in their own library crates so a Caravan synthetic peer can build
+# against them (peers can't link the host binary). The MCP server crate
+# depends on `code-rag-core` directly, breaking its transitive dep on
+# `code-rag-chat`.
+code-rag-llm = { path = "crates/code-rag-llm" }
+code-rag-core = { path = "crates/code-rag-core" }
+caravan-rpc = { workspace = true }
+async-trait = "0.1"
 
-# LLM
-rig-core = "0.27"
+# (M5) `rig-core` dependency dropped — moved with RigGeminiImpl to
+# `code-rag-llm`. The chat binary reaches it transitively now.
 
 # Web
 axum = "0.8"

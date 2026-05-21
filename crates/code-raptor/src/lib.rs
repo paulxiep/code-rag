@@ -14,8 +14,10 @@ pub use ingestion::{
 };
 pub use orchestrate::{IngestOpts, ingest_repo};
 
-// Re-export store functionality for convenience
+// Re-export store functionality for convenience.
+// `Embedder` is the seam trait; `FastEmbedImpl` is the concrete fastembed-backed impl.
+pub use code_rag_store::seams::Embedder;
 pub use code_rag_store::{
-    Embedder, StoreError, VectorStore, format_code_for_embedding, format_crate_for_embedding,
+    FastEmbedImpl, StoreError, VectorStore, format_code_for_embedding, format_crate_for_embedding,
     format_module_doc_for_embedding, format_readme_for_embedding, format_signature_for_embedding,
 };

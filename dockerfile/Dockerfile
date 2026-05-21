@@ -8,7 +8,7 @@
 #   docker build --target raptor -t code-raptor .
 
 # Builder stage: compile the Rust application
-FROM rust:1.92-slim AS builder
+FROM rust:1.95-slim AS builder
 
 # Install necessary build dependencies
 RUN apt-get update && apt-get install -y \
@@ -30,29 +30,48 @@ COPY code-rag/Cargo.toml code-rag/Cargo.lock ./
 COPY code-rag/crates/code-rag-types/Cargo.toml ./crates/code-rag-types/
 COPY code-rag/crates/code-rag-engine/Cargo.toml ./crates/code-rag-engine/
 COPY code-rag/crates/code-rag-store/Cargo.toml ./crates/code-rag-store/
+COPY code-rag/crates/code-rag-core/Cargo.toml ./crates/code-rag-core/
+COPY code-rag/crates/code-rag-llm/Cargo.toml ./crates/code-rag-llm/
 COPY code-rag/crates/code-raptor/Cargo.toml ./crates/code-raptor/
 COPY code-rag/crates/code-rag-ui/Cargo.toml ./crates/code-rag-ui/
+COPY code-rag/crates/code-rag-mcp/Cargo.toml ./crates/code-rag-mcp/
+
+# Copy the caravan-rpc SDK + its proc-macro crate — code-rag's
+# Cargo.toml references them as path-dep `../caravan/rpc/rust/caravan-rpc`
+# (added at B0p). Place them at /caravan/... so the relative path
+# resolves from /build/Cargo.toml.
+COPY caravan/rpc/rust/caravan-rpc/Cargo.toml /caravan/rpc/rust/caravan-rpc/
+COPY caravan/rpc/rust/caravan-rpc/src /caravan/rpc/rust/caravan-rpc/src
+COPY caravan/rpc/rust/caravan-rpc-macros/Cargo.toml /caravan/rpc/rust/caravan-rpc-macros/
+COPY caravan/rpc/rust/caravan-rpc-macros/src /caravan/rpc/rust/caravan-rpc-macros/src
 
 # Create dummy sources for dependency caching
-RUN mkdir -p src/bin crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src && \
+RUN mkdir -p src/bin crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-rag-core/src crates/code-rag-llm/src crates/code-raptor/src crates/code-rag-ui/src crates/code-rag-mcp/src && \
     echo "fn main() {println!(\"dummy\")}" > src/main.rs && \
     echo "fn main() {}" > src/bin/harness.rs && \
     echo "// dummy" > crates/code-rag-types/src/lib.rs && \
     echo "// dummy" > crates/code-rag-engine/src/lib.rs && \
     echo "// dummy" > crates/code-rag-store/src/lib.rs && \
+    echo "// dummy" > crates/code-rag-core/src/lib.rs && \
+    echo "// dummy" > crates/code-rag-llm/src/lib.rs && \
     echo "fn main() {}" > crates/code-raptor/src/main.rs && \
     echo "// dummy" > crates/code-raptor/src/lib.rs && \
-    echo "fn main() {}" > crates/code-rag-ui/src/main.rs
+    echo "fn main() {}" > crates/code-rag-ui/src/main.rs && \
+    echo "fn main() {}" > crates/code-rag-mcp/src/main.rs
 
-# Build server crates to cache dependencies (exclude UI — different target)
-RUN cargo build --release --workspace --exclude code-rag-ui && \
-    rm -rf src crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-raptor/src crates/code-rag-ui/src
+# Build server crates to cache dependencies — exclude code-rag-ui (WASM
+# target, built via trunk below) and code-rag-mcp (standalone single-binary
+# release artifact, not used by the chat / raptor compose images).
+RUN cargo build --release --workspace --exclude code-rag-ui --exclude code-rag-mcp && \
+    rm -rf src crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-rag-core/src crates/code-rag-llm/src crates/code-raptor/src crates/code-rag-ui/src crates/code-rag-mcp/src
 
 # Copy actual source for all crates
 COPY code-rag/src ./src
 COPY code-rag/crates/code-rag-types/src ./crates/code-rag-types/src
 COPY code-rag/crates/code-rag-engine/src ./crates/code-rag-engine/src
 COPY code-rag/crates/code-rag-store/src ./crates/code-rag-store/src
+COPY code-rag/crates/code-rag-core/src ./crates/code-rag-core/src
+COPY code-rag/crates/code-rag-llm/src ./crates/code-rag-llm/src
 COPY code-rag/crates/code-raptor/src ./crates/code-raptor/src
 COPY code-rag/crates/code-rag-ui/src ./crates/code-rag-ui/src
 COPY code-rag/crates/code-rag-ui/index.html ./crates/code-rag-ui/index.html
@@ -66,9 +85,11 @@ RUN touch src/main.rs \
           crates/code-rag-types/src/lib.rs \
           crates/code-rag-engine/src/lib.rs \
           crates/code-rag-store/src/lib.rs \
+          crates/code-rag-core/src/lib.rs \
+          crates/code-rag-llm/src/lib.rs \
           crates/code-raptor/src/lib.rs \
           crates/code-raptor/src/main.rs && \
-    cargo build --release --workspace --exclude code-rag-ui
+    cargo build --release --workspace --exclude code-rag-ui --exclude code-rag-mcp
 
 # Build WASM frontend
 RUN cd crates/code-rag-ui && trunk build --release

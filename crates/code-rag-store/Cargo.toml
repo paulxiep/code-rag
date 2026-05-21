@@ -7,6 +7,8 @@ edition = "2024"
 [dependencies]
 code-rag-types = { path = "../code-rag-types" }
 code-rag-engine = { path = "../code-rag-engine" }
+caravan-rpc = { workspace = true }
+async-trait = "0.1"
 
 # Embeddings
 fastembed = "5.5"
@@ -29,5 +31,9 @@ tracing = "0.1"
 anyhow = "1.0"
 thiserror = "2.0"
 
+# Serde — required by Caravan-RPC for seam-trait error wire serialization (pre-M2).
+serde = { version = "1.0", features = ["derive"] }
+
 [dev-dependencies]
 tempfile = "3.13"
+serde_json = "1.0"

@@ -153,6 +153,7 @@ pub fn reconcile(current: &IngestionResult, existing: &ExistingFileIndex) -> Rec
 /// unchanged function bodies → same chunk_id). Without this subtraction, the
 /// orchestrator's insert-then-delete order would clobber the just-upserted
 /// row whenever a chunk_id collided with an old one.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_by_file<T: Clone>(
     current_chunks: &[T],
     get_path: impl Fn(&T) -> &str,
@@ -228,6 +229,7 @@ fn reconcile_by_file<T: Clone>(
 /// particular this is the latent case where a file's `//!` doc is unchanged
 /// but the surrounding source bytes shifted (chunk_id is derived from
 /// doc_content, content_hash from full file).
+#[allow(clippy::too_many_arguments)]
 fn reconcile_single_per_file<T: Clone>(
     current_chunks: &[T],
     get_path: impl Fn(&T) -> &str,

@@ -180,9 +180,10 @@ fn build_intent_prototypes() -> anyhow::Result<HashMap<String, Vec<Vec<f32>>>> {
         COMPARISON_PROTOTYPES, IMPLEMENTATION_PROTOTYPES, OVERVIEW_PROTOTYPES,
         RELATIONSHIP_PROTOTYPES,
     };
-    use code_rag_store::Embedder;
+    use code_rag_store::FastEmbedImpl;
+    use code_rag_store::seams::Embedder;
 
-    let mut embedder = Embedder::new()?;
+    let embedder = FastEmbedImpl::new()?;
 
     let intent_texts: &[(&str, &[&str])] = &[
         ("overview", OVERVIEW_PROTOTYPES),

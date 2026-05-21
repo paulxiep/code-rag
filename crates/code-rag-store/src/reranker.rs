@@ -1,10 +1,15 @@
+use std::path::Path;
+use std::sync::Mutex;
+
 use fastembed::{
     OnnxSource, RerankInitOptionsUserDefined, RerankResult, TextRerank, TokenizerFiles,
     UserDefinedRerankingModel,
 };
 use hf_hub::api::sync::Api;
-use std::path::Path;
 use thiserror::Error;
+use tracing::warn;
+
+use crate::seams;
 
 const HF_MODEL_ID: &str = "cross-encoder/ms-marco-MiniLM-L-6-v2";
 const ONNX_FILE: &str = "onnx/model.onnx";
@@ -13,26 +18,37 @@ const CONFIG_FILE: &str = "config.json";
 const SPECIAL_TOKENS_FILE: &str = "special_tokens_map.json";
 const TOKENIZER_CONFIG_FILE: &str = "tokenizer_config.json";
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RerankError {
     #[error("failed to initialize reranker model: {0}")]
-    Init(#[from] anyhow::Error),
+    Init(String),
 
     #[error("reranking failed: {0}")]
     Rerank(String),
 
     #[error("model files not found at {0}")]
     ModelNotFound(String),
+
+    #[error("reranker mutex poisoned (a prior call panicked)")]
+    Poisoned,
 }
 
-/// Cross-encoder reranker. Wraps fastembed's TextRerank.
-/// Holds loaded ONNX model weights in memory.
-/// Uses ms-marco-MiniLM-L-6-v2 — same model as browser (Xenova/ms-marco-MiniLM-L-6-v2).
-pub struct Reranker {
-    model: TextRerank,
+impl From<anyhow::Error> for RerankError {
+    fn from(e: anyhow::Error) -> Self {
+        warn!(error = format!("{e:#}"), "reranker init failed");
+        RerankError::Init(e.to_string())
+    }
 }
 
-impl Reranker {
+/// Concrete cross-encoder reranker. Wraps fastembed's `TextRerank` in
+/// `std::sync::Mutex` so the seam trait methods can be `&self` — fastembed's
+/// `TextRerank::rerank` takes `&mut self`. No `.await` happens while the lock
+/// is held, so a sync mutex is sufficient.
+pub struct MsMarcoRerankerImpl {
+    model: Mutex<TextRerank>,
+}
+
+impl MsMarcoRerankerImpl {
     /// Auto-download model from HuggingFace Hub and initialize.
     /// Files are cached locally (same cache mechanism as fastembed embedder).
     ///
@@ -48,31 +64,31 @@ impl Reranker {
             return Self::from_dir(&path);
         }
 
-        let api = Api::new().map_err(|e| RerankError::Init(e.into()))?;
+        let api = Api::new().map_err(|e| RerankError::Init(e.to_string()))?;
         let repo = api.model(HF_MODEL_ID.to_string());
 
         // Download all required files (cached after first download)
         let onnx_path = repo
             .get(ONNX_FILE)
-            .map_err(|e| RerankError::Init(e.into()))?;
+            .map_err(|e| RerankError::Init(e.to_string()))?;
         let tokenizer_bytes = std::fs::read(
             repo.get(TOKENIZER_FILE)
-                .map_err(|e| RerankError::Init(e.into()))?,
+                .map_err(|e| RerankError::Init(e.to_string()))?,
         )
-        .map_err(|e| RerankError::Init(e.into()))?;
+        .map_err(|e| RerankError::Init(e.to_string()))?;
         let config_bytes = std::fs::read(
             repo.get(CONFIG_FILE)
-                .map_err(|e| RerankError::Init(e.into()))?,
+                .map_err(|e| RerankError::Init(e.to_string()))?,
         )
-        .map_err(|e| RerankError::Init(e.into()))?;
+        .map_err(|e| RerankError::Init(e.to_string()))?;
         let special_tokens_bytes = std::fs::read(
             repo.get(SPECIAL_TOKENS_FILE)
-                .map_err(|e| RerankError::Init(e.into()))?,
+                .map_err(|e| RerankError::Init(e.to_string()))?,
         )
-        .map_err(|e| RerankError::Init(e.into()))?;
+        .map_err(|e| RerankError::Init(e.to_string()))?;
         let tokenizer_config_bytes = std::fs::read(
             repo.get(TOKENIZER_CONFIG_FILE)
-                .map_err(|e| RerankError::Init(e.into()))?,
+                .map_err(|e| RerankError::Init(e.to_string()))?,
         )
         .unwrap_or_default();
 
@@ -99,11 +115,11 @@ impl Reranker {
         }
 
         let tokenizer_bytes = std::fs::read(model_dir.join(TOKENIZER_FILE))
-            .map_err(|e| RerankError::Init(e.into()))?;
-        let config_bytes =
-            std::fs::read(model_dir.join(CONFIG_FILE)).map_err(|e| RerankError::Init(e.into()))?;
+            .map_err(|e| RerankError::Init(e.to_string()))?;
+        let config_bytes = std::fs::read(model_dir.join(CONFIG_FILE))
+            .map_err(|e| RerankError::Init(e.to_string()))?;
         let special_tokens_bytes = std::fs::read(model_dir.join(SPECIAL_TOKENS_FILE))
-            .map_err(|e| RerankError::Init(e.into()))?;
+            .map_err(|e| RerankError::Init(e.to_string()))?;
         let tokenizer_config_bytes =
             std::fs::read(model_dir.join(TOKENIZER_CONFIG_FILE)).unwrap_or_default();
 
@@ -138,22 +154,49 @@ impl Reranker {
             RerankInitOptionsUserDefined::default(),
         )?;
 
-        Ok(Self { model })
+        Ok(Self {
+            model: Mutex::new(model),
+        })
     }
+}
 
-    /// Rerank documents against a query.
-    /// Returns Vec<RerankResult> sorted by score descending.
-    pub fn rerank(
-        &mut self,
+impl seams::Reranker for MsMarcoRerankerImpl {
+    fn rerank(
+        &self,
         query: &str,
         documents: Vec<String>,
-    ) -> Result<Vec<RerankResult>, RerankError> {
+    ) -> Result<Vec<seams::RerankResult>, RerankError> {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
 
-        self.model
+        let mut guard = self.model.lock().map_err(|_| RerankError::Poisoned)?;
+        let raw: Vec<RerankResult> = guard
             .rerank(query.to_string(), &documents, false, None)
-            .map_err(|e| RerankError::Rerank(e.to_string()))
+            .map_err(|e| RerankError::Rerank(e.to_string()))?;
+        // Convert fastembed::RerankResult → seams::RerankResult (the wire
+        // shim with serde derives) at the impl boundary. Caravan's HTTP
+        // codegen encodes the wire shape; callers read `rr.score`/`rr.index`
+        // identically either way.
+        Ok(raw.into_iter().map(seams::RerankResult::from).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rerank_error_serde_roundtrip() {
+        for err in [
+            RerankError::Init("boom".into()),
+            RerankError::Rerank("oops".into()),
+            RerankError::ModelNotFound("/tmp/nope".into()),
+            RerankError::Poisoned,
+        ] {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: RerankError = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{err:?}"));
+        }
     }
 }

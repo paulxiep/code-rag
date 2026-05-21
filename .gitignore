@@ -9,3 +9,9 @@
 /crates/code-rag-ui/dist
 /models
 /.code-rag
+
+# Caravan-generated artifacts: per-target docker-compose overrides +
+# synthetic Rust peer crates. Re-emitted by `caravan compile`; no need
+# to commit. See ../caravan/docs/development_plan.md M2.
+/infra/
+/caravan.exe

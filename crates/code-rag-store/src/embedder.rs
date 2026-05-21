@@ -1,23 +1,45 @@
+use std::sync::Mutex;
+
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use thiserror::Error;
+use tracing::warn;
 
-#[derive(Error, Debug)]
+use crate::seams;
+
+#[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
 pub enum EmbedError {
     #[error("failed to initialize embedding model: {0}")]
-    Init(#[from] anyhow::Error),
+    Init(String),
 
     #[error("embedding generation failed: {0}")]
     Embed(String),
+
+    #[error("embedder mutex poisoned (a prior call panicked)")]
+    Poisoned,
 }
 
-/// Wraps fastembed model. Holds loaded model weights in memory.
-pub struct Embedder {
-    model: TextEmbedding,
+impl From<anyhow::Error> for EmbedError {
+    fn from(e: anyhow::Error) -> Self {
+        warn!(error = format!("{e:#}"), "embedder init failed");
+        EmbedError::Init(e.to_string())
+    }
+}
+
+/// Concrete fastembed-backed `Embedder` seam impl.
+///
+/// fastembed's `TextEmbedding` is `!Sync` and its `embed*` methods take
+/// `&mut self`; we wrap it in `std::sync::Mutex` here so the seam trait
+/// methods can be `&self` (the locking is an implementation detail invisible
+/// to call sites going through `client::<dyn Embedder>()`). The mutex is
+/// `std::sync` rather than `tokio::sync` because no `.await` happens while
+/// the lock is held.
+pub struct FastEmbedImpl {
+    model: Mutex<TextEmbedding>,
     dimension: usize,
 }
 
-impl Embedder {
-    /// Initialize with BGE-small-en-v1.5 (384 dimensions, good for code)
+impl FastEmbedImpl {
+    /// Initialize with BGE-small-en-v1.5 (384 dimensions, good for code).
     pub fn new() -> Result<Self, EmbedError> {
         Self::with_model(EmbeddingModel::BGESmallENV15)
     }
@@ -27,27 +49,31 @@ impl Embedder {
         let model =
             TextEmbedding::try_new(InitOptions::new(model_name).with_show_download_progress(true))?;
 
-        Ok(Self { model, dimension })
+        Ok(Self {
+            model: Mutex::new(model),
+            dimension,
+        })
     }
+}
 
-    /// Embed a single text. Convenience wrapper around batch.
-    pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, EmbedError> {
+impl seams::Embedder for FastEmbedImpl {
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         self.embed_batch(&[text])
             .map(|mut v| v.pop().unwrap_or_default())
     }
 
-    /// Embed multiple texts in one call (more efficient).
-    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        self.model
+        let mut guard = self.model.lock().map_err(|_| EmbedError::Poisoned)?;
+        guard
             .embed(texts, None)
             .map_err(|e| EmbedError::Embed(e.to_string()))
     }
 
-    pub fn dimension(&self) -> usize {
+    fn dimension(&self) -> usize {
         self.dimension
     }
 }
@@ -152,6 +178,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embed_error_serde_roundtrip() {
+        for err in [
+            EmbedError::Init("boom".into()),
+            EmbedError::Embed("oops".into()),
+            EmbedError::Poisoned,
+        ] {
+            let json = serde_json::to_string(&err).unwrap();
+            let back: EmbedError = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{err:?}"));
+        }
+    }
+
+    #[test]
     fn test_format_code_for_embedding_with_docstring() {
         let result = format_code_for_embedding(
             "process_data",
@@ -252,7 +291,8 @@ mod tests {
     #[test]
     #[ignore = "downloads model, run with --ignored"]
     fn test_embedder_produces_correct_dimensions() {
-        let mut embedder = Embedder::new().expect("failed to init embedder");
+        use crate::seams::Embedder;
+        let embedder = FastEmbedImpl::new().expect("failed to init embedder");
         let embedding = embedder.embed_one("test text").expect("failed to embed");
 
         assert_eq!(embedding.len(), 384);
@@ -262,7 +302,8 @@ mod tests {
     #[test]
     #[ignore = "downloads model, run with --ignored"]
     fn test_embed_batch() {
-        let mut embedder = Embedder::new().expect("failed to init embedder");
+        use crate::seams::Embedder;
+        let embedder = FastEmbedImpl::new().expect("failed to init embedder");
         let embeddings = embedder
             .embed_batch(&["first", "second", "third"])
             .expect("failed to embed");
@@ -274,7 +315,8 @@ mod tests {
     #[test]
     #[ignore = "downloads model, run with --ignored"]
     fn test_embed_empty_batch() {
-        let mut embedder = Embedder::new().expect("failed to init embedder");
+        use crate::seams::Embedder;
+        let embedder = FastEmbedImpl::new().expect("failed to init embedder");
         let embeddings = embedder.embed_batch(&[]).expect("failed to embed");
 
         assert!(embeddings.is_empty());

@@ -59,6 +59,7 @@ impl From<crate::engine::EngineError> for ApiError {
             }
             EngineError::Embedding(e) => ApiError::Internal(e.to_string()),
             EngineError::Generation(e) => ApiError::Internal(format!("LLM error: {}", e)),
+            EngineError::Llm(e) => ApiError::Internal(format!("LLM error: {}", e)),
             EngineError::Rerank(e) => ApiError::Internal(format!("Reranking error: {}", e)),
         }
     }
@@ -79,5 +80,12 @@ impl From<crate::store::StoreError> for ApiError {
         } else {
             ApiError::Internal(err.to_string())
         }
+    }
+}
+
+// Convert LLM seam errors
+impl From<code_rag_store::LlmError> for ApiError {
+    fn from(err: code_rag_store::LlmError) -> Self {
+        ApiError::Internal(format!("LLM error: {}", err))
     }
 }

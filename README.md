@@ -75,6 +75,7 @@ To clean, run `sh clean_docker.sh`.
 | **A3** | 2026-04-17 | Collapsed-tree routing — folder arm activated for Overview/Implementation/Comparison (comparison 0.31→0.67 +36pp) |
 | **A4** | 2026-04-18 | File-level embeddings — `FileChunk` (4-line template, 247 chunks) + stratified relationship retrieval (`recall@pool` metric introduced) |
 | **MCP** | 2026-04-24 | Claude Code MCP server (`code-rag-mcp`) — five tools (`search`, `graph`, `overview`, `neighbors`, `reindex`) on rmcp 1.5; bundled Skill; single-binary install (download → edit `code-rag-mcp.config.yaml` → run exe); subsumes `code-raptor` via internal `ingest` subcommand; manually-triggered cross-platform release pipeline; agent-driven first ingest |
+| **Caravan** | 2026-05-21 | [Caravan](https://github.com/paulxiep/caravan) adoption (B0p → M5). Four `#[wagon]` seams (`Embedder` / `Reranker` / `VectorReader` / `LlmClient`); `RigGeminiImpl` extracted to `code-rag-llm`; chat-side core (`AppState`, `retrieve`) extracted to `code-rag-core` (MCP no longer transitively depends on chat binary); four mix-and-match `caravan.yaml` targets (`dev-monolith` / `dev-split-light` / `dev-split-mixed` / `dev-split-heavy`) exercise per-seam independent dispatch. caravan-rpc 0.1.0 published to crates.io |
 
 ## Purpose
 
@@ -92,6 +93,49 @@ To clean, run `sh clean_docker.sh`.
 - **Vector DB**: LanceDB
 - **Embeddings**: FastEmbed
 - **Frontend**: Leptos (Rust WASM, CSR)
+- **Deployment topology**: [Caravan](https://github.com/paulxiep/caravan) — one yaml flips per-seam dispatch (inproc / container / lambda) without source edits
+
+---
+
+## Deployment flexibility via Caravan
+
+code-rag adopts [Caravan](https://github.com/paulxiep/caravan), an application-definition compiler. The four inter-component boundaries (`Embedder`, `Reranker`, `VectorReader`, `LlmClient`) are wrapped as `caravan-rpc` seams; a single yaml projects code-rag onto multiple deployment topologies with **zero source-code edits between them**.
+
+```yaml
+# caravan.yaml (excerpt)
+targets:
+  dev-monolith:           # all 4 seams inproc — baseline single binary
+    runtime: docker-compose
+    entries: { code-rag-chat: container }
+
+  dev-split-mixed:        # 2 seams flipped to separate compose services
+    runtime: docker-compose
+    entries: { code-rag-chat: container }
+    seams:
+      Embedder: container
+      Reranker: container
+      # VectorReader + LlmClient default to inproc
+```
+
+```bash
+caravan compile --target=dev-split-mixed
+docker compose \
+  -f docker-compose.yaml \
+  -f infra/dev-split-mixed/generated/docker-compose.override.generated.yaml \
+  up
+```
+
+Caravan emits a compose **override** that layers atop the hand-authored `docker-compose.yaml` — adding peer services for split seams + injecting the per-deploy-unit `CARAVAN_RPC_PEERS` table the SDK reads at runtime. Same chat image, same binary, same source tree; only the env var changes.
+
+**SDK adoption surface** is closed at four touchpoints in user code:
+- `#[wagon]` on each seam trait (declares the wire surface, [crates/code-rag-store/src/seams.rs](crates/code-rag-store/src/seams.rs))
+- `caravan_rpc::provide::<dyn I>(Arc::new(impl_))` at startup ([crates/code-rag-core/src/state.rs](crates/code-rag-core/src/state.rs))
+- `caravan_rpc::client::<dyn I>().method(...)` at call sites
+- `caravan_rpc::run_or_serve(user_main)` once in [src/main.rs](src/main.rs) so the same binary can detour into peer-server mode based on `CARAVAN_RPC_ROLE`
+
+**No-config inertness**: when `CARAVAN_RPC_PEERS` is unset, `client::<dyn T>()` returns the registered `Arc<dyn T>` directly with zero overhead. All existing deployment surfaces — compose chat, compose ingest, local `cargo run`, WASM gh-pages, single-binary MCP release — keep working unchanged.
+
+See [caravan.yaml](caravan.yaml) for the full seam declarations and four mix-and-match targets (`dev-monolith` / `dev-split-light` / `dev-split-mixed` / `dev-split-heavy`).
 
 ---
 
@@ -111,9 +155,12 @@ To clean, run `sh clean_docker.sh`.
 |-------|----------------------|
 | `code-raptor` | Ingestion CLI — parsing, chunk extraction, data export |
 | `code-rag-engine` | Shared algorithms — intent, context, scoring (pure, no I/O) |
-| `code-rag-store` | Storage — embeddings, vector search (native) |
+| `code-rag-store` | Storage seams + LanceDB-backed impls; fastembed Embedder + Reranker |
+| `code-rag-llm` | LLM-provider seam impls (rig-core-backed Gemini today; extracted at M5 so synthetic Caravan peer services can build against the impl) |
+| `code-rag-core` | Chat-side core shared between the chat binary and the MCP server — `AppState`, `retrieve()`, `EngineError`, `SourceInfo`. Extracted at M5 to break `code-rag-mcp`'s transitive dep on `code-rag-chat` |
 | `code-rag-types` | Shared types — no logic |
-| `code-rag-chat` | Query API — retrieval, LLM, quality harness (2 binaries) |
+| `code-rag-chat` | HTTP routing + Askama templates + binary main (2 binaries: chat server + harness). Core logic moved to `code-rag-core` |
+| `code-rag-mcp` | MCP stdio server (single-binary release) — depends on `code-rag-core` directly, no chat-binary transitive |
 | `code-rag-ui` | Leptos WASM SPA — chat interface (backend or standalone mode) |
 
 ## Current State
