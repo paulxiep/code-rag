@@ -35,9 +35,32 @@ pub enum LlmError {
     Generation(String),
 }
 
-/// Re-export so call sites that use `client::<dyn Reranker>().rerank(...)` can
-/// match on the fastembed result type without depending on fastembed directly.
-pub use fastembed::RerankResult;
+/// Wire-side reranker result. Mirrors `fastembed::RerankResult`'s shape but
+/// carries serde derives so the seam method can be encoded as JSON across
+/// the HTTP boundary. The `From<fastembed::RerankResult>` conversion at the
+/// impl boundary keeps the migration path for call sites transparent —
+/// `rr.score` and `rr.index` access stays untouched.
+///
+/// `document` is preserved as `Option<String>`; `MsMarcoRerankerImpl` passes
+/// `false` for fastembed's `return_documents` flag, so `document` is `None`
+/// end-to-end today. Kept in the wire shape so a future caller can flip the
+/// flag without another wire migration.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RerankResult {
+    pub document: Option<String>,
+    pub score: f32,
+    pub index: usize,
+}
+
+impl From<fastembed::RerankResult> for RerankResult {
+    fn from(r: fastembed::RerankResult) -> Self {
+        Self {
+            document: r.document,
+            score: r.score,
+            index: r.index,
+        }
+    }
+}
 
 // ---------- Embedder ----------
 
@@ -60,12 +83,11 @@ pub trait Embedder: Send + Sync {
 /// Cross-encoder reranker. Optional seam — the chat target may run without it
 /// (config flag); callers should reach for it via `try_client::<dyn Reranker>()`.
 ///
-/// `#[wagon(identity)]` is transitional: the trait's return type is
-/// `Result<Vec<fastembed::RerankResult>, RerankError>` and `RerankResult`
-/// is a third-party type without `serde::Serialize`. Full HTTP codegen
-/// will land at M5 when `RerankResult` gets a wire-mirror shim. Reranker
-/// isn't in any M2 demo target, so identity is correct for now.
-#[wagon(identity)]
+/// M5: promoted from `#[wagon(identity)]` to full HTTP codegen via the local
+/// `RerankResult` wire shim (defined above with serde derives + a `From<
+/// fastembed::RerankResult>` conversion). The impl in `reranker.rs` converts
+/// at the return boundary.
+#[wagon]
 pub trait Reranker: Send + Sync {
     /// Documents are passed by value because the cross-encoder consumes them;
     /// callers must already materialize the candidate string set.
@@ -198,6 +220,95 @@ pub trait VectorReader: Send + Sync {
         caller_chunk_id: &str,
         project: Option<&str>,
     ) -> Result<Vec<code_rag_types::CallEdge>, StoreError>;
+}
+
+// ---------- VectorWriter ----------
+
+/// Write-side over the LanceDB-backed vector store. Companion to
+/// [`VectorReader`]. M5 split: ingest-time mutations live here; queries
+/// stay on `VectorReader`. The concrete `VectorStore` implements both.
+///
+/// `#[wagon(identity)]` because writes are inproc-only by design — the
+/// dev plan keeps ingest (code-raptor) running as a one-shot batch on
+/// the same node as the store. Promoting to full HTTP codegen is M4-cloud
+/// / Phase 2 work (cloud-managed vector DB). Identity-marked traits don't
+/// honor mode flips, which is the intended Phase 1 behavior here.
+#[wagon(identity)]
+#[async_trait]
+pub trait VectorWriter: Send + Sync {
+    // ---- upserts (typed chunk + embedding batches) ----
+    async fn upsert_code_chunks(
+        &self,
+        chunks: &[code_rag_types::CodeChunk],
+        embeddings: Vec<Vec<f32>>,
+        signature_embeddings: Vec<Option<Vec<f32>>>,
+    ) -> Result<usize, StoreError>;
+
+    async fn upsert_readme_chunks(
+        &self,
+        chunks: &[code_rag_types::ReadmeChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError>;
+
+    async fn upsert_crate_chunks(
+        &self,
+        chunks: &[code_rag_types::CrateChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError>;
+
+    async fn upsert_module_doc_chunks(
+        &self,
+        chunks: &[code_rag_types::ModuleDocChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError>;
+
+    async fn upsert_folder_chunks(
+        &self,
+        chunks: &[code_rag_types::FolderChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError>;
+
+    async fn upsert_file_chunks(
+        &self,
+        chunks: &[code_rag_types::FileChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError>;
+
+    // ---- deletes ----
+    async fn delete_chunks_by_file(
+        &self,
+        table_name: &str,
+        file_path: &str,
+    ) -> Result<usize, StoreError>;
+
+    async fn delete_chunks_by_project(
+        &self,
+        table_name: &str,
+        project_name: &str,
+    ) -> Result<usize, StoreError>;
+
+    async fn delete_chunk_by_id(
+        &self,
+        table_name: &str,
+        chunk_id: &str,
+    ) -> Result<bool, StoreError>;
+
+    async fn delete_chunks_by_ids(
+        &self,
+        table_name: &str,
+        chunk_ids: &[String],
+    ) -> Result<(), StoreError>;
+
+    // ---- indexing ----
+    async fn create_fts_indices(&self) -> Result<(), StoreError>;
+
+    // ---- call-graph writes ----
+    async fn upsert_call_edges(
+        &self,
+        edges: &[code_rag_types::CallEdge],
+    ) -> Result<usize, StoreError>;
+
+    async fn delete_edges_by_project(&self, project_name: &str) -> Result<(), StoreError>;
 }
 
 // ---------- LlmClient ----------

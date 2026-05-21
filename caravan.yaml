@@ -5,17 +5,25 @@
 # entries (deploy units), seams (synchronous abstraction boundaries
 # inside the codebase), and per-target dispatch overrides.
 #
-# Status: M2 seed. Only the Embedder seam + the chat entry are fully
-# declared — enough to drive the dev-monolith + dev-split-light
-# targets that prove the Rust SDK's HTTP flip. Other seams declared
-# in `crates/code-rag-store/src/seams.rs` (Reranker, VectorReader,
-# LlmClient) stay inproc-only at M2: Reranker needs a RerankResultWire
-# shim (M5); VectorReader + LlmClient need async-trait macro support
-# (M2 Session 4-async or M3). All three remain functionally available
-# via `caravan_rpc::client::<dyn …>()` calls that dispatch inproc.
+# Status: M5. All four #[wagon] seams declared:
+#   * Embedder      — full HTTP codegen since M2.
+#   * Reranker      — full HTTP codegen since M5 (RerankResult wire shim
+#                     in code-rag-store landed at M5 Session 1).
+#   * LlmClient     — full HTTP codegen since M5 (RigGeminiImpl moved
+#                     to the dedicated code-rag-llm crate at M5 Session 2
+#                     so synthetic peer services can build against it).
+#   * VectorReader  — full HTTP codegen since M2 (async-trait support);
+#                     companion VectorWriter (M5 split) stays inproc-only.
+# Per-seam mode flips are now independent: the dev-split-mixed and
+# dev-split-heavy targets exercise multiple simultaneous container-mode
+# seams.
 
 name: code-rag
 default_target: dev-monolith
+# Pin Caravan's per-target write root to the pre-existing `infra/<target>/generated/`
+# layout (otherwise the compiler defaults to `caravan-out/`). All committed
+# generated artifacts + the docker-compose layering hints assume `infra/`.
+output_dir: infra
 
 # Deploy units. `code-rag-chat` matches the existing
 # docker-compose.yaml service name so the M2 override layers cleanly
@@ -39,34 +47,52 @@ entries:
     env_file: .env
 
 # Seam declarations match the #[wagon] traits in
-# crates/code-rag-store/src/seams.rs. M2 enables container-mode flip
-# for Embedder (sync, +borrowed args). The other three traits (Reranker,
-# LlmClient, VectorReader) stay inproc at M2 for different reasons:
-#   * Reranker: fastembed::RerankResult lacks serde derives (M5 shim);
-#   * LlmClient: the RigGeminiImpl impl lives in the chat binary crate
-#     (code-rag-chat/src/engine/generator.rs), not a library — the
-#     synthetic peer crate can't import it. Move-to-library at M3+.
-#   * VectorReader: technically full-codegen-eligible (CodeChunk et al.
-#     have serde), but not exercised by any M2 demo target.
+# crates/code-rag-store/src/seams.rs. All four are full HTTP codegen
+# since M5; per-seam dispatch mode is decided independently per target
+# (see the targets block below). Peers reuse the chat image via
+# `caravan_rpc::run_or_serve` + CARAVAN_RPC_ROLE=peer-<Interface>.
 seams:
   Embedder:
-    # Rust impl path: `code_rag_store::FastEmbedImpl` is the public
-    # name of the impl exposed at the crate root.
     impl: code_rag_store::FastEmbedImpl
     service_name: embedder
 
-# Targets. The thesis claim is provable across these three:
+  Reranker:
+    # MsMarcoRerankerImpl wraps fastembed's cross-encoder. Returns
+    # code_rag_store::seams::RerankResult (the M5 wire shim with
+    # serde derives).
+    impl: code_rag_store::reranker::MsMarcoRerankerImpl
+    service_name: reranker
+
+  VectorReader:
+    # The concrete VectorStore impls both VectorReader (reads) and
+    # VectorWriter (writes). The peer service constructs a fresh
+    # VectorStore in its own process and serves only the reader trait
+    # (writes are inproc-only by design).
+    impl: code_rag_store::vector_store::VectorStore
+    service_name: vector-reader
+
+  LlmClient:
+    # RigGeminiImpl lives in code-rag-llm (M5 crate extraction). The
+    # peer's `run_or_serve` builds the router off the same impl the
+    # chat binary's AppState constructed via `provide()`.
+    impl: code_rag_llm::RigGeminiImpl
+    service_name: llm-client
+
+# Targets. The thesis claim — yaml-line changes flip per-seam dispatch
+# without source-code edits — is provable across the four targets here:
 #
-# * dev-monolith: all seams inproc. Baseline; verifies no-config
-#   inertness (criterion 7/8 from poc_yaml_spec.md §Testability).
-# * dev-split-light: Embedder runs as its own compose service via
-#   HTTP. Same source code, yaml line change, recompile + recompose
-#   → `curl /query` byte-identical to dev-monolith but `docker logs
-#   embedder` shows real RPC traffic (the thesis flip).
-# * dev-split-mixed: parked. Will land once async-trait support
-#   lets LlmClient flip too. Per-seam mixability is the principle;
-#   light proves it for one seam, mixed will prove it for two
-#   simultaneously without per-call-site duplication.
+# * dev-monolith       — all seams inproc. Baseline.
+# * dev-split-light    — Embedder container, rest inproc. (M2 demo.)
+# * dev-split-mixed    — Embedder + Reranker container, rest inproc.
+#                        Proves two simultaneous seam flips.
+# * dev-split-heavy    — Embedder + Reranker + LlmClient container,
+#                        VectorReader inproc. Three flips; only
+#                        VectorReader stays local (it owns LanceDB
+#                        files, embedded storage doesn't flip cleanly
+#                        at Phase 1).
+#
+# Acceptance: `curl POST /chat` returns byte-identical chunk_ids
+# across all four targets. Source diff is empty between any pair.
 targets:
   dev-monolith:
     runtime: docker-compose
@@ -77,3 +103,20 @@ targets:
     runtime: docker-compose
     entries: { code-rag-chat: container }
     seams: { Embedder: container }
+
+  dev-split-mixed:
+    runtime: docker-compose
+    entries: { code-rag-chat: container }
+    seams:
+      Embedder: container
+      Reranker: container
+      # VectorReader + LlmClient default to inproc
+
+  dev-split-heavy:
+    runtime: docker-compose
+    entries: { code-rag-chat: container }
+    seams:
+      Embedder: container
+      Reranker: container
+      LlmClient: container
+      # VectorReader stays inproc (owns the LanceDB filesystem).

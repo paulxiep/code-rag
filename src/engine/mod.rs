@@ -1,4 +1,3 @@
-pub mod generator;
 pub mod retriever;
 
 // Re-export shared engine logic from the platform-agnostic crate
@@ -9,24 +8,15 @@ pub use code_rag_engine::config::RetrievalConfig;
 pub use code_rag_engine::config::{DualEmbeddingConfig, EngineConfig, HybridConfig, RerankConfig};
 pub use code_rag_engine::retriever::FlatChunk;
 pub use code_rag_store::seams::LlmClient;
-pub use generator::RigGeminiImpl;
 
-use thiserror::Error;
+// M5: `RigGeminiImpl` moved to the dedicated `code-rag-llm` crate so a
+// Caravan-emitted synthetic peer can load the impl from a library crate
+// (peers can't pull in `code-rag-chat`, the host binary). Re-exported
+// here for back-compat with existing call sites like
+// `crate::engine::RigGeminiImpl` and `code_rag_chat::engine::RigGeminiImpl`.
+pub use code_rag_llm::RigGeminiImpl;
 
-#[derive(Error, Debug)]
-pub enum EngineError {
-    #[error("embedding failed: {0}")]
-    Embedding(#[from] code_rag_store::EmbedError),
-
-    #[error("store error: {0}")]
-    Store(#[from] code_rag_store::StoreError),
-
-    #[error("generation failed: {0}")]
-    Generation(String),
-
-    #[error("LLM seam error: {0}")]
-    Llm(#[from] code_rag_store::LlmError),
-
-    #[error("reranking failed: {0}")]
-    Rerank(String),
-}
+// M5: `EngineError` moved to `code-rag-core::errors` alongside the
+// extracted `retrieve()` orchestrator. Re-exported here so existing
+// call sites in handlers / bin / harness keep compiling.
+pub use code_rag_core::EngineError;

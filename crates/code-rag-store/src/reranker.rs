@@ -165,15 +165,20 @@ impl seams::Reranker for MsMarcoRerankerImpl {
         &self,
         query: &str,
         documents: Vec<String>,
-    ) -> Result<Vec<RerankResult>, RerankError> {
+    ) -> Result<Vec<seams::RerankResult>, RerankError> {
         if documents.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut guard = self.model.lock().map_err(|_| RerankError::Poisoned)?;
-        guard
+        let raw: Vec<RerankResult> = guard
             .rerank(query.to_string(), &documents, false, None)
-            .map_err(|e| RerankError::Rerank(e.to_string()))
+            .map_err(|e| RerankError::Rerank(e.to_string()))?;
+        // Convert fastembed::RerankResult → seams::RerankResult (the wire
+        // shim with serde derives) at the impl boundary. Caravan's HTTP
+        // codegen encodes the wire shape; callers read `rr.score`/`rr.index`
+        // identically either way.
+        Ok(raw.into_iter().map(seams::RerankResult::from).collect())
     }
 }
 

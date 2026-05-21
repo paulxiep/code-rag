@@ -2736,6 +2736,109 @@ impl crate::seams::VectorReader for VectorStore {
     }
 }
 
+// `VectorWriter` (M5 split). Companion to `VectorReader`. Mirrors the same
+// UFCS delegation pattern — each trait method forwards to the matching
+// inherent method. `#[wagon(identity)]` on the trait declaration keeps
+// writes inproc-only; code-raptor's ingest path holds the concrete
+// `VectorStore` and never goes through this trait at Phase 1. The trait
+// exists so future ingest workers can opt into trait-typed wiring without
+// another shape change.
+#[async_trait::async_trait]
+impl crate::seams::VectorWriter for VectorStore {
+    async fn upsert_code_chunks(
+        &self,
+        chunks: &[CodeChunk],
+        embeddings: Vec<Vec<f32>>,
+        signature_embeddings: Vec<Option<Vec<f32>>>,
+    ) -> Result<usize, StoreError> {
+        VectorStore::upsert_code_chunks(self, chunks, embeddings, signature_embeddings).await
+    }
+
+    async fn upsert_readme_chunks(
+        &self,
+        chunks: &[ReadmeChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        VectorStore::upsert_readme_chunks(self, chunks, embeddings).await
+    }
+
+    async fn upsert_crate_chunks(
+        &self,
+        chunks: &[CrateChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        VectorStore::upsert_crate_chunks(self, chunks, embeddings).await
+    }
+
+    async fn upsert_module_doc_chunks(
+        &self,
+        chunks: &[ModuleDocChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        VectorStore::upsert_module_doc_chunks(self, chunks, embeddings).await
+    }
+
+    async fn upsert_folder_chunks(
+        &self,
+        chunks: &[FolderChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        VectorStore::upsert_folder_chunks(self, chunks, embeddings).await
+    }
+
+    async fn upsert_file_chunks(
+        &self,
+        chunks: &[FileChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        VectorStore::upsert_file_chunks(self, chunks, embeddings).await
+    }
+
+    async fn delete_chunks_by_file(
+        &self,
+        table_name: &str,
+        file_path: &str,
+    ) -> Result<usize, StoreError> {
+        VectorStore::delete_chunks_by_file(self, table_name, file_path).await
+    }
+
+    async fn delete_chunks_by_project(
+        &self,
+        table_name: &str,
+        project_name: &str,
+    ) -> Result<usize, StoreError> {
+        VectorStore::delete_chunks_by_project(self, table_name, project_name).await
+    }
+
+    async fn delete_chunk_by_id(
+        &self,
+        table_name: &str,
+        chunk_id: &str,
+    ) -> Result<bool, StoreError> {
+        VectorStore::delete_chunk_by_id(self, table_name, chunk_id).await
+    }
+
+    async fn delete_chunks_by_ids(
+        &self,
+        table_name: &str,
+        chunk_ids: &[String],
+    ) -> Result<(), StoreError> {
+        VectorStore::delete_chunks_by_ids(self, table_name, chunk_ids).await
+    }
+
+    async fn create_fts_indices(&self) -> Result<(), StoreError> {
+        VectorStore::create_fts_indices(self).await
+    }
+
+    async fn upsert_call_edges(&self, edges: &[CallEdge]) -> Result<usize, StoreError> {
+        VectorStore::upsert_call_edges(self, edges).await
+    }
+
+    async fn delete_edges_by_project(&self, project_name: &str) -> Result<(), StoreError> {
+        VectorStore::delete_edges_by_project(self, project_name).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

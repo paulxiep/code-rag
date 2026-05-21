@@ -1,0 +1,32 @@
+[package]
+name = "code-rag-core"
+version = "0.1.0"
+authors = ["paulxiep"]
+edition = "2024"
+
+# Shared "chat-side core" extracted from `code-rag-chat` at M5 to break
+# `code-rag-mcp`'s transitive dependency on the chat binary. Holds the
+# pieces both surfaces consume: `AppState`, the `retrieve()` orchestrator,
+# the engine-error type, and the `SourceInfo` DTO + `build_sources()`.
+# HTTP routing (`router`, `handlers`), askama templates, and the
+# binary-only `main.rs` stay in the chat root crate.
+
+[dependencies]
+code-rag-types = { path = "../code-rag-types" }
+code-rag-engine = { path = "../code-rag-engine" }
+code-rag-store = { path = "../code-rag-store" }
+# M5: LLM impls live in their own library crate so the synthetic peer
+# can build against them. `code-rag-core::AppState::from_config`
+# constructs RigGeminiImpl from this crate.
+code-rag-llm = { path = "../code-rag-llm" }
+caravan-rpc = { workspace = true }
+
+async-trait = "0.1"
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+
+# Async runtime — retriever uses tokio::try_join! to fan out per-arm
+# searches; intent classification and store ops are all async.
+tokio = { version = "1.48", features = ["macros", "rt", "rt-multi-thread"] }

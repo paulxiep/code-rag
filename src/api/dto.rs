@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use code_rag_engine::intent::QueryIntent;
-use code_rag_engine::retriever::RetrievalResult;
+
+// SourceInfo + build_sources moved to `code-rag-core` at M5 so MCP
+// (and any future consumer) can format chat responses without pulling
+// in the chat binary. Re-exported here for back-compat with existing
+// call sites that use `crate::api::{SourceInfo, build_sources}` (or
+// `code_rag_chat::api::*`).
+pub use code_rag_core::{SourceInfo, build_sources};
 
 /// POST /chat request
 #[derive(Debug, Deserialize)]
@@ -17,49 +23,6 @@ pub struct ChatResponse {
     pub intent: QueryIntent,
 }
 
-/// Source reference in response — represents any chunk type.
-#[derive(Debug, Serialize, Clone)]
-pub struct SourceInfo {
-    /// Chunk type discriminator (code, readme, crate, module_doc)
-    #[serde(rename = "type")]
-    pub chunk_type: String,
-    /// Stable deterministic id; used by downstream tools (e.g. MCP
-    /// code_rag_neighbors) to refetch or expand a specific chunk.
-    pub chunk_id: String,
-    /// File path or crate path
-    pub path: String,
-    /// Human-readable label (function name, crate name, module name)
-    pub label: String,
-    /// Parent project
-    pub project: String,
-    /// Relevance score (0.0–1.0, higher = more relevant)
-    pub relevance: f32,
-    /// Relevance as integer percentage (for Askama templates)
-    pub relevance_pct: u8,
-    /// Line number (code chunks only, 0 for others)
-    pub line: usize,
-}
-
-/// Build sorted source list from all chunk types in a retrieval result.
-/// Uses `RetrievalResult::flatten()` — single source of truth for flattening.
-pub fn build_sources(result: &RetrievalResult) -> Vec<SourceInfo> {
-    result
-        .flatten()
-        .into_iter()
-        .map(|flat| SourceInfo {
-            chunk_type: flat.chunk_type,
-            chunk_id: flat.chunk_id,
-            path: flat.file_path,
-            label: flat.identifier.unwrap_or_else(|| flat.project.clone()),
-            project: flat.project,
-            relevance: flat.relevance,
-            relevance_pct: (flat.relevance * 100.0).round() as u8,
-            line: flat.line.unwrap_or(0),
-        })
-        .collect()
-    // Already sorted by flatten() — relevance DESC, file_path ASC
-}
-
 /// GET /health response
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -72,175 +35,4 @@ pub struct HealthResponse {
 pub struct ProjectsResponse {
     pub projects: Vec<String>,
     pub count: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use code_rag_engine::intent::QueryIntent;
-    use code_rag_engine::retriever::ScoredChunk;
-    use code_rag_types::{CodeChunk, CrateChunk, ModuleDocChunk, ReadmeChunk};
-
-    fn scored<T>(chunk: T, score: f32) -> ScoredChunk<T> {
-        ScoredChunk { chunk, score }
-    }
-
-    fn sample_code_chunk() -> CodeChunk {
-        CodeChunk {
-            file_path: "src/lib.rs".into(),
-            language: "rust".into(),
-            identifier: "process_data".into(),
-            node_type: "function_item".into(),
-            code_content: "fn process_data() {}".into(),
-            start_line: 42,
-            project_name: "my_project".into(),
-            docstring: None,
-            signature: None,
-            chunk_id: "test-1".into(),
-            content_hash: "hash-1".into(),
-            embedding_model_version: "BGESmallENV15_384".into(),
-        }
-    }
-
-    fn sample_readme_chunk() -> ReadmeChunk {
-        ReadmeChunk {
-            file_path: "README.md".into(),
-            project_name: "my_project".into(),
-            content: "# My Project".into(),
-            chunk_id: "test-2".into(),
-            content_hash: "hash-2".into(),
-            embedding_model_version: "BGESmallENV15_384".into(),
-        }
-    }
-
-    fn sample_crate_chunk() -> CrateChunk {
-        CrateChunk {
-            crate_name: "my-crate".into(),
-            crate_path: "crates/my-crate".into(),
-            description: Some("A utility crate".into()),
-            dependencies: vec!["types".into()],
-            project_name: "my_project".into(),
-            chunk_id: "test-3".into(),
-            content_hash: "hash-3".into(),
-            embedding_model_version: "BGESmallENV15_384".into(),
-        }
-    }
-
-    fn sample_module_doc_chunk() -> ModuleDocChunk {
-        ModuleDocChunk {
-            file_path: "src/lib.rs".into(),
-            module_name: "my_module".into(),
-            doc_content: "Core functionality.".into(),
-            project_name: "my_project".into(),
-            chunk_id: "test-4".into(),
-            content_hash: "hash-4".into(),
-            embedding_model_version: "BGESmallENV15_384".into(),
-        }
-    }
-
-    #[test]
-    fn test_build_sources_code_chunk() {
-        let result = RetrievalResult {
-            code_chunks: vec![scored(sample_code_chunk(), 0.87)],
-            readme_chunks: vec![],
-            crate_chunks: vec![],
-            module_doc_chunks: vec![],
-            folder_chunks: vec![],
-            file_chunks: vec![],
-            intent: QueryIntent::Implementation,
-        };
-        let sources = build_sources(&result);
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].chunk_type, "code");
-        assert_eq!(sources[0].path, "src/lib.rs");
-        assert_eq!(sources[0].label, "process_data");
-        assert_eq!(sources[0].line, 42);
-        assert_eq!(sources[0].relevance_pct, 87);
-    }
-
-    #[test]
-    fn test_build_sources_readme_chunk() {
-        let result = RetrievalResult {
-            code_chunks: vec![],
-            readme_chunks: vec![scored(sample_readme_chunk(), 0.54)],
-            crate_chunks: vec![],
-            module_doc_chunks: vec![],
-            folder_chunks: vec![],
-            file_chunks: vec![],
-            intent: QueryIntent::Overview,
-        };
-        let sources = build_sources(&result);
-        assert_eq!(sources[0].chunk_type, "readme");
-        assert_eq!(sources[0].label, "my_project"); // falls back to project name
-        assert_eq!(sources[0].line, 0);
-    }
-
-    #[test]
-    fn test_build_sources_crate_chunk() {
-        let result = RetrievalResult {
-            code_chunks: vec![],
-            readme_chunks: vec![],
-            crate_chunks: vec![scored(sample_crate_chunk(), 0.72)],
-            module_doc_chunks: vec![],
-            folder_chunks: vec![],
-            file_chunks: vec![],
-            intent: QueryIntent::Overview,
-        };
-        let sources = build_sources(&result);
-        assert_eq!(sources[0].chunk_type, "crate");
-        assert_eq!(sources[0].path, "crates/my-crate");
-        assert_eq!(sources[0].label, "my-crate");
-        assert_eq!(sources[0].line, 0);
-    }
-
-    #[test]
-    fn test_build_sources_module_doc_chunk() {
-        let result = RetrievalResult {
-            code_chunks: vec![],
-            readme_chunks: vec![],
-            crate_chunks: vec![],
-            module_doc_chunks: vec![scored(sample_module_doc_chunk(), 0.65)],
-            folder_chunks: vec![],
-            file_chunks: vec![],
-            intent: QueryIntent::Overview,
-        };
-        let sources = build_sources(&result);
-        assert_eq!(sources[0].chunk_type, "module_doc");
-        assert_eq!(sources[0].label, "my_module");
-        assert_eq!(sources[0].line, 0);
-    }
-
-    #[test]
-    fn test_sources_sorted_by_relevance() {
-        let result = RetrievalResult {
-            code_chunks: vec![scored(sample_code_chunk(), 0.5)],
-            readme_chunks: vec![scored(sample_readme_chunk(), 0.9)],
-            crate_chunks: vec![scored(sample_crate_chunk(), 0.3)],
-            module_doc_chunks: vec![],
-            folder_chunks: vec![],
-            file_chunks: vec![],
-            intent: QueryIntent::Overview,
-        };
-
-        let sources = build_sources(&result);
-        assert_eq!(sources.len(), 3);
-        assert_eq!(sources[0].relevance_pct, 90); // readme
-        assert_eq!(sources[1].relevance_pct, 50); // code
-        assert_eq!(sources[2].relevance_pct, 30); // crate
-    }
-
-    #[test]
-    fn test_relevance_pct_computation() {
-        let result = RetrievalResult {
-            code_chunks: vec![scored(sample_code_chunk(), 0.87)],
-            readme_chunks: vec![],
-            crate_chunks: vec![],
-            module_doc_chunks: vec![],
-            folder_chunks: vec![],
-            file_chunks: vec![],
-            intent: QueryIntent::Implementation,
-        };
-        let sources = build_sources(&result);
-        assert_eq!(sources[0].relevance_pct, 87);
-    }
 }

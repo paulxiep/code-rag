@@ -16,12 +16,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
-use code_rag_chat::{
-    api::{AppState, build_sources},
-    engine::{intent, retriever},
-};
+// M5: chat-side core lives in `code-rag-core` (extracted from chat binary).
+// MCP imports directly from the library, no longer transitively depends on
+// the `code-rag-chat` binary crate.
+use code_rag_core::{AppState, build_sources, retriever};
 use code_rag_engine::{
     graph::{CallGraph, GraphDirection},
+    intent,
     intent::QueryIntent,
 };
 use rmcp::{

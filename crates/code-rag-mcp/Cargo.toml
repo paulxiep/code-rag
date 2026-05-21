@@ -18,11 +18,10 @@ path = "src/main.rs"
 # MCP SDK — official, features enable stdio server + tool macros
 rmcp = { version = "1.5", features = ["server", "macros", "transport-io", "schemars"] }
 
-# Retrieval brain — reuse the chat server's AppState + retriever wrapper rather
-# than duplicating 746 lines of orchestration. Future cleanup: extract the
-# shared native retrieve() into its own library crate so the MCP crate doesn't
-# transitively depend on the chat server's HTTP plumbing.
-code-rag-chat = { path = "../.." }
+# Retrieval brain — chat-side core (AppState, retrieve, build_sources)
+# extracted from the chat binary at M5 into its own library crate so MCP
+# no longer transitively depends on the chat server's HTTP plumbing.
+code-rag-core = { path = "../code-rag-core" }
 code-rag-engine = { path = "../code-rag-engine" }
 code-rag-store = { path = "../code-rag-store" }
 code-rag-types = { path = "../code-rag-types" }
