@@ -110,6 +110,7 @@ pre > code {
 	display: flex;
 	flex-direction: column;
 	min-height: 100vh;
+	max-height: 100vh;
 	width: 720px;
 	max-width: calc(100% - 2em);
 	margin: 0 auto;
@@ -135,6 +136,7 @@ pre > code {
 /* Chat area */
 .chat-container {
 	flex: 1;
+	min-height: 0;
 	display: flex;
 	flex-direction: column;
 	padding: 1em 0;
@@ -425,6 +427,32 @@ pre > code {
 .empty-state p {
 	font-size: 0.9em;
 	margin: 0;
+}
+
+.suggestion-chips {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 0.5em;
+	margin-top: 1em;
+	max-width: 720px;
+}
+
+.suggestion-chip {
+	background: rgb(var(--surface));
+	color: rgb(var(--gray-dark));
+	border: 1px solid rgb(var(--gray-light));
+	border-radius: 999px;
+	padding: 0.45em 0.9em;
+	font-family: "Atkinson", sans-serif;
+	font-size: 0.85em;
+	cursor: pointer;
+	transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.suggestion-chip:hover {
+	border-color: var(--accent);
+	background: rgb(var(--gray-light));
 }
 
 /* Auth panel */

@@ -80,12 +80,12 @@ pub fn search_code_arm(
     // uses rank within each list, so mixing is safe.
     let body_vec = top_k(query_embedding, &index.code_chunks, limit);
 
-    let bm25 = if use_hybrid && index.code_idf.is_some() {
+    let bm25 = if let Some(idf) = index.code_idf.as_ref().filter(|_| use_hybrid) {
         Some(bm25_search_precomputed(
             query,
             &index.code_chunks,
             &index.code_searchable_texts,
-            index.code_idf.as_ref().unwrap(),
+            idf,
             limit,
         ))
     } else {

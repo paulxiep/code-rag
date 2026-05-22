@@ -7,6 +7,17 @@ use crate::api;
 use crate::api::ChatResponse;
 use crate::components::{IntentBadge, SourcesPanel};
 
+const SUGGESTIONS: &[&str] = &[
+    "How does intent classification gate which retrieval arms run?",
+    "Why use dual-vector chunks (signature + body) instead of one?",
+    "How does graph RAG protect call-graph chunks from reranker demotion?",
+    "How does the Caravan compiler emit docker-compose overrides?",
+    "How does the wagon macro turn a Rust trait into an HTTP client and server pair?",
+    "Why is invoice confidence computed from validation rules instead of LLM self-report?",
+    "Why split agents into three tiers instead of a continuous spectrum?",
+    "Explain Effect and Element in 7 wonders",
+];
+
 /// A single message in the chat history.
 #[derive(Clone)]
 enum ChatMessage {
@@ -62,6 +73,8 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
             let _classifier = classifier_signal;
             let _auth = auth_signal;
             spawn_local(async move {
+                // Yield so the browser paints "Thinking" before sync retrieval blocks the event loop.
+                gloo_timers::future::TimeoutFuture::new(0).await;
                 let result = standalone_chat(&query, _index, _classifier, _auth).await;
                 match result {
                     Ok(response) => {
@@ -82,6 +95,8 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
         {
             let base = api_base_submit.get_value();
             spawn_local(async move {
+                // Yield so the browser paints "Thinking" before the fetch starts.
+                gloo_timers::future::TimeoutFuture::new(0).await;
                 match api::send_chat(&base, &query).await {
                     Ok(response) => {
                         set_messages.update(|msgs| {
@@ -102,11 +117,28 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
         <div class="chat-container">
             <Show
                 when=move || !messages.get().is_empty()
-                fallback=|| {
+                fallback=move || {
                     view! {
                         <div class="empty-state">
                             <h2>"Ask about the codebase"</h2>
-                            <p>"Try: \"How does the ingestion pipeline work?\" or \"What is the intent classifier?\""</p>
+                            <p>"Try one of these:"</p>
+                            <div class="suggestion-chips">
+                                {SUGGESTIONS.iter().map(|&q| {
+                                    view! {
+                                        <button
+                                            class="suggestion-chip"
+                                            on:click=move |_| {
+                                                set_input.set(q.to_string());
+                                                if let Some(ta) = textarea_ref.get() {
+                                                    let _ = ta.focus();
+                                                }
+                                            }
+                                        >
+                                            {q}
+                                        </button>
+                                    }
+                                }).collect_view()}
+                            </div>
                         </div>
                     }
                 }
