@@ -81,9 +81,12 @@ seams:
   IntentClassifier:
     # LocalIntentClassifier wraps code-rag-engine's IntentClassifier
     # struct so the chat HTTP path can dispatch through the seam. The
-    # impl is registered in code-rag-core::state. Pure cosine math, no
-    # heavy deps — the chat image is already slim enough for sub-2s
-    # Lambda cold-start (no image_target opt-in needed).
+    # impl is registered in code-rag-core::state. Request-time work is
+    # pure cosine math over pre-computed prototype embeddings — no
+    # embedder forward-pass per call. Startup builds those prototypes
+    # via the Embedder (FastEmbed), so the chat image's existing
+    # FastEmbed payload covers the Lambda peer too; no separate
+    # image_target opt-in needed for sub-2s cold-start.
     impl: code_rag_core::LocalIntentClassifier
     service_name: intent-classifier
 
@@ -134,7 +137,9 @@ targets:
   # Embedder runs as a peer Fargate task. chat dispatches Embedder via
   # caravan-rpc over Cloud Map private DNS. Reranker / VectorReader /
   # LlmClient stay inproc inside the chat task. VectorReader MUST stay
-  # inproc — it's #[wagon(identity)] and owns LanceDB filesystem state.
+  # inproc because it owns LanceDB filesystem state — the embedded store
+  # can't be shared across processes / containers without a managed
+  # backend swap (M9-cloud descope).
   #
   # No cloud-managed resources (yet): code-rag-chat uses local files for
   # the vector index. The hybrid-dev composition story (S3/RDS) lights

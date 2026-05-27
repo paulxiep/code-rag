@@ -36,16 +36,16 @@ impl AppState {
 
         // Build the intent classifier with the embedder we just built — this
         // happens before `provide()` so we don't have to round-trip through the
-        // registry for an initialization-only call. We clone the prototypes
-        // into a second engine instance for the seam impl below; the engine
-        // struct's data is small (a few float vectors), so the duplication
-        // is cheap and keeps state.classifier + the seam registry as separate
+        // registry for an initialization-only call. The seam impl gets a clone
+        // of the already-built classifier: the prototype embeddings are
+        // pre-computed float vectors so the Clone is a cheap memory copy
+        // (skipping a second FastEmbed forward-pass over the ~32 prototype
+        // texts). Keeps state.classifier + the seam registry as separate
         // sources of truth (MCP + harness read state.classifier directly,
         // chat HTTP routes through the seam).
         let classifier =
             EngineIntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
-        let classifier_for_seam =
-            EngineIntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+        let classifier_for_seam = classifier.clone();
 
         let store: Arc<dyn VectorReader> =
             Arc::new(VectorStore::new(db_path, embedder.dimension()).await?);

@@ -80,6 +80,13 @@ pub const COMPARISON_PROTOTYPES: &[&str] = &[
 
 /// Pre-computed prototype embeddings for each intent.
 /// Built once at startup; used for every classification call.
+///
+/// `Clone` is derived so callers that need two independent owners of the
+/// embedded prototypes (e.g. AppState holding one + the IntentClassifier
+/// seam impl holding another) can avoid a second `build()` pass — the
+/// clone is a memory copy of already-computed float vectors, far cheaper
+/// than re-running the embedder's forward pass on every prototype text.
+#[derive(Clone)]
 pub struct IntentClassifier {
     prototypes: HashMap<QueryIntent, Vec<Vec<f32>>>,
     default: QueryIntent,
