@@ -321,6 +321,32 @@ pub trait LlmClient: Send + Sync {
     async fn generate(&self, prompt: &str) -> Result<String, LlmError>;
 }
 
+// ---------- IntentClassifier (M7) ----------
+
+/// Embedding-based query intent classifier. Carved into a seam at M7 so it
+/// can flip to `mode: lambda` for cold-start sub-2s sub-second routing —
+/// pure cosine math, tiny payload, naturally fast.
+///
+/// Keyword pre-filter (`intent::pre_classify_comparison`) stays in the
+/// caller — no point round-tripping a query string over the wire just to
+/// keyword-match.
+#[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
+pub enum IntentError {
+    #[error("intent classification failed: {0}")]
+    Classify(String),
+}
+
+#[wagon]
+pub trait IntentClassifier: Send + Sync {
+    /// Classify a query's intent given its dense embedding. Returns the
+    /// engine's `ClassificationResult` (intent + confidence + margin)
+    /// directly — the type is wire-ready (serde-derived in code-rag-engine).
+    fn classify(
+        &self,
+        query_embedding: &[f32],
+    ) -> Result<code_rag_engine::intent::ClassificationResult, IntentError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

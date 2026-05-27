@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use code_rag_engine::config::{EngineConfig, RerankConfig};
-use code_rag_engine::intent::IntentClassifier;
+use code_rag_engine::intent::IntentClassifier as EngineIntentClassifier;
 use code_rag_llm::RigGeminiImpl;
 use code_rag_store::reranker::MsMarcoRerankerImpl;
-use code_rag_store::seams::{Embedder, LlmClient, Reranker, VectorReader};
+use code_rag_store::seams::{Embedder, IntentClassifier, LlmClient, Reranker, VectorReader};
 use code_rag_store::{FastEmbedImpl, VectorStore};
+
+use crate::intent_local::LocalIntentClassifier;
 
 /// Shared state for all chat-side handlers (HTTP API + MCP tools).
 ///
@@ -16,7 +18,10 @@ use code_rag_store::{FastEmbedImpl, VectorStore};
 /// state (the prototype classifier built once at startup, plus run config).
 pub struct AppState {
     /// Pre-computed prototype embeddings for intent classification.
-    pub classifier: IntentClassifier,
+    /// Retained for backwards-compat with call sites (MCP, test harness)
+    /// that still consult `state.classifier` directly. The chat HTTP path
+    /// dispatches through `client::<dyn IntentClassifier>()` instead.
+    pub classifier: EngineIntentClassifier,
     pub config: EngineConfig,
 }
 
@@ -31,8 +36,16 @@ impl AppState {
 
         // Build the intent classifier with the embedder we just built — this
         // happens before `provide()` so we don't have to round-trip through the
-        // registry for an initialization-only call.
-        let classifier = IntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+        // registry for an initialization-only call. The seam impl gets a clone
+        // of the already-built classifier: the prototype embeddings are
+        // pre-computed float vectors so the Clone is a cheap memory copy
+        // (skipping a second FastEmbed forward-pass over the ~32 prototype
+        // texts). Keeps state.classifier + the seam registry as separate
+        // sources of truth (MCP + harness read state.classifier directly,
+        // chat HTTP routes through the seam).
+        let classifier =
+            EngineIntentClassifier::build(|texts: &[&str]| embedder.embed_batch(texts))?;
+        let classifier_for_seam = classifier.clone();
 
         let store: Arc<dyn VectorReader> =
             Arc::new(VectorStore::new(db_path, embedder.dimension()).await?);
@@ -58,6 +71,9 @@ impl AppState {
         caravan_rpc::provide::<dyn Embedder>(embedder);
         caravan_rpc::provide::<dyn VectorReader>(store);
         caravan_rpc::provide::<dyn LlmClient>(llm);
+        caravan_rpc::provide::<dyn IntentClassifier>(Arc::new(LocalIntentClassifier::new(
+            classifier_for_seam,
+        )));
         if let Some(r) = reranker {
             caravan_rpc::provide::<dyn Reranker>(r);
         }

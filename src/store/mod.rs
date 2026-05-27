@@ -5,7 +5,7 @@
 //! concrete `FastEmbedImpl` / `MsMarcoRerankerImpl` types are what
 //! AppState constructs and `provide()`s.
 
-pub use code_rag_store::seams::{Embedder, Reranker, VectorReader};
+pub use code_rag_store::seams::{Embedder, IntentClassifier, Reranker, VectorReader};
 pub use code_rag_store::{
     FastEmbedImpl, MsMarcoRerankerImpl, RerankError, StoreError, VectorStore,
 };

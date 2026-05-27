@@ -36,14 +36,9 @@ COPY code-rag/crates/code-raptor/Cargo.toml ./crates/code-raptor/
 COPY code-rag/crates/code-rag-ui/Cargo.toml ./crates/code-rag-ui/
 COPY code-rag/crates/code-rag-mcp/Cargo.toml ./crates/code-rag-mcp/
 
-# Copy the caravan-rpc SDK + its proc-macro crate — code-rag's
-# Cargo.toml references them as path-dep `../caravan/rpc/rust/caravan-rpc`
-# (added at B0p). Place them at /caravan/... so the relative path
-# resolves from /build/Cargo.toml.
-COPY caravan/rpc/rust/caravan-rpc/Cargo.toml /caravan/rpc/rust/caravan-rpc/
-COPY caravan/rpc/rust/caravan-rpc/src /caravan/rpc/rust/caravan-rpc/src
-COPY caravan/rpc/rust/caravan-rpc-macros/Cargo.toml /caravan/rpc/rust/caravan-rpc-macros/
-COPY caravan/rpc/rust/caravan-rpc-macros/src /caravan/rpc/rust/caravan-rpc-macros/src
+# caravan-rpc resolves from crates.io as a workspace dep — no sibling
+# checkout, no [patch.crates-io] override. The earlier `COPY caravan/rpc/rust/...`
+# shim was retired at M9-cloud close (2026-05-27) when 0.1.1 published.
 
 # Create dummy sources for dependency caching
 RUN mkdir -p src/bin crates/code-rag-types/src crates/code-rag-engine/src crates/code-rag-store/src crates/code-rag-core/src crates/code-rag-llm/src crates/code-raptor/src crates/code-rag-ui/src crates/code-rag-mcp/src && \

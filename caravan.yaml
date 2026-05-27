@@ -78,6 +78,18 @@ seams:
     impl: code_rag_llm::RigGeminiImpl
     service_name: llm-client
 
+  IntentClassifier:
+    # LocalIntentClassifier wraps code-rag-engine's IntentClassifier
+    # struct so the chat HTTP path can dispatch through the seam. The
+    # impl is registered in code-rag-core::state. Request-time work is
+    # pure cosine math over pre-computed prototype embeddings — no
+    # embedder forward-pass per call. Startup builds those prototypes
+    # via the Embedder (FastEmbed), so the chat image's existing
+    # FastEmbed payload covers the Lambda peer too; no separate
+    # image_target opt-in needed for sub-2s cold-start.
+    impl: code_rag_core::LocalIntentClassifier
+    service_name: intent-classifier
+
 # Targets. The thesis claim — yaml-line changes flip per-seam dispatch
 # without source-code edits — is provable across the four targets here:
 #
@@ -120,3 +132,70 @@ targets:
       Reranker: container
       LlmClient: container
       # VectorReader stays inproc (owns the LanceDB filesystem).
+
+  # M4b — First Fargate placement. code-rag-chat runs as a Fargate task;
+  # Embedder runs as a peer Fargate task. chat dispatches Embedder via
+  # caravan-rpc over Cloud Map private DNS. Reranker / VectorReader /
+  # LlmClient stay inproc inside the chat task. VectorReader MUST stay
+  # inproc because it owns LanceDB filesystem state — the embedded store
+  # can't be shared across processes / containers without a managed
+  # backend swap (M9-cloud descope).
+  #
+  # No cloud-managed resources (yet): code-rag-chat uses local files for
+  # the vector index. The hybrid-dev composition story (S3/RDS) lights
+  # up via invoice-parse at M9-cloud; code-rag stays pure-compute on
+  # Fargate.
+  staging-fargate:
+    runtime: fargate
+    region: ap-southeast-1
+    aws_profile: caravan-poc
+    backend:
+      bucket: caravan-rpc-poc-state
+      lock_table: caravan-poc-state-lock
+    entries: { code-rag-chat: container }
+    seams:
+      Embedder: container
+      Reranker: inproc
+      VectorReader: inproc
+      LlmClient: inproc
+      IntentClassifier: inproc
+
+  # M9-cloud — Cloud monolith. code-rag-chat runs as one Fargate task with
+  # every seam dispatched inproc inside it. Same source code as the dev-*
+  # targets; the yaml flip from `runtime: docker-compose` to `runtime: fargate`
+  # plus dropping the `seams:` block is the only difference. This is the
+  # irreducible-minimum cloud shape for code-rag (1 entry → 1 task; Caravan
+  # cannot make it smaller than the user's pre-seam unit count).
+  prod-monolith:
+    runtime: fargate
+    region: ap-southeast-1
+    aws_profile: caravan-poc
+    backend:
+      bucket: caravan-rpc-poc-state
+      lock_table: caravan-poc-state-lock
+    entries: { code-rag-chat: container }
+    # seams omitted → all 5 inproc (Embedder, Reranker, VectorReader,
+    # LlmClient, IntentClassifier)
+
+  # M7 — Lambda placement axis. chat + Embedder + Reranker + LlmClient
+  # stay on Fargate (same as staging-fargate); IntentClassifier flips to
+  # Lambda. Same source code; the yaml flip is the only difference. Demo
+  # proves seam-mode is a yaml choice across Fargate <-> Lambda runtimes.
+  #
+  # Caller (chat task) needs lambda:InvokeFunctionUrl on the IntentClassifier
+  # Lambda — emitted via resolve_iam.go's M7 lambda-invoke grant path
+  # automatically when path-match finds the calling entry.
+  prod-mixed:
+    runtime: fargate
+    region: ap-southeast-1
+    aws_profile: caravan-poc
+    backend:
+      bucket: caravan-rpc-poc-state
+      lock_table: caravan-poc-state-lock
+    entries: { code-rag-chat: container }
+    seams:
+      Embedder: container
+      Reranker: inproc
+      VectorReader: inproc
+      LlmClient: inproc
+      IntentClassifier: lambda
