@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::config::RetrievalConfig;
@@ -6,7 +6,7 @@ use super::config::RetrievalConfig;
 /// Query intent categories.
 ///
 /// Extensible: new variants added for Track A (Hierarchy), Track B (Identifier).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryIntent {
     /// "What does X do?", "Tell me about Y", "Overview of Z"
@@ -153,7 +153,7 @@ impl IntentClassifier {
 }
 
 /// Result of intent classification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassificationResult {
     pub intent: QueryIntent,
     /// Cosine similarity confidence. 0.0 = fell through to default.

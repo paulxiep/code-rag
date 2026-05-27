@@ -3,11 +3,14 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
-# Caravan RPC SDK — published to crates.io at M9 Phase 1 close (2026-05-21).
-# Was a sibling path-dep through M5 (the local caravan/ next to code-rag/);
-# the published pin removes that CI gotcha so gh-pages + release workflows
-# resolve the dep from a single-repo checkout.
-caravan-rpc = "0.1.0"
+# Caravan RPC SDK. Resolves from crates.io — no path-dep, no
+# [patch.crates-io] override. Bumped to 0.1.1 at M9-cloud close
+# (2026-05-27): peer-mode self-call guard via CARAVAN_RPC_ROLE
+# (peers reusing the chat image no longer loop back to themselves
+# over HTTP), plus the resource-adapter feature set used by other
+# repos. code-rag only consumes the inproc registry + #[wagon]
+# macro + run_or_serve dispatch, so default features are enough.
+caravan-rpc = "0.1.1"
 
 [package]
 name = "code-rag-chat"

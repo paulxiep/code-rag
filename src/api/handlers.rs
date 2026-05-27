@@ -5,7 +5,7 @@ use super::dto::{self, *};
 use super::error::ApiError;
 use super::state::AppState;
 use crate::engine::{LlmClient, context, intent, retriever};
-use crate::store::{Embedder, Reranker, VectorReader};
+use crate::store::{Embedder, IntentClassifier, Reranker, VectorReader};
 
 /// POST /chat - Ask a question about the portfolio
 pub async fn chat(
@@ -28,12 +28,18 @@ pub async fn chat(
 
     let query_embedding = embedder.embed_one(query)?;
 
-    // Keyword pre-filter for unambiguous comparison cues, else embedding classification.
+    // Keyword pre-filter for unambiguous comparison cues, else embedding
+    // classification through the M7 seam (inproc by default; flips to
+    // Lambda Function URL dispatch when the caravan target sets
+    // `seams.IntentClassifier: lambda`).
     let intent = if let Some(pre) = intent::pre_classify_comparison(query) {
         tracing::info!(intent = ?pre, "query classified via keyword pre-filter");
         pre
     } else {
-        let classification = intent::classify(&query_embedding, &state.classifier);
+        let classifier = caravan_rpc::client::<dyn IntentClassifier>();
+        let classification = classifier
+            .classify(&query_embedding)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
         tracing::info!(intent = ?classification.intent, confidence = classification.confidence, "query classified");
         classification.intent
     };

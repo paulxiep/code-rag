@@ -8,11 +8,13 @@
 
 pub mod dto;
 pub mod errors;
+pub mod intent_local;
 pub mod retriever;
 pub mod state;
 
 pub use dto::{SourceInfo, build_sources};
 pub use errors::EngineError;
+pub use intent_local::LocalIntentClassifier;
 pub use retriever::{QueryContext, RetrievalResult, retrieve, to_retrieval_result};
 pub use state::AppState;
 
@@ -20,4 +22,6 @@ pub use state::AppState;
 // `code_rag_core::LlmClient` without also depending on code-rag-store
 // directly. Callers that need richer access can still import
 // `code_rag_store` directly.
-pub use code_rag_store::seams::{Embedder, LlmClient, Reranker, VectorReader, VectorWriter};
+pub use code_rag_store::seams::{
+    Embedder, IntentClassifier, LlmClient, Reranker, VectorReader, VectorWriter,
+};
