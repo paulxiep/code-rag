@@ -5,7 +5,7 @@ pub mod languages;
 pub mod parser;
 pub mod reconcile;
 
-pub use language::{ImportInfo, LanguageHandler};
+pub use language::{ImportInfo, LanguageHandler, TypeRelation};
 pub use languages::{handler_by_name, handler_for_path, supported_extensions};
 pub use reconcile::{
     DeletionsByTable, ExistingFileIndex, IngestionStats, ReconcileResult, reconcile,
@@ -190,6 +190,8 @@ struct ProcessedCodeFile {
     chunks: Vec<CodeChunk>,
     calls: CallsMap,
     file_imports: Option<FileImports>,
+    /// Track R (R1): `chunk_id → [TypeRelation]` for this file.
+    type_relations: TypeRelationsMap,
 }
 
 /// Process a single code file.
@@ -203,6 +205,7 @@ fn process_code_file(
         chunks: Vec::new(),
         calls: HashMap::new(),
         file_imports: None,
+        type_relations: HashMap::new(),
     };
 
     // Skip files with unsupported extensions before reading (avoids UTF-8 errors on binary files)
@@ -238,25 +241,57 @@ fn process_code_file(
             .map(|(c, _)| (c.signature.as_deref(), c.docstring.as_deref())),
     );
 
-    // C1: Extract file-level imports for edge resolution
-    let file_imports = {
+    // C1 + Track R (R1): one extra parse of the whole file yields both file-level
+    // imports (call-edge resolution) and per-definition type relations (graph
+    // edges). Type relations are keyed by the *same* deterministic chunk_id the
+    // emitted chunks get, so they line up without threading through analyze_file.
+    let (file_imports, type_relations) = {
         let mut parser = tree_sitter::Parser::new();
         let grammar = handler.grammar();
         if parser.set_language(&grammar).is_ok()
             && let Some(tree) = parser.parse(&content, None)
         {
-            let imports =
-                handler.extract_file_imports(&content, &tree.root_node(), content.as_bytes());
-            if !imports.is_empty() {
-                Some(FileImports {
-                    path: path_str.clone(),
-                    imports,
-                })
-            } else {
-                None
+            let root = tree.root_node();
+            let src_bytes = content.as_bytes();
+
+            let imports = handler.extract_file_imports(&content, &root, src_bytes);
+            let file_imports = (!imports.is_empty()).then(|| FileImports {
+                path: path_str.clone(),
+                imports,
+            });
+
+            let mut type_relations: TypeRelationsMap = HashMap::new();
+            if let Ok(query) = tree_sitter::Query::new(&grammar, handler.query_string()) {
+                let body_idx = query.capture_index_for_name("body");
+                let mut cursor = tree_sitter::QueryCursor::new();
+                let mut caps = cursor.captures(&query, root, src_bytes);
+                use tree_sitter::StreamingIterator;
+                while let Some((m, _)) = caps.next() {
+                    if let Some(b) = m.captures.iter().find(|c| Some(c.index) == body_idx) {
+                        let mut rels = handler.extract_type_relations(&content, &b.node, src_bytes);
+                        // RationaleFor: NOTE/WHY/HACK rationale adjacent to the def,
+                        // linked to any project symbols it mentions.
+                        for target in language::extract_rationale_targets(
+                            &content,
+                            b.node.start_position().row,
+                        ) {
+                            rels.push(TypeRelation::new(
+                                target,
+                                code_rag_types::EdgeRelation::RationaleFor,
+                                code_rag_types::EdgeContext::None,
+                            ));
+                        }
+                        if !rels.is_empty() {
+                            let code = b.node.utf8_text(src_bytes).unwrap_or("");
+                            let cid = deterministic_chunk_id(&path_str, code);
+                            type_relations.entry(cid).or_default().extend(rels);
+                        }
+                    }
+                }
             }
+            (file_imports, type_relations)
         } else {
-            None
+            (None, HashMap::new())
         }
     };
 
@@ -286,6 +321,7 @@ fn process_code_file(
         chunks,
         calls: calls_map,
         file_imports,
+        type_relations,
     }
 }
 
@@ -367,6 +403,8 @@ pub struct IngestionResult {
 /// Type aliases for ingestion side-channels.
 pub type CallsMap = HashMap<String, Vec<String>>;
 pub type ImportsMap = HashMap<String, Vec<ImportInfo>>;
+/// Track R (R1): `chunk_id → [TypeRelation]` side-channel for graph-edge resolution.
+pub type TypeRelationsMap = HashMap<String, Vec<TypeRelation>>;
 
 /// This orchestrates the flow from Disk -> Parser -> Data.
 /// `project_name_override`: if Some, all chunks get this project name.
@@ -378,7 +416,7 @@ pub type ImportsMap = HashMap<String, Vec<ImportInfo>>;
 pub fn run_ingestion(
     repo_path: &str,
     project_name_override: Option<&str>,
-) -> (IngestionResult, CallsMap, ImportsMap) {
+) -> (IngestionResult, CallsMap, ImportsMap, TypeRelationsMap) {
     let repo_root = PathBuf::from(repo_path);
     let mut analyzer = CodeAnalyzer::new();
 
@@ -399,11 +437,13 @@ pub fn run_ingestion(
     let mut all_chunks: Vec<CodeChunk> = Vec::new();
     let mut all_calls: CallsMap = HashMap::new();
     let mut all_imports: ImportsMap = HashMap::new();
+    let mut all_type_relations: TypeRelationsMap = HashMap::new();
 
     for e in &entries {
         let processed = process_code_file(e, &repo_root, &mut analyzer, project_name_override);
         all_chunks.extend(processed.chunks);
         all_calls.extend(processed.calls);
+        all_type_relations.extend(processed.type_relations);
         if let Some(fi) = processed.file_imports {
             all_imports.insert(fi.path, fi.imports);
         }
@@ -448,6 +488,7 @@ pub fn run_ingestion(
         },
         all_calls,
         all_imports,
+        all_type_relations,
     )
 }
 
@@ -535,7 +576,7 @@ mod tests {
         let temp_dir = create_test_workspace();
         let path = temp_dir.path().to_str().unwrap();
 
-        let (result, _calls_map, _imports_map) = run_ingestion(path, None);
+        let (result, _calls_map, _imports_map, _type_relations) = run_ingestion(path, None);
 
         // Should find 2 code files (main.py and lib.rs)
         assert_eq!(result.code_chunks.len(), 2);
@@ -661,7 +702,7 @@ mod tests {
         .unwrap();
 
         let path = base.to_str().unwrap();
-        let (result, _calls_map, _imports_map) = run_ingestion(path, None);
+        let (result, _calls_map, _imports_map, _type_relations) = run_ingestion(path, None);
 
         // All three files should produce chunks
         assert!(
@@ -697,7 +738,7 @@ mod tests {
         let temp_dir = create_test_workspace();
         let path = temp_dir.path().to_str().unwrap();
 
-        let (result, _calls_map, _imports_map) = run_ingestion(path, Some("my-app"));
+        let (result, _calls_map, _imports_map, _type_relations) = run_ingestion(path, Some("my-app"));
 
         // All chunks should have the override name
         assert!(

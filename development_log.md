@@ -1,5 +1,131 @@
 # Development Log
 
+## 2026-06-08: Track R R1 — RelationGraph + Richer Edges (typed structural topology)
+
+### Summary
+
+Built the typed relation layer that Track R's topology engine will consume. Where
+C1 persisted only `calls` edges, R1 adds a full taxonomy of structural relations —
+extracted per language, resolved with the same tiered disambiguation as call edges,
+and persisted to a new `graph_edges` table beside `call_edges`. A pure
+`RelationGraph` is added next to the wasm-safe `CallGraph`, and Relationship/
+Implementation retrieval consults it so "what implements `Embedder`?" resolves via
+structural edges, not just vector similarity. **9925 relation edges** persisted
+across the 8-project corpus.
+
+Additive throughout: C1/C2's `CallGraph`, `graph_augment`, and `reserve_graph_slots`
+are untouched; the new path is a strict no-op when `graph_edges` is empty or the
+query carries no structural cue, so non-relationship intents and the pre-R1 baseline
+are unaffected.
+
+### Edge taxonomy (all landed — no deferrals)
+
+`EdgeRelation { Calls, Imports, Contains, Implements, Extends, References, Embeds,
+ReExports, RationaleFor }` + `EdgeContext { ParameterType, ReturnType, GenericArg,
+FieldType, Attribute, None }` + `EdgeConfidence { Extracted, Inferred, Ambiguous }`
+in [code-rag-types](crates/code-rag-types/src/lib.rs). `calls` is **not** duplicated
+into `graph_edges` — it is projected from `call_edges` at topology-build time so
+C1/C2's `resolution_tier` semantics stay intact.
+
+- **Implements / Extends / Embeds / References** — new `extract_type_relations` on
+  `LanguageHandler` (default-empty, mirroring `extract_calls`). Rust: `impl Trait for
+  T` → Implements, trait supertrait bounds → Extends, struct fields → Embeds, fn
+  param/return types → References. Python: base classes → Extends, annotations →
+  References. TypeScript: `implements`/`extends` clauses, annotations. Go: struct
+  embedding → Embeds, field/param/return types → References (interface satisfaction
+  is structural/implicit → no Implements, by design). Resolved by `resolve_type_edges`
+  reusing the same-file > import > unique-global tiers; non-project targets (`Vec`,
+  `String`, third-party types) drop out at resolution.
+- **Contains** — folder ⊇ file ⊇ definition, derived from the chunk hierarchy
+  (`build_contains_edges`); endpoints are existing folder/file/code chunk ids, no
+  parsing.
+- **Imports / ReExports** — `build_import_edges` resolves each file-level import to
+  its symbol chunk; the edge source is the *importing file's* FileChunk. `pub use`
+  (Rust, via a `visibility_modifier` on the `use_declaration`) and `export … from`
+  (TS) are tagged `is_reexport` on `ImportInfo` → `ReExports`; everything else →
+  `Imports`.
+- **RationaleFor** — `extract_rationale_targets` scans the comment block immediately
+  above a definition for `NOTE:`/`WHY:`/`HACK:` markers and links the definition to
+  any project symbols mentioned (high-precision token filter: CamelCase/snake_case,
+  len ≥ 4; resolution drops non-symbols). Chunk→chunk interpretation of R.md's
+  "rationale → definition" (GraphEdge has no text payload); its *report* consumption
+  lands at R4.
+
+### Plumbing
+
+- `graph_edges` is an all-`Utf8` scalar table mirroring `call_edges`
+  ([vector_store.rs](crates/code-rag-store/src/vector_store.rs)); `relation`/`context`/
+  `confidence` stored as their string tags. `get_all_graph_edges` added to the
+  `VectorReader` seam. New-table-additive: no `SCHEMA_VERSION` bump (old DBs simply
+  return empty via the "table doesn't exist" path).
+- Type relations are extracted in the *same* second parse `process_code_file` already
+  does for file imports, keyed by the identical `deterministic_chunk_id(path, code)`
+  so they line up with emitted chunks without threading through `analyze_file`.
+  Surfaced to the orchestrator via a 4th `run_ingestion` return (`TypeRelationsMap`).
+- `code-rag-engine::graph`: pure `RelationGraph` (per-relation forward/reverse
+  adjacency + id index), `detect_relation` (implements/extends/embeds cue + Forward/
+  Reverse direction), `extract_relation_target`, `relation_augment`. Wired into
+  [code-rag-core/retriever.rs](crates/code-rag-core/src/retriever.rs) via
+  `augment_with_relations`, gated to Relationship + Implementation (the latter because
+  "what implements X?" is often misclassified) and unioned into the C2 `graph_ids`
+  protection set.
+
+### Verification
+
+- 291 workspace tests green (new: per-language `extract_type_relations`, the
+  `collect_type_idents` bare-type fix, `resolve_type_edges`, contains/imports
+  builders, `RelationGraph` + relation cues). `trunk build --features standalone`
+  green → the new engine types stay wasm-safe; native graph algorithms remain in
+  `code-raptor`/ingest only.
+- Harness on a fresh full ingest, matched `--rerank --hybrid` config, vs the
+  `post_r0_rr` baseline (both fresh full builds of the same 8-project corpus):
+
+  | Intent | post_r0_rr | post_r1_rr | Δ r@5 | r@pool |
+  |---|---|---|---|---|
+  | comparison | 0.62 | 0.62 | flat | 0.75→0.75 |
+  | implementation | 0.57 | 0.64 | +0.07 | 0.64→0.69 |
+  | overview | 0.67 | 0.68 | +0.01 | 0.87→0.87 |
+  | relationship | 0.44 | 0.49 | +0.05 | 0.53→0.60 |
+  | **aggregate** | **0.58** | **0.61** | **+0.03** | 0.71→0.73 |
+
+  Honest read: **implementation +0.07** (2/29 cases) is a real lift — relation
+  augmentation surfaces implementing types for structurally-phrased queries. The
+  **relationship +0.05** is the two added `r1-implements` cases passing (existing
+  relationship cases are "what calls X" → `CallGraph` territory, unchanged — R1 adds
+  a *new* query capability rather than lifting old call-queries). **relationship
+  recall@pool 0.53 → 0.60**: the new edges put more structurally-related chunks into
+  the pool. No intent regressed. Two `r1`-tagged cases added per the dataset-freeze
+  policy (ADD, don't modify).
+
+### Gotchas
+
+- **Bare type identifiers were silently dropped.** `collect_type_idents` only
+  inspected a type node's *children*, so a bare `type_identifier` (`VectorStore`,
+  `Embedder`) — which has no relevant children — yielded nothing. All three initial
+  Rust extraction tests failed until the helper also checked the node itself.
+- **Killed mid-write ingest corrupts the lance index.** Stopping the R1a verification
+  chain during its re-ingest left `portfolio.lance` partially written; the next
+  *incremental* ingest then died with an ungraceful `Ambiguous merge insert` (a batch
+  with duplicate merge keys). `rm -rf <db> && ingest --full` recovered it cleanly,
+  confirming corruption rather than an R1 bug. Incremental ingest hardening against
+  partial-write states is a follow-up.
+- **`cargo run … | tail` masks the exit code.** A verification chain that piped the
+  ingest through `grep | tail` reported success (tail's exit) even though cargo exited
+  1, so the harness ran against the stale index and produced invalid numbers.
+  Capture `${PIPESTATUS[0]}` for gated steps.
+- **Multi-project edge delete.** `delete_graph_edges_by_project` clears only the first
+  chunk's project before upserting edges spanning all projects — mirrors the existing
+  `call_edges` behavior and is idempotent via deterministic edge ids, but stale edges
+  for *removed* code in non-first projects would linger (pre-existing pattern).
+
+### Deferred to later milestones (not deferred *away*)
+
+- `References` and `RationaleFor` edges are persisted but **excluded from the R2
+  community-detection union** (only `calls ∪ imports ∪ contains ∪ implements/extends/
+  embeds` partition the topology) — by design, to keep high-volume/noisy edges out of
+  the clusters.
+- `RationaleFor` *report* surfacing ("why does X exist?") lands at R4.
+
 ## 2026-06-08: Track R R0 — Crate Split (code-raptor → code-rag-ingest; new code-raptor topology crate)
 
 ### Summary

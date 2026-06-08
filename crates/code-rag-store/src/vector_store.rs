@@ -14,7 +14,8 @@ use tracing::warn;
 
 use code_rag_engine::text::build_searchable_text;
 use code_rag_types::{
-    CallEdge, CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+    CallEdge, CodeChunk, CrateChunk, EdgeConfidence, EdgeContext, EdgeRelation, FileChunk,
+    FolderChunk, GraphEdge, ModuleDocChunk, ReadmeChunk,
 };
 
 #[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
@@ -51,6 +52,8 @@ const README_TABLE: &str = "readme_chunks";
 const CRATE_TABLE: &str = "crate_chunks";
 const MODULE_DOC_TABLE: &str = "module_doc_chunks";
 const CALL_EDGES_TABLE: &str = "call_edges";
+/// Track R (R1): typed structural relation edges (imports/contains/implements/…).
+const GRAPH_EDGES_TABLE: &str = "graph_edges";
 /// A2: folder-level summary chunks.
 pub const FOLDER_TABLE: &str = "folder_chunks";
 /// A4: file-level summary chunks.
@@ -1164,6 +1167,67 @@ impl VectorStore {
         }
         Ok(all_chunks)
     }
+
+    // ========================================================================
+    // Track R (R1): graph_edges — typed structural relation edges.
+    // Pure scalar table (no vector), mirroring call_edges. relation/context/
+    // confidence are stored as their string tags.
+    // ========================================================================
+
+    /// Insert typed relation edges. Creates the graph_edges table if needed.
+    pub async fn upsert_graph_edges(&self, edges: &[GraphEdge]) -> Result<usize, StoreError> {
+        if edges.is_empty() {
+            return Ok(0);
+        }
+        let batch = graph_edges_to_batch(edges)?;
+        let count = batch.num_rows();
+        self.upsert_batch(GRAPH_EDGES_TABLE, "edge_id", batch)
+            .await?;
+        Ok(count)
+    }
+
+    /// Get all relation edges for a project (for building a RelationGraph).
+    pub async fn get_all_graph_edges(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<GraphEdge>, StoreError> {
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        self.query_graph_edges(&filter).await
+    }
+
+    /// Delete all relation edges for a project (before re-resolving).
+    pub async fn delete_graph_edges_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(GRAPH_EDGES_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
+
+    /// Helper: query graph_edges table with a filter predicate.
+    async fn query_graph_edges(&self, filter: &str) -> Result<Vec<GraphEdge>, StoreError> {
+        let table = match self.conn.open_table(GRAPH_EDGES_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()), // Table doesn't exist yet
+        };
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut edges = Vec::new();
+        for batch in &results {
+            edges.extend(extract_graph_edges_from_batch(batch)?);
+        }
+        Ok(edges)
+    }
 }
 
 // ============================================================================
@@ -1260,6 +1324,99 @@ fn extract_call_edges_from_batch(batch: &RecordBatch) -> Result<Vec<CallEdge>, S
             callee_file: callee_files.value(i).to_string(),
             project_name: project_names.value(i).to_string(),
             resolution_tier: resolution_tiers.value(i),
+        })
+        .collect();
+
+    Ok(edges)
+}
+
+/// Track R (R1): GraphEdge → Arrow. All-Utf8 scalar table; relation/context/
+/// confidence persisted via their stable string tags.
+fn graph_edges_to_batch(edges: &[GraphEdge]) -> Result<RecordBatch, StoreError> {
+    let s = |f: &dyn Fn(&GraphEdge) -> &str| -> StringArray {
+        edges.iter().map(|e| Some(f(e))).collect()
+    };
+
+    let edge_ids = s(&|e| e.edge_id.as_str());
+    let source_chunk_ids = s(&|e| e.source_chunk_id.as_str());
+    let target_chunk_ids = s(&|e| e.target_chunk_id.as_str());
+    let source_identifiers = s(&|e| e.source_identifier.as_str());
+    let target_identifiers = s(&|e| e.target_identifier.as_str());
+    let source_files = s(&|e| e.source_file.as_str());
+    let target_files = s(&|e| e.target_file.as_str());
+    let project_names = s(&|e| e.project_name.as_str());
+    let relations = s(&|e| e.relation.as_str());
+    let contexts = s(&|e| e.context.as_str());
+    let confidences = s(&|e| e.confidence.as_str());
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("edge_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("source_chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("target_chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("source_identifier", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("target_identifier", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("source_file", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("target_file", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("relation", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("context", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("confidence", arrow_schema::DataType::Utf8, false),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(edge_ids),
+            Arc::new(source_chunk_ids),
+            Arc::new(target_chunk_ids),
+            Arc::new(source_identifiers),
+            Arc::new(target_identifiers),
+            Arc::new(source_files),
+            Arc::new(target_files),
+            Arc::new(project_names),
+            Arc::new(relations),
+            Arc::new(contexts),
+            Arc::new(confidences),
+        ],
+    )?)
+}
+
+fn extract_graph_edges_from_batch(batch: &RecordBatch) -> Result<Vec<GraphEdge>, StoreError> {
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let edge_ids = col("edge_id")?;
+    let source_chunk_ids = col("source_chunk_id")?;
+    let target_chunk_ids = col("target_chunk_id")?;
+    let source_identifiers = col("source_identifier")?;
+    let target_identifiers = col("target_identifier")?;
+    let source_files = col("source_file")?;
+    let target_files = col("target_file")?;
+    let project_names = col("project_name")?;
+    let relations = col("relation")?;
+    let contexts = col("context")?;
+    let confidences = col("confidence")?;
+
+    let edges = (0..batch.num_rows())
+        .map(|i| GraphEdge {
+            edge_id: edge_ids.value(i).to_string(),
+            source_chunk_id: source_chunk_ids.value(i).to_string(),
+            target_chunk_id: target_chunk_ids.value(i).to_string(),
+            source_identifier: source_identifiers.value(i).to_string(),
+            target_identifier: target_identifiers.value(i).to_string(),
+            source_file: source_files.value(i).to_string(),
+            target_file: target_files.value(i).to_string(),
+            project_name: project_names.value(i).to_string(),
+            // Unknown tags fall back to sensible defaults rather than failing the
+            // whole batch — forward-compatible with future relation/context variants.
+            relation: EdgeRelation::from_tag(relations.value(i)).unwrap_or(EdgeRelation::References),
+            context: EdgeContext::from_tag(contexts.value(i)).unwrap_or(EdgeContext::None),
+            confidence: EdgeConfidence::from_tag(confidences.value(i))
+                .unwrap_or(EdgeConfidence::Inferred),
         })
         .collect();
 
@@ -2733,6 +2890,10 @@ impl crate::seams::VectorReader for VectorStore {
         project: Option<&str>,
     ) -> Result<Vec<CallEdge>, StoreError> {
         VectorStore::get_callees(self, caller_chunk_id, project).await
+    }
+
+    async fn get_all_graph_edges(&self, project_name: &str) -> Result<Vec<GraphEdge>, StoreError> {
+        VectorStore::get_all_graph_edges(self, project_name).await
     }
 }
 

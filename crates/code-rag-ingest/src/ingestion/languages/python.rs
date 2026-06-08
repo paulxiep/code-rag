@@ -1,4 +1,5 @@
-use super::super::language::{ImportInfo, LanguageHandler};
+use super::super::language::{ImportInfo, LanguageHandler, TypeRelation, collect_type_idents};
+use code_rag_types::{EdgeContext, EdgeRelation};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct PythonHandler;
@@ -96,16 +97,74 @@ impl LanguageHandler for PythonHandler {
                     {
                         // For dotted_name like `bar.baz`, take the last part
                         let imported = name.rsplit('.').next().unwrap_or(name);
-                        imports.push(ImportInfo {
-                            imported_name: imported.to_string(),
-                            source_path: module_name.to_string(),
-                        });
+                        imports.push(ImportInfo::import(imported, module_name));
                     }
                 }
             }
         }
 
         imports
+    }
+
+    fn extract_type_relations(
+        &self,
+        _source: &str,
+        node: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<TypeRelation> {
+        let mut out = Vec::new();
+        match node.kind() {
+            // `class Foo(Bar, Baz):` → Foo Extends Bar, Baz. Python has no explicit
+            // `implements` (duck typing), so base classes are all Extends.
+            "class_definition" => {
+                if let Some(supers) = node.child_by_field_name("superclasses") {
+                    // Base names are `identifier`/`attribute`; `Generic[T]`-style
+                    // args sit under `subscript`. Heads → Extends, args → References.
+                    for (name, is_generic) in
+                        collect_type_idents(&supers, source_bytes, &["identifier"], &["subscript"])
+                    {
+                        if is_generic {
+                            out.push(TypeRelation::new(
+                                name,
+                                EdgeRelation::References,
+                                EdgeContext::GenericArg,
+                            ));
+                        } else {
+                            out.push(TypeRelation::new(
+                                name,
+                                EdgeRelation::Extends,
+                                EdgeContext::None,
+                            ));
+                        }
+                    }
+                }
+            }
+            // Annotated params / return types → References.
+            "function_definition" => {
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    let mut c = params.walk();
+                    for p in params.children(&mut c) {
+                        if let Some(ty) = p.child_by_field_name("type") {
+                            push_py_refs(&ty, source_bytes, EdgeContext::ParameterType, &mut out);
+                        }
+                    }
+                }
+                if let Some(ret) = node.child_by_field_name("return_type") {
+                    push_py_refs(&ret, source_bytes, EdgeContext::ReturnType, &mut out);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// Push every identifier in a Python annotation node as a `References` edge —
+/// head with `context`, generic args (`Subscript[...]`) as `GenericArg`.
+fn push_py_refs(type_node: &Node, src: &[u8], context: EdgeContext, out: &mut Vec<TypeRelation>) {
+    for (name, is_generic) in collect_type_idents(type_node, src, &["identifier"], &["subscript"]) {
+        let ctx = if is_generic { EdgeContext::GenericArg } else { context };
+        out.push(TypeRelation::new(name, EdgeRelation::References, ctx));
     }
 }
 

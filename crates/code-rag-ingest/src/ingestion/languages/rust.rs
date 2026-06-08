@@ -1,4 +1,5 @@
-use super::super::language::{ImportInfo, LanguageHandler};
+use super::super::language::{ImportInfo, LanguageHandler, TypeRelation, collect_type_idents};
+use code_rag_types::{EdgeContext, EdgeRelation};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct RustHandler;
@@ -138,18 +139,126 @@ impl LanguageHandler for RustHandler {
 
         for child in root.children(&mut cursor) {
             if child.kind() == "use_declaration" {
-                collect_use_imports(&child, source_bytes, &mut imports);
+                // `pub use` (any visibility modifier on a use) is a re-export.
+                let is_reexport = {
+                    let mut c = child.walk();
+                    child
+                        .children(&mut c)
+                        .any(|n| n.kind() == "visibility_modifier")
+                };
+                collect_use_imports(&child, source_bytes, &mut imports, is_reexport);
             }
         }
 
         imports
+    }
+
+    fn extract_type_relations(
+        &self,
+        _source: &str,
+        node: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<TypeRelation> {
+        let mut out = Vec::new();
+        match node.kind() {
+            // `impl Trait for Type` → Type Implements Trait. The chunk's identifier
+            // is `Type` (the `type:` field captured as @name), so the impl chunk is
+            // the source and the trait is the target.
+            "impl_item" => {
+                if let Some(trait_node) = node.child_by_field_name("trait") {
+                    push_rust_idents(&trait_node, source_bytes, EdgeRelation::Implements, &mut out);
+                }
+            }
+            // `trait Foo: Bar + Baz` → Foo Extends Bar, Baz (supertrait bounds).
+            "trait_item" => {
+                if let Some(bounds) = node.child_by_field_name("bounds") {
+                    push_rust_idents(&bounds, source_bytes, EdgeRelation::Extends, &mut out);
+                }
+            }
+            // Struct/enum fields → Embeds (composition). Generic args → References.
+            "struct_item" | "enum_item" => {
+                let mut field_types = Vec::new();
+                collect_field_types(node, &mut field_types);
+                for ty in &field_types {
+                    push_rust_idents(ty, source_bytes, EdgeRelation::Embeds, &mut out);
+                }
+            }
+            // fn params → References(ParameterType); return → References(ReturnType).
+            "function_item" => {
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    let mut c = params.walk();
+                    for p in params.children(&mut c) {
+                        if let Some(ty) = p.child_by_field_name("type") {
+                            push_rust_refs(
+                                &ty,
+                                source_bytes,
+                                EdgeContext::ParameterType,
+                                &mut out,
+                            );
+                        }
+                    }
+                }
+                if let Some(ret) = node.child_by_field_name("return_type") {
+                    push_rust_refs(&ret, source_bytes, EdgeContext::ReturnType, &mut out);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// Collect type identifiers from a type node and push them as `relation` for the
+/// head type and `References(GenericArg)` for any generic arguments. Std/container
+/// types (Vec, Option, …) are kept here but dropped later at resolution since no
+/// project chunk carries that identifier.
+fn push_rust_idents(
+    type_node: &Node,
+    src: &[u8],
+    relation: EdgeRelation,
+    out: &mut Vec<TypeRelation>,
+) {
+    for (name, is_generic) in collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"]) {
+        if is_generic {
+            out.push(TypeRelation::new(name, EdgeRelation::References, EdgeContext::GenericArg));
+        } else {
+            out.push(TypeRelation::new(name, relation, EdgeContext::None));
+        }
+    }
+}
+
+/// Like [`push_rust_idents`] but the head type carries a `References` edge with the
+/// given positional `context` (parameter/return); generics stay `GenericArg`.
+fn push_rust_refs(type_node: &Node, src: &[u8], context: EdgeContext, out: &mut Vec<TypeRelation>) {
+    for (name, is_generic) in collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"]) {
+        let ctx = if is_generic { EdgeContext::GenericArg } else { context };
+        out.push(TypeRelation::new(name, EdgeRelation::References, ctx));
+    }
+}
+
+/// Collect the `type:` field node of every `field_declaration` reachable under a
+/// struct/enum body (recursively, so enum-variant field lists are covered too).
+fn collect_field_types<'a>(node: &Node<'a>, out: &mut Vec<Node<'a>>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "field_declaration"
+            && let Some(ty) = child.child_by_field_name("type")
+        {
+            out.push(ty);
+        }
+        collect_field_types(&child, out);
     }
 }
 
 /// Extract imports from a `use_declaration` node.
 /// Handles: `use crate::module::function;`, `use super::module::*;`,
 /// `use crate::module::{foo, bar};`
-fn collect_use_imports(node: &Node, source_bytes: &[u8], imports: &mut Vec<ImportInfo>) {
+fn collect_use_imports(
+    node: &Node,
+    source_bytes: &[u8],
+    imports: &mut Vec<ImportInfo>,
+    is_reexport: bool,
+) {
     // Walk the use_declaration looking for scoped_use_list or a simple use_path
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -162,12 +271,13 @@ fn collect_use_imports(node: &Node, source_bytes: &[u8], imports: &mut Vec<Impor
                         imports.push(ImportInfo {
                             imported_name: name.to_string(),
                             source_path: path.to_string(),
+                            is_reexport,
                         });
                     }
                 }
             }
             "scoped_use_list" => {
-                collect_scoped_use_list(&child, source_bytes, imports);
+                collect_scoped_use_list(&child, source_bytes, imports, is_reexport);
             }
             _ => {}
         }
@@ -175,7 +285,12 @@ fn collect_use_imports(node: &Node, source_bytes: &[u8], imports: &mut Vec<Impor
 }
 
 /// Handle `use crate::module::{foo, bar};`
-fn collect_scoped_use_list(node: &Node, source_bytes: &[u8], imports: &mut Vec<ImportInfo>) {
+fn collect_scoped_use_list(
+    node: &Node,
+    source_bytes: &[u8],
+    imports: &mut Vec<ImportInfo>,
+    is_reexport: bool,
+) {
     // Find the path prefix (everything before `::{ ... }`)
     let full_text = node.utf8_text(source_bytes).unwrap_or("");
 
@@ -198,6 +313,7 @@ fn collect_scoped_use_list(node: &Node, source_bytes: &[u8], imports: &mut Vec<I
                             imports.push(ImportInfo {
                                 imported_name: name.to_string(),
                                 source_path: path_prefix.to_string(),
+                                is_reexport,
                             });
                         }
                     }
@@ -208,11 +324,13 @@ fn collect_scoped_use_list(node: &Node, source_bytes: &[u8], imports: &mut Vec<I
                                 imports.push(ImportInfo {
                                     imported_name: name.to_string(),
                                     source_path: format!("{}::{}", path_prefix, sub_path),
+                                    is_reexport,
                                 });
                             } else {
                                 imports.push(ImportInfo {
                                     imported_name: text.to_string(),
                                     source_path: path_prefix.to_string(),
+                                    is_reexport,
                                 });
                             }
                         }
@@ -445,5 +563,72 @@ mod tests {
 
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0.docstring, Some("Pipeline test.".to_string()));
+    }
+
+    // Track R (R1): type-relation extraction
+
+    /// Parse `source`, return type relations from the first matched definition.
+    fn type_relations_from(source: &str) -> Vec<TypeRelation> {
+        let handler = RustHandler;
+        let mut parser = tree_sitter::Parser::new();
+        let grammar = handler.grammar();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let query = tree_sitter::Query::new(&grammar, handler.query_string()).unwrap();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let body_idx = query.capture_index_for_name("body");
+        let src = source.as_bytes();
+        let mut matches = cursor.captures(&query, tree.root_node(), src);
+        use tree_sitter::StreamingIterator;
+        if let Some((m, _)) = matches.next() {
+            if let Some(b) = m.captures.iter().find(|c| Some(c.index) == body_idx) {
+                return handler.extract_type_relations(source, &b.node, src);
+            }
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn test_rust_implements() {
+        let rels = type_relations_from("impl Embedder for FastEmbedImpl {}");
+        assert!(rels.iter().any(|r| r.relation == EdgeRelation::Implements
+            && r.target_name == "Embedder"));
+    }
+
+    #[test]
+    fn test_rust_trait_extends() {
+        let rels = type_relations_from("trait Reranker: Send + Sync {}");
+        let extends: Vec<_> = rels
+            .iter()
+            .filter(|r| r.relation == EdgeRelation::Extends)
+            .map(|r| r.target_name.as_str())
+            .collect();
+        assert!(extends.contains(&"Send"));
+        assert!(extends.contains(&"Sync"));
+    }
+
+    #[test]
+    fn test_rust_struct_embeds() {
+        let rels = type_relations_from("struct AppState { store: VectorStore, n: usize }");
+        assert!(rels.iter().any(|r| r.relation == EdgeRelation::Embeds
+            && r.target_name == "VectorStore"));
+    }
+
+    #[test]
+    fn test_rust_fn_references() {
+        let rels = type_relations_from("fn retrieve(ctx: QueryContext) -> RetrievalResult {}");
+        assert!(rels.iter().any(|r| r.relation == EdgeRelation::References
+            && r.context == EdgeContext::ParameterType
+            && r.target_name == "QueryContext"));
+        assert!(rels.iter().any(|r| r.relation == EdgeRelation::References
+            && r.context == EdgeContext::ReturnType
+            && r.target_name == "RetrievalResult"));
+    }
+
+    #[test]
+    fn test_rust_inherent_impl_no_implements() {
+        // `impl Foo {}` (no trait) must not produce an Implements edge.
+        let rels = type_relations_from("impl FastEmbedImpl { fn new() {} }");
+        assert!(!rels.iter().any(|r| r.relation == EdgeRelation::Implements));
     }
 }

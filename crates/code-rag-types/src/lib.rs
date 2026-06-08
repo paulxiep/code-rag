@@ -151,6 +151,175 @@ pub struct ExportEdge {
     pub tier: u8,
 }
 
+/// Track R (R1): the relation type carried by a `GraphEdge`.
+///
+/// `Calls` is included for completeness (so a `RelationGraph` can be built over a
+/// single union), but call edges are NOT persisted as `GraphEdge`s — they are
+/// projected from the existing `call_edges` table at topology-build time so C1/C2's
+/// `resolution_tier` semantics stay intact. Everything else is persisted in the new
+/// `graph_edges` table.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeRelation {
+    /// Function/method call (projected from `call_edges`, not stored here).
+    Calls,
+    /// A file imports a symbol from another module.
+    Imports,
+    /// Structural containment derived from the chunk hierarchy (folder ⊇ file ⊇ def).
+    Contains,
+    /// A type implements a trait/interface (Rust `impl Trait for T`, TS `implements`).
+    Implements,
+    /// A type extends/inherits another (trait bounds, Python base class, TS `extends`).
+    Extends,
+    /// A type identifier appears in a parameter/return/generic/field position.
+    References,
+    /// Struct/record composition (Rust field, Go struct embedding).
+    Embeds,
+    /// A symbol is re-exported (`pub use`, `export … from`).
+    ReExports,
+    /// Inline `NOTE:`/`WHY:`/`HACK:` rationale linked to a definition (optional).
+    RationaleFor,
+}
+
+impl EdgeRelation {
+    /// Stable lowercase tag used for LanceDB scalar storage and filtering.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeRelation::Calls => "calls",
+            EdgeRelation::Imports => "imports",
+            EdgeRelation::Contains => "contains",
+            EdgeRelation::Implements => "implements",
+            EdgeRelation::Extends => "extends",
+            EdgeRelation::References => "references",
+            EdgeRelation::Embeds => "embeds",
+            EdgeRelation::ReExports => "re_exports",
+            EdgeRelation::RationaleFor => "rationale_for",
+        }
+    }
+
+    /// Parse a stored tag back into an `EdgeRelation`.
+    pub fn from_tag(s: &str) -> Option<Self> {
+        Some(match s {
+            "calls" => EdgeRelation::Calls,
+            "imports" => EdgeRelation::Imports,
+            "contains" => EdgeRelation::Contains,
+            "implements" => EdgeRelation::Implements,
+            "extends" => EdgeRelation::Extends,
+            "references" => EdgeRelation::References,
+            "embeds" => EdgeRelation::Embeds,
+            "re_exports" => EdgeRelation::ReExports,
+            "rationale_for" => EdgeRelation::RationaleFor,
+            _ => return None,
+        })
+    }
+}
+
+/// Track R (R1): where a `References` edge's type identifier occurs. `None` for
+/// relations that don't carry positional context (calls/imports/contains/…).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeContext {
+    ParameterType,
+    ReturnType,
+    GenericArg,
+    FieldType,
+    Attribute,
+    None,
+}
+
+impl EdgeContext {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeContext::ParameterType => "parameter_type",
+            EdgeContext::ReturnType => "return_type",
+            EdgeContext::GenericArg => "generic_arg",
+            EdgeContext::FieldType => "field_type",
+            EdgeContext::Attribute => "attribute",
+            EdgeContext::None => "none",
+        }
+    }
+
+    pub fn from_tag(s: &str) -> Option<Self> {
+        Some(match s {
+            "parameter_type" => EdgeContext::ParameterType,
+            "return_type" => EdgeContext::ReturnType,
+            "generic_arg" => EdgeContext::GenericArg,
+            "field_type" => EdgeContext::FieldType,
+            "attribute" => EdgeContext::Attribute,
+            "none" => EdgeContext::None,
+            _ => return None,
+        })
+    }
+}
+
+/// Track R (R1): how confidently an edge was derived. Mirrors C1's tiered
+/// resolution: `Extracted` = AST-direct, `Inferred` = heuristic/unique-global,
+/// `Ambiguous` = multiple candidates with no disambiguating evidence.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeConfidence {
+    Extracted,
+    Inferred,
+    Ambiguous,
+}
+
+impl EdgeConfidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeConfidence::Extracted => "extracted",
+            EdgeConfidence::Inferred => "inferred",
+            EdgeConfidence::Ambiguous => "ambiguous",
+        }
+    }
+
+    pub fn from_tag(s: &str) -> Option<Self> {
+        Some(match s {
+            "extracted" => EdgeConfidence::Extracted,
+            "inferred" => EdgeConfidence::Inferred,
+            "ambiguous" => EdgeConfidence::Ambiguous,
+            _ => return None,
+        })
+    }
+}
+
+/// Track R (R1): a typed structural edge between two code chunks. Persisted in the
+/// `graph_edges` LanceDB scalar table (no embedding), mirroring `CallEdge`. The
+/// `code-raptor` topology engine reads these (unioned with projected `call_edges`)
+/// to build the `RelationGraph`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GraphEdge {
+    /// Deterministic, relation-aware: hash("gedge:{relation}:{source}:{target}:{context}").
+    pub edge_id: String,
+    /// FK to CodeChunk.chunk_id (or a derived folder/file chunk id for `Contains`).
+    pub source_chunk_id: String,
+    /// FK to CodeChunk.chunk_id.
+    pub target_chunk_id: String,
+    pub source_identifier: String,
+    pub target_identifier: String,
+    pub source_file: String,
+    pub target_file: String,
+    pub project_name: String,
+    pub relation: EdgeRelation,
+    pub context: EdgeContext,
+    pub confidence: EdgeConfidence,
+}
+
+impl GraphEdge {
+    /// Deterministic edge id — stable across re-indexing for an unchanged
+    /// (source, target, relation, context) tuple, so reconcile/upsert is idempotent.
+    pub fn deterministic_edge_id(
+        source_chunk_id: &str,
+        target_chunk_id: &str,
+        relation: EdgeRelation,
+        context: EdgeContext,
+    ) -> String {
+        content_hash(&format!(
+            "gedge:{}:{}:{}:{}",
+            relation.as_str(),
+            source_chunk_id,
+            target_chunk_id,
+            context.as_str()
+        ))
+    }
+}
+
 /// Represents module-level documentation (//! comments at top of lib.rs)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ModuleDocChunk {

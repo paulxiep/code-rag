@@ -165,6 +165,83 @@ async fn augment_with_graph(
     graph::merge_graph_chunks(code_scored, graph_scored)
 }
 
+/// Track R (R1): augment Relationship results from the typed RelationGraph.
+///
+/// Loads the project's `graph_edges` (implements/extends/embeds/references),
+/// builds a `RelationGraph`, and—if the query is a structural-relation question
+/// like "what implements `Embedder`?"—merges the related chunks into the code
+/// results, unioning their ids into `graph_ids` for `reserve_graph_slots`
+/// protection. Returns inputs unchanged when there are no relation edges or the
+/// query has no relation target, so it is a strict no-op on the pre-R1 baseline.
+async fn augment_with_relations(
+    query: &str,
+    code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    prior_graph_ids: std::collections::HashSet<String>,
+    store: &dyn VectorReader,
+) -> (
+    Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    std::collections::HashSet<String>,
+) {
+    let candidates: Vec<(String, String)> = code_scored
+        .iter()
+        .take(5)
+        .map(|sc| (sc.chunk.chunk_id.clone(), sc.chunk.identifier.clone()))
+        .collect();
+    if candidates.is_empty() {
+        return (code_scored, prior_graph_ids);
+    }
+
+    let project = &code_scored[0].chunk.project_name;
+    let edges = match store.get_all_graph_edges(project).await {
+        Ok(e) => e,
+        Err(_) => return (code_scored, prior_graph_ids),
+    };
+    if edges.is_empty() {
+        return (code_scored, prior_graph_ids);
+    }
+
+    let id_pairs: Vec<(String, String)> = edges
+        .iter()
+        .flat_map(|e| {
+            vec![
+                (e.source_identifier.clone(), e.source_chunk_id.clone()),
+                (e.target_identifier.clone(), e.target_chunk_id.clone()),
+            ]
+        })
+        .collect();
+    let mut relation_graph = graph::RelationGraph::from_edges(
+        edges
+            .iter()
+            .map(|e| (e.source_chunk_id.clone(), e.target_chunk_id.clone(), e.relation)),
+    );
+    relation_graph.register_identifiers(id_pairs);
+
+    let resolved_ids = match graph::relation_augment(query, &candidates, &relation_graph) {
+        Some((_, ids)) => ids,
+        None => return (code_scored, prior_graph_ids),
+    };
+
+    let chunks = match store.get_chunks_by_ids(&resolved_ids).await {
+        Ok(c) => c,
+        Err(_) => return (code_scored, prior_graph_ids),
+    };
+
+    // Relation-resolved chunks carry structural proof; prime them at the
+    // import-tier prior (the reranker reorders, reserve_graph_slots protects).
+    let relation_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>> = chunks
+        .into_iter()
+        .map(|chunk| ScoredChunk {
+            chunk,
+            score: graph::tier_score(2),
+        })
+        .collect();
+
+    let (merged, new_ids) = graph::merge_graph_chunks(code_scored, relation_scored);
+    let mut all_ids = prior_graph_ids;
+    all_ids.extend(new_ids);
+    (merged, all_ids)
+}
+
 /// Rerank a vec of scored chunks using the cross-encoder.
 /// Returns chunks re-sorted by sigmoid-normalized cross-encoder score, truncated to limit.
 fn rerank_chunks<T: RerankText + Clone>(
@@ -448,6 +525,19 @@ pub async fn retrieve(
             augment_with_graph(query, code_scored, store).await
         } else {
             (code_scored, std::collections::HashSet::new())
+        };
+
+    // Track R (R1): also consult the typed RelationGraph (implements/extends/
+    // embeds) and merge its hits. Runs for Relationship + Implementation because
+    // "what implements X?" is frequently misclassified as Implementation. This is
+    // a strict no-op unless the query carries an implement/extend/embed cue AND
+    // relation edges match — so typical Implementation queries ("how does X work")
+    // and the pre-R1 baseline are unaffected.
+    let (code_scored, graph_ids) =
+        if intent == QueryIntent::Relationship || intent == QueryIntent::Implementation {
+            augment_with_relations(query, code_scored, graph_ids, store).await
+        } else {
+            (code_scored, graph_ids)
         };
 
     // Non-code tables are untouched by B5 — they follow the hybrid toggle only.

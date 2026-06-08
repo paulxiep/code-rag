@@ -1,4 +1,7 @@
-use super::super::language::{ImportInfo, LanguageHandler};
+use super::super::language::{
+    ImportInfo, LanguageHandler, TypeRelation, collect_nodes_by_kind, collect_type_idents,
+};
+use code_rag_types::{EdgeContext, EdgeRelation};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct TypeScriptHandler;
@@ -216,10 +219,106 @@ impl LanguageHandler for TypeScriptHandler {
                         );
                     }
                 }
+            } else if child.kind() == "export_statement"
+                && let Some(source) = child.child_by_field_name("source")
+            {
+                // Re-export: `export { foo } from './module'`. (`export * from` has
+                // no resolvable name, so it is skipped.)
+                let source_path = source
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string();
+                if source_path.is_empty() {
+                    continue;
+                }
+                for spec in collect_nodes_by_kind(&child, &["export_specifier"]) {
+                    let name = spec
+                        .child_by_field_name("alias")
+                        .or_else(|| spec.child_by_field_name("name"))
+                        .and_then(|n| n.utf8_text(source_bytes).ok());
+                    if let Some(name) = name {
+                        imports.push(ImportInfo {
+                            imported_name: name.to_string(),
+                            source_path: source_path.clone(),
+                            is_reexport: true,
+                        });
+                    }
+                }
             }
         }
 
         imports
+    }
+
+    fn extract_type_relations(
+        &self,
+        _source: &str,
+        node: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<TypeRelation> {
+        let mut out = Vec::new();
+        match node.kind() {
+            // `class Foo extends Bar implements IBaz` / `interface Foo extends Bar`.
+            // Heritage clauses can sit under a `class_heritage` wrapper.
+            "class_declaration" | "interface_declaration" => {
+                let clauses = collect_nodes_by_kind(
+                    node,
+                    &["extends_clause", "extends_type_clause", "implements_clause"],
+                );
+                for clause in &clauses {
+                    let head = if clause.kind() == "implements_clause" {
+                        EdgeRelation::Implements
+                    } else {
+                        EdgeRelation::Extends
+                    };
+                    for (name, is_generic) in collect_type_idents(
+                        clause,
+                        source_bytes,
+                        &["type_identifier", "identifier"],
+                        &["type_arguments"],
+                    ) {
+                        if is_generic {
+                            out.push(TypeRelation::new(
+                                name,
+                                EdgeRelation::References,
+                                EdgeContext::GenericArg,
+                            ));
+                        } else {
+                            out.push(TypeRelation::new(name, head, EdgeContext::None));
+                        }
+                    }
+                }
+            }
+            // Function/method/arrow param + return type annotations → References.
+            "function_declaration" | "method_definition" | "arrow_function"
+            | "function_expression" => {
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    let mut c = params.walk();
+                    for p in params.children(&mut c) {
+                        if let Some(ty) = p.child_by_field_name("type") {
+                            push_ts_refs(&ty, source_bytes, EdgeContext::ParameterType, &mut out);
+                        }
+                    }
+                }
+                if let Some(ret) = node.child_by_field_name("return_type") {
+                    push_ts_refs(&ret, source_bytes, EdgeContext::ReturnType, &mut out);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// Push every type identifier in a TS annotation node as a `References` edge —
+/// head with `context`, generic args (`type_arguments`) as `GenericArg`.
+fn push_ts_refs(type_node: &Node, src: &[u8], context: EdgeContext, out: &mut Vec<TypeRelation>) {
+    for (name, is_generic) in
+        collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"])
+    {
+        let ctx = if is_generic { EdgeContext::GenericArg } else { context };
+        out.push(TypeRelation::new(name, EdgeRelation::References, ctx));
     }
 }
 
@@ -244,10 +343,7 @@ fn extract_ts_import_names(
                             .or_else(|| spec.child_by_field_name("name"))
                             .and_then(|n| n.utf8_text(source_bytes).ok());
                         if let Some(name) = name {
-                            imports.push(ImportInfo {
-                                imported_name: name.to_string(),
-                                source_path: source_path.to_string(),
-                            });
+                            imports.push(ImportInfo::import(name, source_path));
                         }
                     }
                 }
@@ -255,10 +351,7 @@ fn extract_ts_import_names(
             "identifier" => {
                 // Default import: `import Foo from './module'`
                 if let Ok(name) = child.utf8_text(source_bytes) {
-                    imports.push(ImportInfo {
-                        imported_name: name.to_string(),
-                        source_path: source_path.to_string(),
-                    });
+                    imports.push(ImportInfo::import(name, source_path));
                 }
             }
             _ => {}

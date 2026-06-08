@@ -220,6 +220,12 @@ pub trait VectorReader: Send + Sync {
         caller_chunk_id: &str,
         project: Option<&str>,
     ) -> Result<Vec<code_rag_types::CallEdge>, StoreError>;
+
+    // ---- Track R (R1): typed relation edges for the RelationGraph ----
+    async fn get_all_graph_edges(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<code_rag_types::GraphEdge>, StoreError>;
 }
 
 // ---------- VectorWriter ----------

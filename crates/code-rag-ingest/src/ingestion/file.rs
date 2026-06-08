@@ -226,10 +226,7 @@ mod tests {
     }
 
     fn mk_import(name: &str, source: &str) -> ImportInfo {
-        ImportInfo {
-            imported_name: name.to_string(),
-            source_path: source.to_string(),
-        }
+        ImportInfo::import(name, source)
     }
 
     #[test]

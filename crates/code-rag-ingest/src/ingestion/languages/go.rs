@@ -1,4 +1,5 @@
-use super::super::language::{ImportInfo, LanguageHandler};
+use super::super::language::{ImportInfo, LanguageHandler, TypeRelation, collect_type_idents};
+use code_rag_types::{EdgeContext, EdgeRelation};
 use tree_sitter::{Language, Node, TreeCursor};
 
 pub struct GoHandler;
@@ -127,6 +128,117 @@ impl LanguageHandler for GoHandler {
 
         imports
     }
+
+    fn extract_type_relations(
+        &self,
+        _source: &str,
+        node: &Node,
+        source_bytes: &[u8],
+    ) -> Vec<TypeRelation> {
+        // Go has no explicit `implements`/`extends` (interface satisfaction is
+        // structural), so the structural relations are: struct embedding → Embeds,
+        // named field types → References(FieldType), and param/return types →
+        // References.
+        let mut out = Vec::new();
+        match node.kind() {
+            "type_declaration" => {
+                for field in collect_go_struct_fields(node) {
+                    // An embedded field has a `type` but no `name` field — the field
+                    // *is* the type. Named fields carry a `name` (or `name`s).
+                    let has_name = field.child_by_field_name("name").is_some();
+                    let ty = field.child_by_field_name("type");
+                    if let Some(ty) = ty {
+                        let (rel, ctx) = if has_name {
+                            (EdgeRelation::References, EdgeContext::FieldType)
+                        } else {
+                            (EdgeRelation::Embeds, EdgeContext::None)
+                        };
+                        push_go_idents(&ty, source_bytes, rel, ctx, &mut out);
+                    }
+                }
+            }
+            "function_declaration" | "method_declaration" => {
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    push_go_param_types(
+                        &params,
+                        source_bytes,
+                        EdgeContext::ParameterType,
+                        &mut out,
+                    );
+                }
+                if let Some(result) = node.child_by_field_name("result") {
+                    push_go_idents(
+                        &result,
+                        source_bytes,
+                        EdgeRelation::References,
+                        EdgeContext::ReturnType,
+                        &mut out,
+                    );
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// Collect `field_declaration` nodes inside a Go `type ... struct { … }` decl.
+fn collect_go_struct_fields<'a>(node: &Node<'a>) -> Vec<Node<'a>> {
+    let mut out = Vec::new();
+    collect_go_fields_inner(node, &mut out);
+    out
+}
+
+fn collect_go_fields_inner<'a>(node: &Node<'a>, out: &mut Vec<Node<'a>>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "field_declaration" {
+            out.push(child);
+        } else {
+            collect_go_fields_inner(&child, out);
+        }
+    }
+}
+
+/// Push type idents from a Go type node: head → `relation`/`context`, any generic
+/// args → References(GenericArg). `qualified_type` (pkg.Type) yields the Type ident.
+fn push_go_idents(
+    type_node: &Node,
+    src: &[u8],
+    relation: EdgeRelation,
+    context: EdgeContext,
+    out: &mut Vec<TypeRelation>,
+) {
+    for (name, is_generic) in
+        collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"])
+    {
+        if is_generic {
+            out.push(TypeRelation::new(
+                name,
+                EdgeRelation::References,
+                EdgeContext::GenericArg,
+            ));
+        } else {
+            out.push(TypeRelation::new(name, relation, context));
+        }
+    }
+}
+
+/// Each `parameter_declaration` in a Go parameter list carries a `type` field.
+fn push_go_param_types(
+    params: &Node,
+    src: &[u8],
+    context: EdgeContext,
+    out: &mut Vec<TypeRelation>,
+) {
+    let mut cursor = params.walk();
+    for p in params.children(&mut cursor) {
+        if p.kind() == "parameter_declaration"
+            && let Some(ty) = p.child_by_field_name("type")
+        {
+            push_go_idents(&ty, src, EdgeRelation::References, context, out);
+        }
+    }
 }
 
 /// Walk down a subtree looking for the first `{` token (start of a struct/interface body).
@@ -182,19 +294,13 @@ fn collect_import_spec(node: &Node, source_bytes: &[u8], imports: &mut Vec<Impor
         if a == "_" || a == "." {
             return;
         }
-        imports.push(ImportInfo {
-            imported_name: a.to_string(),
-            source_path: path,
-        });
+        imports.push(ImportInfo::import(a, path));
     } else {
         let last_segment = path.rsplit('/').next().unwrap_or(&path).to_string();
         if last_segment.is_empty() {
             return;
         }
-        imports.push(ImportInfo {
-            imported_name: last_segment,
-            source_path: path,
-        });
+        imports.push(ImportInfo::import(last_segment, path));
     }
 }
 

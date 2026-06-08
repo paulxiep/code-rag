@@ -85,7 +85,7 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
     }
 
     // Step 1: Parse code into chunks (sync, no DB).
-    let (result, calls_map, imports_map) =
+    let (result, calls_map, imports_map, type_relations_map) =
         run_ingestion(&repo_path, effective_project_name.as_deref());
     info!(
         "Parsed: {} code, {} readme, {} crate, {} module_doc chunks",
@@ -109,17 +109,46 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
 
     // Step 4: C1 — Resolve call edges and persist them.
     if !dry_run {
+        let project = result
+            .code_chunks
+            .first()
+            .map(|c| c.project_name.as_str())
+            .unwrap_or("unknown");
+
         let edges =
             crate::edge_resolution::resolve_edges(&result.code_chunks, &calls_map, &imports_map);
         if !edges.is_empty() {
-            let project = result
-                .code_chunks
-                .first()
-                .map(|c| c.project_name.as_str())
-                .unwrap_or("unknown");
             store.delete_edges_by_project(project).await?;
             let count = store.upsert_call_edges(&edges).await?;
             info!("Resolved {} call edges (project: {})", count, project);
+        }
+
+        // Track R (R1): build the typed relation graph and persist it to
+        // `graph_edges`. Three sources, all keyed by deterministic edge ids:
+        //   - type relations (implements/extends/embeds/references) — resolved
+        //   - contains (folder ⊇ file ⊇ def) — derived from the chunk hierarchy
+        //   - imports / re-exports — resolved from file-level imports
+        // Always clear the project's edges first so a now-empty set removes stale
+        // rows (mirrors call-edge handling but unconditional).
+        let mut graph_edges = crate::edge_resolution::resolve_type_edges(
+            &result.code_chunks,
+            &type_relations_map,
+            &imports_map,
+        );
+        graph_edges.extend(crate::edge_resolution::build_contains_edges(
+            &result.code_chunks,
+            &result.file_chunks,
+            &result.folder_chunks,
+        ));
+        graph_edges.extend(crate::edge_resolution::build_import_edges(
+            &result.code_chunks,
+            &result.file_chunks,
+            &imports_map,
+        ));
+        store.delete_graph_edges_by_project(project).await?;
+        if !graph_edges.is_empty() {
+            let count = store.upsert_graph_edges(&graph_edges).await?;
+            info!("Resolved {} relation edges (project: {})", count, project);
         }
     }
 
