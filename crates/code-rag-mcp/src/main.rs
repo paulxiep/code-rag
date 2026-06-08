@@ -52,7 +52,7 @@ const BUNDLED_SKILL: &str = include_str!("../skills/code-rag.md");
 /// - **Serve** (top-level flags like `--db-path`) — runs the stdio MCP server.
 ///   This is what Claude Code spawns via `.mcp.json`.
 /// - **`ingest <path>`** subcommand — runs the same ingestion pipeline as the
-///   internal `code-raptor` lib. Used by `code_rag_reindex` to spawn itself
+///   internal `code-rag-ingest` lib. Used by `code_rag_reindex` to spawn itself
 ///   recursively, so we ship one binary instead of two.
 #[derive(Parser, Debug)]
 #[command(name = "code-rag-mcp", about = "MCP server for code-rag retrieval")]
@@ -60,7 +60,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Path to the LanceDB index produced by `code-raptor ingest ... --single-repo`.
+    /// Path to the LanceDB index produced by `code-rag-ingest ingest ... --single-repo`.
     #[arg(long, default_value = "./.code-rag-mcp/index.lance", global = true)]
     db_path: String,
 
@@ -91,7 +91,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run the ingestion pipeline. Same surface as `code-raptor ingest`,
+    /// Run the ingestion pipeline. Same surface as `code-rag-ingest ingest`,
     /// kept here so the MCP server can spawn itself recursively for
     /// `code_rag_reindex` and we only ship one binary.
     Ingest {
@@ -717,7 +717,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Subcommand dispatch — `ingest` runs the same pipeline as the standalone
-    // `code-raptor` CLI used to (just shipped under the same exe), then exits.
+    // `code-rag-ingest` CLI (just shipped under the same exe), then exits.
     if let Some(Commands::Ingest {
         repo_path,
         db_path,
@@ -726,7 +726,7 @@ async fn main() -> Result<()> {
         full,
     }) = cli.command
     {
-        return code_raptor::ingest_repo(code_raptor::IngestOpts {
+        return code_rag_ingest::ingest_repo(code_rag_ingest::IngestOpts {
             repo_path,
             db_path,
             project_name,

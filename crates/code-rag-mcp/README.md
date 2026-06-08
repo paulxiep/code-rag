@@ -102,7 +102,7 @@ The ingestion pipeline uses tree-sitter parsers for Rust, Python, TypeScript, an
 
 ## Troubleshooting
 
-**"AppState init failed: ... code_chunks table not found"** — the index doesn't exist yet. Run `code-raptor ingest . --db-path ./.code-rag/index.lance --single-repo --full`.
+**"AppState init failed: ... code_chunks table not found"** — the index doesn't exist yet. Run `code-rag-ingest ingest . --db-path ./.code-rag/index.lance --single-repo --full`.
 
 **Reranker download hangs on first run** — large network fetch (~90 MB). Disable with `--no-rerank` or set `CODE_RAG_RERANKER_DIR`.
 

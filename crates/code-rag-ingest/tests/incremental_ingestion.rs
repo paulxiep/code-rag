@@ -3,7 +3,7 @@
 //! Tests the parse → reconcile roundtrip with real files on disk.
 //! No database or embedder needed — exercises run_ingestion + reconcile.
 
-use code_raptor::{ExistingFileIndex, IngestionResult, reconcile, run_ingestion};
+use code_rag_ingest::{ExistingFileIndex, IngestionResult, reconcile, run_ingestion};
 use std::fs;
 use tempfile::TempDir;
 

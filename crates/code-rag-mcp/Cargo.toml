@@ -26,9 +26,9 @@ code-rag-engine = { path = "../code-rag-engine" }
 code-rag-store = { path = "../code-rag-store" }
 code-rag-types = { path = "../code-rag-types" }
 caravan-rpc = { workspace = true }
-# code-raptor's `ingest_repo` lib entrypoint — lets the MCP do everything
-# code-raptor.exe used to do without shipping a second binary.
-code-raptor = { path = "../code-raptor" }
+# code-rag-ingest's `ingest_repo` lib entrypoint — lets the MCP do everything
+# the standalone code-rag-ingest binary does without shipping a second binary.
+code-rag-ingest = { path = "../code-rag-ingest" }
 
 # Async runtime
 tokio = { version = "1.48", features = ["full"] }

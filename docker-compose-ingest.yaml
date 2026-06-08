@@ -8,8 +8,8 @@ services:
     build:
       context: ..  # Parent directory (contains this repo + sibling projects)
       dockerfile: ./code-rag/dockerfile/Dockerfile
-      target: raptor
-    container_name: code-raptor-ingest
+      target: ingest
+    container_name: code-rag-ingest
     volumes:
       - ./data:/app/data              # Persist Lance DB
       - ./cache:/tmp/.cache           # Embedding model cache
@@ -17,4 +17,4 @@ services:
     environment:
       - RUST_LOG=info
       - DB_PATH=/app/data/portfolio.lance
-    command: ["/app/code-raptor", "ingest", "/repos", "--db-path", "/app/data/portfolio.lance"]
+    command: ["/app/code-rag-ingest", "ingest", "/repos", "--db-path", "/app/data/portfolio.lance"]

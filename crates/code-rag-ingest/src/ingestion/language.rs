@@ -1,7 +1,7 @@
 use tree_sitter::{Language, Node};
 
 /// An import found in a source file. Used for tier-2 (import-based) edge resolution.
-/// Local to code-raptor; not stored in LanceDB.
+/// Local to code-rag-ingest; not stored in LanceDB.
 #[derive(Debug, Clone)]
 pub struct ImportInfo {
     /// The imported symbol name, e.g. "normalize_path"

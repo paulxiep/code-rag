@@ -60,7 +60,7 @@ pub const FILE_TABLE: &str = "file_chunks";
 /// removed, renamed, or retyped). The bump invalidates existing indexes —
 /// `VectorStore::new()` refuses to open a DB whose `_schema_version` sidecar
 /// disagrees with this constant. Recovery is `rm -rf <db_path>` followed by
-/// a fresh `code-raptor ingest --full`.
+/// a fresh `code-rag-ingest ingest --full`.
 ///
 /// Distinct from `code_rag_types::DERIVATION_VERSION`: derivation governs
 /// chunk-content hashing (forces re-embed of unchanged source), schema
@@ -117,7 +117,7 @@ fn check_schema_version_compat(db_path: &std::path::Path) -> Result<(), StoreErr
         Some(v) if v == SCHEMA_VERSION => Ok(()),
         Some(v) => Err(StoreError::SchemaMismatch(format!(
             "schema v{} on disk at {}, this binary expects v{}. Recover with: \
-             rm -rf {} && code-raptor ingest <repo> --db-path {} --single-repo --full",
+             rm -rf {} && code-rag-ingest ingest <repo> --db-path {} --single-repo --full",
             v,
             db_path.display(),
             SCHEMA_VERSION,
@@ -160,7 +160,7 @@ impl VectorStore {
     }
 
     // ========================================================================
-    // Write operations (used by code-raptor)
+    // Write operations (used by code-rag-ingest)
     // ========================================================================
 
     /// Insert code chunks with their embeddings. Creates table if needed.
@@ -2592,7 +2592,7 @@ fn extract_module_doc_chunks_from_batch_with_score(
 //
 // Writes (`upsert_*`, `delete_*`, `create_fts_indices`,
 // `get_embedding_model_version`) are NOT part of the trait — they stay on the
-// concrete `VectorStore` because code-raptor's ingest path doesn't dispatch
+// concrete `VectorStore` because code-rag-ingest's ingest path doesn't dispatch
 // them as RPC.
 
 #[async_trait::async_trait]
@@ -2739,7 +2739,7 @@ impl crate::seams::VectorReader for VectorStore {
 // `VectorWriter` (M5 split). Companion to `VectorReader`. Mirrors the same
 // UFCS delegation pattern — each trait method forwards to the matching
 // inherent method. `#[wagon(identity)]` on the trait declaration keeps
-// writes inproc-only; code-raptor's ingest path holds the concrete
+// writes inproc-only; code-rag-ingest's ingest path holds the concrete
 // `VectorStore` and never goes through this trait at Phase 1. The trait
 // exists so future ingest workers can opt into trait-typed wiring without
 // another shape change.

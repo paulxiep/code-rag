@@ -1,4 +1,4 @@
-//! Ingest orchestration extracted from the `code-raptor` binary so other
+//! Ingest orchestration extracted from the `code-rag-ingest` binary so other
 //! callers (notably `code-rag-mcp`) can drive a full or incremental ingest
 //! in-process via a single `ingest_repo` entrypoint.
 
@@ -28,7 +28,7 @@ const FOLDER_TABLE: &str = "folder_chunks";
 /// A4: file summary chunks.
 const FILE_TABLE: &str = "file_chunks";
 
-/// Inputs for `ingest_repo`. Mirror of the `code-raptor ingest` CLI args so
+/// Inputs for `ingest_repo`. Mirror of the `code-rag-ingest ingest` CLI args so
 /// callers can populate it from clap or build it programmatically.
 #[derive(Debug, Clone)]
 pub struct IngestOpts {
@@ -41,7 +41,7 @@ pub struct IngestOpts {
 }
 
 /// Run a full or incremental ingest of `repo_path` into `db_path`. This is the
-/// shared entrypoint used by both the `code-raptor` standalone CLI and the
+/// shared entrypoint used by both the `code-rag-ingest` standalone CLI and the
 /// `code-rag-mcp` `ingest` subcommand. Behaviour is identical between the two
 /// — the binary boundary is just packaging.
 pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
@@ -58,7 +58,7 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
     info!("Database path: {}", db_path);
 
     // Single-repo mode: derive project_name from the repo dirname when not
-    // explicitly set. The resolver in `crates/code-raptor/src/ingestion/mod.rs`
+    // explicitly set. The resolver in `crates/code-rag-ingest/src/ingestion/mod.rs`
     // treats any `Some(name)` override as authoritative, so forcing one here
     // short-circuits the multi-project subdir extraction and gives every chunk
     // the same project label.

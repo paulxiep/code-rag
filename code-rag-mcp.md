@@ -23,7 +23,7 @@ The shared [code-rag-engine](crates/code-rag-engine/) crate is pure algorithms (
 - **Intent classification + routing** in `code_rag_engine::intent` — `pre_classify_comparison`, `classify`, `route`, `arm_policy`. Already shared between server and WASM.
 - **Graph surface** in `code_rag_engine::graph` — `detect_direction`, `graph_augment`, `reserve_graph_slots`. Call edges live in LanceDB scalar-only `call_edges` table (~3011 edges on this repo).
 - **Source shape** ready to marshal: [src/api/dto.rs:22](src/api/dto.rs#L22) `SourceInfo { chunk_type, path, label, project, relevance, line }` — already the right schema for an MCP tool response (file/line/excerpt + score). `RetrievalResult::flatten()` sorts cross-type by relevance.
-- **Ingestion** via [code-raptor](crates/code-raptor/) CLI with incremental SHA256 skip — re-ingest after edits is cheap.
+- **Ingestion** via [code-rag-ingest](crates/code-rag-ingest/) CLI with incremental SHA256 skip — re-ingest after edits is cheap.
 
 The existing workspace binaries ([Cargo.toml:11-18](Cargo.toml#L11-L18)): `code-rag-chat` (HTTP server) and `code-rag-harness` (eval). Adding a `code-rag-mcp` binary sits alongside them and reuses the same `AppState` shape (store + embedder + reranker + classifier).
 
@@ -31,7 +31,7 @@ The existing workspace binaries ([Cargo.toml:11-18](Cargo.toml#L11-L18)): `code-
 
 ## What doesn't fit cleanly
 
-1. **Single-repo ingest mode.** Per [README.md:10-20](README.md#L10-L20), ingestion assumes a *parent folder with sibling projects*. An inner-loop Claude Code user would expect `code-rag-ingest .` against the current repo. This is probably a small flag in [crates/code-raptor/src/main.rs](crates/code-raptor/src/main.rs) but needs verification — the "project name" assumption is baked into chunk paths (parent dir is repo root; file paths are project-name-prefixed).
+1. **Single-repo ingest mode.** Per [README.md:10-20](README.md#L10-L20), ingestion assumes a *parent folder with sibling projects*. An inner-loop Claude Code user would expect `code-rag-ingest .` against the current repo. This is probably a small flag in [crates/code-rag-ingest/src/main.rs](crates/code-rag-ingest/src/main.rs) but needs verification — the "project name" assumption is baked into chunk paths (parent dir is repo root; file paths are project-name-prefixed).
 
 2. **Index staleness during a session.** Claude Code edits files live; the LanceDB index only reflects the last ingest. Incremental re-ingest is fast but has to be *triggered*. Options: (a) Skill tells Claude to re-run ingest on changed files before a code-rag query; (b) MCP server auto-runs incremental ingest on each query (latency hit); (c) accept staleness and advise Grep for just-edited code. (c) is the honest default for a feasibility pass.
 
@@ -90,7 +90,7 @@ Those are the four things that justify the integration. If you'd only ever ask "
 
 ## Open questions to resolve before building
 
-1. **Single-repo ingest flag** — does [crates/code-raptor/src/main.rs](crates/code-raptor/src/main.rs) already support `--root .` or does it need one?
+1. **Single-repo ingest flag** — does [crates/code-rag-ingest/src/main.rs](crates/code-rag-ingest/src/main.rs) already support `--root .` or does it need one?
 2. **MCP transport** — stdio (per-session) or streamable HTTP (shared across sessions on the same repo)? Stdio is simpler for feasibility; HTTP amortizes model load across multiple Claude Code instances.
 3. **Intent hint vs auto-classify** — accept `intent: Option<QueryIntent>` on `code_rag_search` so Claude can override the classifier when it has strong priors (e.g. "I know this is an overview question")? The pre-classify hook ([intent::pre_classify_comparison](crates/code-rag-engine/src/intent.rs)) is already a precedent for hard overrides.
 4. **Excerpt length budget** — 30 lines? 50? Tune against typical Claude Code context pressure.

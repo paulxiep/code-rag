@@ -1,5 +1,78 @@
 # Development Log
 
+## 2026-06-08: Track R R0 — Crate Split (code-raptor → code-rag-ingest; new code-raptor topology crate)
+
+### Summary
+
+Reshaped the workspace so the marquee `code-raptor` name lands on the feature it
+belongs to. The crate that did ingestion (tree-sitter parsing, edge resolution,
+chunk + edge export) is renamed **`code-raptor` → `code-rag-ingest`**, and a new
+**`code-raptor`** crate is scaffolded as the topology engine that later Track R
+milestones fill in (RelationGraph build, community detection, analytics, cluster
+chunks). Pure organizational prep — **zero retrieval-behavior change**.
+
+### Why split (SoC)
+
+- `code-rag-ingest` has one job: source → chunks + raw relation edges.
+- `code-raptor` has one job: derive topology from those persisted edges. It depends
+  on `code-rag-store` + `code-rag-types` (to *read* the edge tables), **not** on
+  `code-rag-ingest` — ingestion writes edges, topology reads them.
+- The brand `code-raptor` now names the topology brain, which is what "RAPTOR" is
+  about. The docs ([development_plan.md](development_plan.md), [architecture.md](architecture.md))
+  were already written in this post-R0 naming; R0 is the code catching up.
+
+### What changed
+
+- `git mv crates/code-raptor crates/code-rag-ingest`; `[package] name` →
+  `code-rag-ingest` (binary + `ingest`/`status`/`export` subcommands rename with it).
+  Module layout (`ingestion/`, `edge_resolution.rs`, `export.rs`, `orchestrate.rs`)
+  untouched.
+- New lib-only `crates/code-raptor` (deps `code-rag-types`/`code-rag-store`/`petgraph`)
+  with a stub `build_topology()` seam — stable call site for R2+, no algorithms yet.
+- Sole consumer rewired: `code-rag-mcp` dep + `use` + call site `code_raptor::ingest_repo`
+  → `code_rag_ingest::` ([crates/code-rag-mcp/src/main.rs:729](crates/code-rag-mcp/src/main.rs#L729)).
+  MCP `ingest` behavior byte-identical.
+- Audited every `code-raptor`/`code_raptor` ref: renamed binary/CLI invocations in
+  CI ([.github/workflows/gh-pages.yml](.github/workflows/gh-pages.yml)), Docker
+  (build stage `raptor` → `ingest`, binary artifact, dummy-cache + real-source COPY
+  for both crates), `docker-compose-ingest.yaml`, runtime strings
+  ([src/api/error.rs](src/api/error.rs), `vector_store.rs` schema-recovery help), and
+  user docs. Preserved the `matching.rs` negative-test literal (not ground truth).
+- **Test-set repair.** `data/test_queries.json` had 4 cases pinned to the old crate
+  path. Retargeted `overview-crate-raptor` ("What is code-raptor?" → "What is
+  code-rag-ingest?"), `edge-multi-project`, `a3-ingestion-module`, and
+  `a4-language-handlers` to `code-rag-ingest` paths; also added the missing **`go.rs`**
+  handler to `a4-language-handlers` (the case predated Go support and listed only 3).
+
+### Verification
+
+- `cargo check`/`build --workspace` green; `code-rag-ingest` tests 9/9; renamed binary
+  CLI correct (no stray `code-raptor` binary — topology crate is lib-only). `trunk build
+  --features standalone` green → no native topology dep leaked into the wasm path.
+- **Harness / baseline isolation.** No prior index existed, so the corpus was ingested
+  fresh — it now holds **8 projects** (`auto-dash, caravan, cioport, code-rag,
+  concurrens, daccord, invoice-parse, quant-trading-gym`), ~4 more than at the Phase-A
+  baseline. Re-ran with the Phase-A-matched config (`--rerank --hybrid`, per-intent
+  ArmPolicy gating, dual off): aggregate recall@5 **0.58** vs Phase-A (`post_a4_fresh`)
+  **0.72**. The −0.14 is **corpus growth, not R0** — a rename can't alter embeddings
+  (vectors derive from chunk content, not paths/crate names), and **overview recall@pool
+  held 0.90 → 0.87** (correct chunks still retrieved, just displaced from top-5 by
+  cross-project distractors — `tui`/`news`/`invoice-parse`/`cioport`). Failure *set*
+  structurally unchanged; `a4-language-handlers` was already failing (granularity) at
+  Phase A.
+- **New working baseline** for Track R = `post_r0_rr_bbc5805` (8-project, matched config):
+  recall@5 comparison 0.62 · implementation 0.57 · overview 0.67 · relationship 0.44;
+  recall@pool overview 0.87 · relationship 0.53. Track R's levers map to the weak spots:
+  **R1 richer edges → relationship** (0.44, pool 0.53 means related chunks aren't even in
+  the pool); **R3 ClusterChunks → overview recall@5** (pool 0.87 headroom). Implementation/
+  comparison are B-track/C3 territory, not expected to move under R.
+
+### Notes
+
+- R0 footprint: 19 tracked files (+109/−74) plus the new `code-raptor` crate.
+- Stopping after R0 per the milestone-gated plan; R1 (RelationGraph + richer edges across
+  Rust/Python/TS/Go) is next.
+
 ## 2026-04-24: MCP — Standalone Claude Code server
 
 ### Summary

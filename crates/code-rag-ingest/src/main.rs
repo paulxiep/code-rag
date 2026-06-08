@@ -1,17 +1,17 @@
-//! code-raptor CLI - Code knowledge graph construction tool
+//! code-rag-ingest CLI - Code knowledge graph construction tool
 //!
-//! Thin shell over the shared `code_raptor::orchestrate` lib so the same
+//! Thin shell over the shared `code_rag_ingest::orchestrate` lib so the same
 //! ingest pipeline drives both this standalone CLI (used by the harness +
 //! GitHub Pages export) and the `code-rag-mcp` `ingest` subcommand.
 
 mod export;
 
 use clap::{Parser, Subcommand};
-use code_raptor::{IngestOpts, VectorStore, ingest_repo};
+use code_rag_ingest::{IngestOpts, VectorStore, ingest_repo};
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "code-raptor")]
+#[command(name = "code-rag-ingest")]
 #[command(about = "Build code knowledge graphs for RAG applications")]
 struct Cli {
     #[command(subcommand)]
