@@ -320,6 +320,25 @@ impl GraphEdge {
     }
 }
 
+/// Track R (R2): the community a code chunk was assigned to by topology-time
+/// community detection (deterministic Louvain). Persisted in the additive
+/// `community_assignments` scalar table (no embedding, no `code_chunks` schema
+/// migration). The `code-raptor` topology engine writes these; R3 reads them to
+/// assemble `ClusterChunk`s, and the R4 report reads cohesion per community.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommunityAssignment {
+    /// Project this assignment belongs to (topology is computed per-project).
+    pub project_name: String,
+    /// FK to the chunk (CodeChunk.chunk_id) that was partitioned.
+    pub chunk_id: String,
+    /// Stable community id: communities are re-indexed by `(size desc, min
+    /// member chunk_id)` so identical input yields identical ids across runs.
+    pub community_id: u32,
+    /// Cohesion of the owning community: intra-community edges / max possible,
+    /// in `[0, 1]`. Denormalized onto every member for cheap retrieval-time read.
+    pub cohesion: f32,
+}
+
 /// Represents module-level documentation (//! comments at top of lib.rs)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ModuleDocChunk {

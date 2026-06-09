@@ -821,7 +821,7 @@ Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is
 |------|--------|--------|-------|
 | R0 Crate split | 2-3 | ~0.1 | rename parser → `code-rag-ingest`; scaffold `code-raptor` topology crate; rewire orchestrator + MCP |
 | R1 RelationGraph + richer edges | 6-8 | ~0.3 | imports (have) + contains (derived) + implements/extends/embeds (new tree-sitter) + `References` context tags + re-exports; `RationaleFor` optional; also lifts relationship recall |
-| R2 Community detection + cohesion | 4-5 | ~0.2 | Leiden + Louvain fallback; hub exclusion for cross-cutting utilities; per-community cohesion score |
+| R2 Community detection + cohesion | 4-5 | ~0.2 | deterministic Louvain (Leiden deferred); hub exclusion for cross-cutting utilities; per-community cohesion score |
 | R3 ClusterChunk | 3-4 | ~0.15 | template summaries → `cluster_chunks` table → Overview/architecture retrieval arm; optional LLM tier |
 | R4 Structural analytics + report | 3-4 | ~0.15 | centrality "read-first" nodes, cross-module bridges, surprising-connection ranking, dependency cycles (Johnson), suggested questions; markdown report |
 | R5 Visualization + comparison + exports | 4-6 | ~0.25 | interactive community-colored topology + Mermaid + GraphML (Obsidian optional); emergent modules vs Track A hierarchy (drift) |
@@ -841,11 +841,12 @@ Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is
 - **Crates:** code-rag-types, code-rag-ingest, code-rag-engine, code-rag-store
 
 ### R2: Community detection + cohesion (emergent modules)
-- Leiden (Traag et al. 2019) with a Louvain (Blondel et al. 2008) fallback over calls∪imports∪contains∪implements/extends/embeds; deterministic communities ordered by size.
-- Cross-cutting handling: hub exclusion (utility super-hubs reattached by majority vote), oversized-community split, low-cohesion re-split.
+- **Deterministic Louvain** (Blondel et al. 2008) over one undirected graph; **Leiden (Traag et al. 2019) deferred** to an optional later refinement pass (Rust has no Leiden library, and Louvain is "deterministic enough to ship"; revisit only if communities are internally disconnected). Communities ordered by size with a min-chunk-id tie-break.
+- **Node set / edges (resolved):** partition over `calls∪imports∪implements/extends/embeds/references∪`**`file→function contains`** at equal weight; **folder→file `contains` is excluded** from the partition input (high-level folders are often non-cohesive — feeding them in would make communities recover the folder tree and make R5's emergent-vs-folder comparison self-fulfilling). Folder edges stay stored for retrieval + R5.
+- Cross-cutting handling: hub exclusion (utility super-hubs — and high-fan-out file hubs — reattached by majority vote), oversized-community split (>25%), low-cohesion re-split (≥50 nodes, <0.05). Degree-based exclusion is what makes keeping file-level `contains` safe.
 - Per-community **cohesion score** (intra-edges / max possible) persisted with each community; drives re-splitting and feeds the R4 report.
-- Native, ingestion-time (heavy + parallel → not wasm); community id + cohesion persisted per chunk.
-- **Crate:** code-raptor
+- Native, ingestion-time (heavy → not wasm); **per-project** scope (corpus-wide union deferred). Determinism: sort nodes/edges + seeded RNG + stable size-desc re-index. Community id + cohesion persisted per chunk in an **additive `community_assignments` side table** (no `code_chunks` schema migration).
+- **Crate:** code-raptor (+ code-rag-types, code-rag-store)
 
 ### R3: ClusterChunk (summaries + retrieval)
 - New `ClusterChunk` type; deterministic **template summaries** (mirrors `FolderChunk`, includes cohesion); `cluster_chunks` table; Overview/architecture collapsed-tree retrieval arm.

@@ -1583,6 +1583,7 @@ dependencies = [
  "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
+ "code-raptor",
  "futures",
  "lancedb",
  "serde",

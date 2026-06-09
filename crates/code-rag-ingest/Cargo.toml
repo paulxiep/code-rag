@@ -8,6 +8,9 @@ edition = "2024"
 code-rag-types = { path = "../code-rag-types" }
 code-rag-engine = { path = "../code-rag-engine" }
 code-rag-store = { path = "../code-rag-store" }
+# Track R: post-ingest topology stage (community detection). Direction is
+# ingest → topology; code-raptor never depends back on code-rag-ingest (SoC).
+code-raptor = { path = "../code-raptor" }
 caravan-rpc = { workspace = true }
 
 # Parsing

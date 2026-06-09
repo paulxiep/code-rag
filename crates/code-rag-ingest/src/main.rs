@@ -65,6 +65,17 @@ enum Commands {
         #[arg(short, long)]
         output: String,
     },
+    /// Rebuild the emergent topology (Track R: community detection + cohesion)
+    /// from already-persisted edges — no re-parsing.
+    Topology {
+        /// Path to the LanceDB database
+        #[arg(short, long, default_value = "data/portfolio.lance")]
+        db_path: String,
+
+        /// Restrict to one project (default: refresh every ingested project)
+        #[arg(short, long)]
+        project_name: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -108,6 +119,18 @@ async fn main() -> anyhow::Result<()> {
             info!("Exporting from {} to {}", db_path, output);
             export::run_export(&db_path, &output).await?;
             info!("Export complete: {}", output);
+        }
+        Commands::Topology {
+            db_path,
+            project_name,
+        } => {
+            info!("Rebuilding topology for {}", db_path);
+            code_raptor::build_topology(code_raptor::TopologyOpts {
+                db_path,
+                project_name,
+            })
+            .await?;
+            info!("Topology rebuild complete");
         }
     }
 

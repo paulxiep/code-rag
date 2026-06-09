@@ -1,5 +1,5 @@
 use arrow_array::{
-    Array, Float32Array, RecordBatch, RecordBatchIterator, StringArray, UInt64Array,
+    Array, Float32Array, RecordBatch, RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use futures::TryStreamExt;
 use lancedb::{
@@ -14,8 +14,8 @@ use tracing::warn;
 
 use code_rag_engine::text::build_searchable_text;
 use code_rag_types::{
-    CallEdge, CodeChunk, CrateChunk, EdgeConfidence, EdgeContext, EdgeRelation, FileChunk,
-    FolderChunk, GraphEdge, ModuleDocChunk, ReadmeChunk,
+    CallEdge, CodeChunk, CommunityAssignment, CrateChunk, EdgeConfidence, EdgeContext,
+    EdgeRelation, FileChunk, FolderChunk, GraphEdge, ModuleDocChunk, ReadmeChunk,
 };
 
 #[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
@@ -58,6 +58,8 @@ const GRAPH_EDGES_TABLE: &str = "graph_edges";
 pub const FOLDER_TABLE: &str = "folder_chunks";
 /// A4: file-level summary chunks.
 pub const FILE_TABLE: &str = "file_chunks";
+/// Track R (R2): per-chunk community assignments (deterministic Louvain).
+const COMMUNITY_TABLE: &str = "community_assignments";
 
 /// Bump when the Arrow schema of any persisted table changes (column added,
 /// removed, renamed, or retyped). The bump invalidates existing indexes —
@@ -1228,6 +1230,66 @@ impl VectorStore {
         }
         Ok(edges)
     }
+
+    // ========================================================================
+    // Track R (R2): community_assignments — per-chunk community ids + cohesion.
+    // Additive scalar table (no vector, no code_chunks migration). Written by
+    // the code-raptor topology engine; read by R3 (ClusterChunk) / R4 (report).
+    // ========================================================================
+
+    /// Insert community assignments. Creates the table if needed. Merge key is
+    /// `chunk_id` (one assignment per chunk); callers delete-by-project first so
+    /// stale assignments from a previous partition don't linger.
+    pub async fn upsert_community_assignments(
+        &self,
+        assignments: &[CommunityAssignment],
+    ) -> Result<usize, StoreError> {
+        if assignments.is_empty() {
+            return Ok(0);
+        }
+        let batch = community_assignments_to_batch(assignments)?;
+        let count = batch.num_rows();
+        self.upsert_batch(COMMUNITY_TABLE, "chunk_id", batch).await?;
+        Ok(count)
+    }
+
+    /// Get all community assignments for a project.
+    pub async fn get_community_assignments(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<CommunityAssignment>, StoreError> {
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        let table = match self.conn.open_table(COMMUNITY_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()), // Table doesn't exist yet
+        };
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut out = Vec::new();
+        for batch in &results {
+            out.extend(extract_community_assignments_from_batch(batch)?);
+        }
+        Ok(out)
+    }
+
+    /// Delete all community assignments for a project (before re-partitioning).
+    pub async fn delete_community_assignments_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(COMMUNITY_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1421,6 +1483,71 @@ fn extract_graph_edges_from_batch(batch: &RecordBatch) -> Result<Vec<GraphEdge>,
         .collect();
 
     Ok(edges)
+}
+
+/// Track R (R2): CommunityAssignment → Arrow. Scalar table: two Utf8 keys, a
+/// UInt32 community id, and a Float32 cohesion.
+fn community_assignments_to_batch(
+    assignments: &[CommunityAssignment],
+) -> Result<RecordBatch, StoreError> {
+    let project_names: StringArray = assignments
+        .iter()
+        .map(|a| Some(a.project_name.as_str()))
+        .collect();
+    let chunk_ids: StringArray = assignments
+        .iter()
+        .map(|a| Some(a.chunk_id.as_str()))
+        .collect();
+    let community_ids: UInt32Array = assignments.iter().map(|a| Some(a.community_id)).collect();
+    let cohesions: Float32Array = assignments.iter().map(|a| Some(a.cohesion)).collect();
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("community_id", arrow_schema::DataType::UInt32, false),
+        arrow_schema::Field::new("cohesion", arrow_schema::DataType::Float32, false),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(project_names),
+            Arc::new(chunk_ids),
+            Arc::new(community_ids),
+            Arc::new(cohesions),
+        ],
+    )?)
+}
+
+fn extract_community_assignments_from_batch(
+    batch: &RecordBatch,
+) -> Result<Vec<CommunityAssignment>, StoreError> {
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+    let project_names = col("project_name")?;
+    let chunk_ids = col("chunk_id")?;
+    let community_ids = batch
+        .column_by_name("community_id")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("community_id".into()))?;
+    let cohesions = batch
+        .column_by_name("cohesion")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("cohesion".into()))?;
+
+    let out = (0..batch.num_rows())
+        .map(|i| CommunityAssignment {
+            project_name: project_names.value(i).to_string(),
+            chunk_id: chunk_ids.value(i).to_string(),
+            community_id: community_ids.value(i),
+            cohesion: cohesions.value(i),
+        })
+        .collect();
+    Ok(out)
 }
 
 /// Extract CodeChunks from a RecordBatch without requiring a distance/score column.

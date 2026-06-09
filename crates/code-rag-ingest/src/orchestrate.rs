@@ -150,6 +150,16 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
             let count = store.upsert_graph_edges(&graph_edges).await?;
             info!("Resolved {} relation edges (project: {})", count, project);
         }
+
+        // Track R (R2): derive the emergent topology from the edges we just
+        // persisted — deterministic community detection + cohesion, written to
+        // `community_assignments`. Reads the edge tables back (SoC: topology
+        // reads, ingestion writes); safe to re-run cluster-only later.
+        code_raptor::build_topology(code_raptor::TopologyOpts {
+            db_path: db_path.clone(),
+            project_name: Some(project.to_string()),
+        })
+        .await?;
     }
 
     Ok(())

@@ -104,11 +104,14 @@ Why split:
 | `code-rag-ui` | interactive topology view (consumes precomputed artifacts) | yes |
 
 **Rust algorithm choices (native, in `code-raptor`):** `petgraph` for the
-in-memory topology; a native implementation of Leiden (Louvain fallback) for
-community detection; Brandes' algorithm for edge-betweenness (node cap to bound
-the O(V·E) cost); Johnson's algorithm for elementary-cycle (circular-dependency)
-detection over the import/contains subgraph. None of these enter
-`code-rag-engine` or `code-rag-ui`, so the wasm build stays clean.
+in-memory topology; a native deterministic implementation of **Louvain** for
+community detection (**Leiden is deferred** — Rust has no graspologic/Leiden
+equivalent and `petgraph` ships no community detection, so this is a
+from-scratch implementation either way; see §4 R2); Brandes' algorithm for
+edge-betweenness (node cap to bound the O(V·E) cost); Johnson's algorithm for
+elementary-cycle (circular-dependency) detection over the import/contains
+subgraph. None of these enter `code-rag-engine` or `code-rag-ui`, so the wasm
+build stays clean.
 
 ---
 
@@ -122,7 +125,7 @@ prerequisites; R5 needs Track A.
 |---|---|---|---|
 | R0 Crate split | 2–3 | ~0.1 | rename parser → `code-rag-ingest`; scaffold `code-raptor` topology crate; rewire orchestrator + MCP |
 | R1 RelationGraph + richer edges | 6–8 | ~0.3 | structural relations + taxonomy expansion (`Embeds`, `ReExports`, `References` context tags); `RationaleFor` optional |
-| R2 Community detection + cohesion | 4–5 | ~0.2 | Leiden/Louvain + hub exclusion + per-community cohesion scoring |
+| R2 Community detection + cohesion | 4–5 | ~0.2 | deterministic Louvain (Leiden deferred) + hub exclusion + per-community cohesion scoring |
 | R3 ClusterChunk | 3–4 | ~0.15 | template summaries → `cluster_chunks` table → Overview/architecture arm; optional LLM tier |
 | R4 Analytics + report | 3–4 | ~0.15 | centrality, betweenness, **dependency cycles (Johnson)**, **surprising-connection ranking**, suggested questions |
 | R5 Visualization + comparison + exports | 4–6 | ~0.25 | interactive view + Mermaid + **GraphML** (Obsidian optional); architecture drift vs Track A |
@@ -212,19 +215,43 @@ retrieval and clustering have a real topology to work on.
 
 ### R2 — Community detection + cohesion (emergent modules)
 
-- Build the in-memory topology from `calls ∪ imports ∪ contains ∪
-  implements/extends/embeds`. Run **Leiden** (Louvain fallback) → deterministic
-  communities ordered by size with lexical tie-break.
+- **Node set & edge selection (resolved).** Partition is run over **one
+  undirected graph** whose nodes are the chunk ids appearing on the kept edges.
+  Kept edges: `calls ∪ imports ∪ implements/extends/embeds/references ∪
+  **file→function `contains`**`, all at equal weight. **Folder→file `contains`
+  is excluded from the partition input** — high-level folders are frequently not
+  cohesive, so feeding the folder tree into clustering would make communities
+  recover the folders and make the R5 emergent-vs-folder comparison
+  self-fulfilling. File-level containment is kept (functions in one file are
+  usually genuinely cohesive). Folder edges remain stored for retrieval and the
+  R5 comparison; they are simply not partition inputs.
+- **Algorithm (resolved): deterministic Louvain; Leiden deferred.** Run a native
+  **Louvain** (modularity maximization, seeded RNG, lexical tie-break) →
+  communities ordered by size with a min-chunk-id tie-break. **Leiden is
+  deferred** to an optional later refinement pass; its only added guarantee
+  (well-connected communities) is needed only if a spot-check shows
+  internally-disconnected Louvain communities. Revisit trigger: such a community
+  appears in the R4 report. The deferral is flagged in code at the partition
+  entry point.
 - **Cross-cutting handling:** exclude very-high-degree utility nodes (logging,
-  error handling) from partitioning and reattach by majority vote; split
-  oversized communities (> ~25% of the topology).
+  error handling) — and, by construction, high-fan-out file hubs — from
+  partitioning, then reattach by majority vote; split oversized communities
+  (> ~25% of the topology). Degree-based exclusion is what neutralizes
+  non-cohesive containment hubs (high-level folder/large-file nodes are
+  high-degree → excluded), which is why file-level `contains` can be kept
+  safely.
 - **Cohesion score.** Compute a per-community cohesion score (actual
   intra-community edges / max possible) and persist it with each community. Use
-  it to drive low-cohesion re-splitting and to surface community quality in the
-  R4 report.
-- Native, ingestion-time (heavy + parallel → not wasm). Persist a community id
-  (+ cohesion) per chunk (new column or side table).
-- **Testable.** Communities + cohesion are stable across runs; coherence
+  it to drive low-cohesion re-splitting (re-split large, ≥ ~50-node, < ~0.05
+  communities) and to surface community quality in the R4 report.
+- Native, ingestion-time (heavy → not wasm); **per-project** scope
+  (`build_topology(project_name = Some)`), a corpus-wide union pass left as an
+  optional later add-on. Determinism: sort nodes/edges by id before partitioning
+  + seeded RNG + community re-index by `(size desc, min member chunk_id)`, so
+  identical input → identical communities and ids across runs.
+- Persist a community id (+ cohesion) per chunk in an **additive side table**
+  (`community_assignments`), avoiding any migration of the `code_chunks` schema.
+- **Testable.** Communities + ids + cohesion are stable across runs; coherence
   spot-check vs folder structure (cluster purity).
 
 ### R3 — ClusterChunk (summaries + retrieval)
@@ -293,9 +320,11 @@ retrieval and clustering have a real topology to work on.
 
 Community detection (R2) + cohesion scoring + template ClusterChunks (R3) +
 structural analytics (R4: centrality, betweenness, surprising connections,
-dependency cycles) are deterministic enough to ship. **Recursive abstraction**
-(cluster the cluster summaries into a multi-level tree) stays time-boxed
-research, attempted only if R2/R3 land and a multi-level view demonstrably helps.
+dependency cycles) are deterministic enough to ship. R2 ships **Louvain only**;
+**Leiden is deferred** as an optional refinement (see §4 R2). **Recursive
+abstraction** (cluster the cluster summaries into a multi-level tree) stays
+time-boxed research, attempted only if R2/R3 land and a multi-level view
+demonstrably helps.
 Architecture comparison (R5) is exploratory (depends on Track A + human judgement
 of "drift").
 

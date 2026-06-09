@@ -91,11 +91,18 @@ C1/C2's `resolution_tier` semantics stay intact.
   Honest read: **implementation +0.07** (2/29 cases) is a real lift — relation
   augmentation surfaces implementing types for structurally-phrased queries. The
   **relationship +0.05** is the two added `r1-implements` cases passing (existing
-  relationship cases are "what calls X" → `CallGraph` territory, unchanged — R1 adds
-  a *new* query capability rather than lifting old call-queries). **relationship
+  relationship cases are "what calls X" → `CallGraph`/C1 territory, unchanged — R1
+  adds a *new* query capability rather than lifting old call-queries). **relationship
   recall@pool 0.53 → 0.60**: the new edges put more structurally-related chunks into
   the pool. No intent regressed. Two `r1`-tagged cases added per the dataset-freeze
   policy (ADD, don't modify).
+
+  This is the structural follow-on B1 already pointed to: B1's space search pinned
+  relationship at a ~0.50 ceiling across *every* rerank/hybrid combination (rerank-only
+  even dropped it to 0.33) and identified it as a graph/structural bottleneck that
+  B-track tooling can't move. Track B is complete; lifting relationship is C (call
+  graph) + R (structural relations) work, which is what this is — R1 lands the typed
+  edges and the "what implements X" path; the call-query relationship cases remain C1's.
 
 ### Gotchas
 
