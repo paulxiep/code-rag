@@ -203,7 +203,11 @@ fn renumber(comm: &mut [usize]) {
     let mut labels: Vec<usize> = comm.to_vec();
     labels.sort_unstable();
     labels.dedup();
-    let remap: HashMap<usize, usize> = labels.iter().enumerate().map(|(new, &old)| (old, new)).collect();
+    let remap: HashMap<usize, usize> = labels
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, new))
+        .collect();
     for c in comm.iter_mut() {
         *c = remap[c];
     }

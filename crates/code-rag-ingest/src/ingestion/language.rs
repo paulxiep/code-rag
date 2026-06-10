@@ -39,7 +39,11 @@ pub struct TypeRelation {
 }
 
 impl TypeRelation {
-    pub fn new(target_name: impl Into<String>, relation: EdgeRelation, context: EdgeContext) -> Self {
+    pub fn new(
+        target_name: impl Into<String>,
+        relation: EdgeRelation,
+        context: EdgeContext,
+    ) -> Self {
         Self {
             target_name: target_name.into(),
             relation,
@@ -154,7 +158,14 @@ pub(crate) fn collect_type_idents(
     generic_kinds: &[&str],
 ) -> Vec<(String, bool)> {
     let mut out = Vec::new();
-    collect_type_idents_inner(node, source_bytes, ident_kinds, generic_kinds, false, &mut out);
+    collect_type_idents_inner(
+        node,
+        source_bytes,
+        ident_kinds,
+        generic_kinds,
+        false,
+        &mut out,
+    );
     out
 }
 
@@ -188,7 +199,10 @@ pub(crate) fn extract_rationale_targets(source: &str, def_start_row: usize) -> V
         if upper.contains("NOTE:") || upper.contains("WHY:") || upper.contains("HACK:") {
             for tok in line.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
                 let is_identifier_like = tok.len() >= 4
-                    && tok.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && tok
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
                     && (tok.contains('_') || tok.chars().any(|c| c.is_uppercase()));
                 if is_identifier_like {
                     found.push(tok.to_string());

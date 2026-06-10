@@ -14,8 +14,8 @@ use tracing::warn;
 
 use code_rag_engine::text::build_searchable_text;
 use code_rag_types::{
-    CallEdge, CodeChunk, CommunityAssignment, CrateChunk, EdgeConfidence, EdgeContext,
-    EdgeRelation, FileChunk, FolderChunk, GraphEdge, ModuleDocChunk, ReadmeChunk,
+    CallEdge, ClusterChunk, CodeChunk, CommunityAssignment, CrateChunk, EdgeConfidence,
+    EdgeContext, EdgeRelation, FileChunk, FolderChunk, GraphEdge, ModuleDocChunk, ReadmeChunk,
 };
 
 #[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
@@ -60,6 +60,8 @@ pub const FOLDER_TABLE: &str = "folder_chunks";
 pub const FILE_TABLE: &str = "file_chunks";
 /// Track R (R2): per-chunk community assignments (deterministic Louvain).
 const COMMUNITY_TABLE: &str = "community_assignments";
+/// Track R (R3): emergent-cluster summary chunks (vector + FTS).
+pub const CLUSTER_TABLE: &str = "cluster_chunks";
 
 /// Bump when the Arrow schema of any persisted table changes (column added,
 /// removed, renamed, or retyped). The bump invalidates existing indexes —
@@ -278,6 +280,36 @@ impl VectorStore {
         Ok(count)
     }
 
+    /// R3: insert emergent-cluster summary chunks with their embeddings.
+    /// Creates the `cluster_chunks` table if needed.
+    pub async fn upsert_cluster_chunks(
+        &self,
+        chunks: &[ClusterChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
+        let batch = cluster_chunks_to_batch(chunks, embeddings, self.dimension)?;
+        let count = batch.num_rows();
+        self.upsert_batch(CLUSTER_TABLE, "chunk_id", batch).await?;
+        Ok(count)
+    }
+
+    /// R3: delete all cluster chunks for a project (before re-clustering).
+    pub async fn delete_cluster_chunks_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(CLUSTER_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
+
     // ========================================================================
     // Read operations (used by code-rag-chat)
     // ========================================================================
@@ -352,6 +384,24 @@ impl VectorStore {
             .await?;
 
         batches_to_file_chunks(results).await
+    }
+
+    /// R3: search emergent-cluster summary chunks by vector similarity.
+    pub async fn search_clusters(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        let table = self.get_table(CLUSTER_TABLE).await?;
+
+        let results = table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .limit(limit)
+            .execute()
+            .await?;
+
+        batches_to_cluster_chunks(results).await
     }
 
     /// Search code chunks by vector similarity. Returns (chunk, distance) pairs.
@@ -469,6 +519,8 @@ impl VectorStore {
             (FOLDER_TABLE, "summary_text"),
             // A4: FTS over the file's rendered summary text.
             (FILE_TABLE, "summary_text"),
+            // R3: FTS over the cluster's rendered summary text.
+            (CLUSTER_TABLE, "summary_text"),
         ];
 
         for (table_name, column) in &tables_and_columns {
@@ -653,6 +705,40 @@ impl VectorStore {
                     e
                 );
                 let results = self.search_files(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// R3: hybrid search emergent-cluster summary chunks (vector + FTS, LanceDB RRF).
+    /// Falls back to vector-only if the FTS index is missing.
+    pub async fn hybrid_search_clusters(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        let table = self.get_table(CLUSTER_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_cluster_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    CLUSTER_TABLE,
+                    e
+                );
+                let results = self.search_clusters(query_embedding, limit).await?;
                 Ok(results
                     .into_iter()
                     .map(|(c, d)| (c, 1.0 / (1.0 + d)))
@@ -1249,7 +1335,8 @@ impl VectorStore {
         }
         let batch = community_assignments_to_batch(assignments)?;
         let count = batch.num_rows();
-        self.upsert_batch(COMMUNITY_TABLE, "chunk_id", batch).await?;
+        self.upsert_batch(COMMUNITY_TABLE, "chunk_id", batch)
+            .await?;
         Ok(count)
     }
 
@@ -1475,7 +1562,8 @@ fn extract_graph_edges_from_batch(batch: &RecordBatch) -> Result<Vec<GraphEdge>,
             project_name: project_names.value(i).to_string(),
             // Unknown tags fall back to sensible defaults rather than failing the
             // whole batch — forward-compatible with future relation/context variants.
-            relation: EdgeRelation::from_tag(relations.value(i)).unwrap_or(EdgeRelation::References),
+            relation: EdgeRelation::from_tag(relations.value(i))
+                .unwrap_or(EdgeRelation::References),
             context: EdgeContext::from_tag(contexts.value(i)).unwrap_or(EdgeContext::None),
             confidence: EdgeConfidence::from_tag(confidences.value(i))
                 .unwrap_or(EdgeConfidence::Inferred),
@@ -2260,6 +2348,256 @@ fn extract_folder_chunks_from_batch(
     Ok(rows)
 }
 
+// ---- Track R (R3): cluster_chunks Arrow conversion ----
+
+fn cluster_chunks_to_batch(
+    chunks: &[ClusterChunk],
+    embeddings: Vec<Vec<f32>>,
+    dim: usize,
+) -> Result<RecordBatch, StoreError> {
+    use arrow_array::builder::FixedSizeListBuilder;
+    use arrow_array::{ArrayRef, ListArray};
+    use arrow_buffer::OffsetBuffer;
+
+    let cluster_ids: UInt32Array = chunks.iter().map(|c| Some(c.cluster_id)).collect();
+    let project_names: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.project_name.as_str()))
+        .collect();
+    let paths: StringArray = chunks.iter().map(|c| Some(c.path.as_str())).collect();
+    let dominant_relations: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.dominant_relation.as_str()))
+        .collect();
+    let cohesions: Float32Array = chunks.iter().map(|c| Some(c.cohesion)).collect();
+    let summary_texts: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.summary_text.as_str()))
+        .collect();
+    let chunk_ids: StringArray = chunks.iter().map(|c| Some(c.chunk_id.as_str())).collect();
+    let content_hashes: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.content_hash.as_str()))
+        .collect();
+    let model_versions: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.embedding_model_version.as_str()))
+        .collect();
+
+    fn list_of_strings(per_row: impl Iterator<Item = Vec<String>>) -> ListArray {
+        let mut offsets = vec![0i32];
+        let mut values: Vec<String> = Vec::new();
+        for row in per_row {
+            values.extend(row);
+            offsets.push(values.len() as i32);
+        }
+        let refs: Vec<Option<&str>> = values.iter().map(|s| Some(s.as_str())).collect();
+        let values_array: StringArray = refs.into_iter().collect();
+        ListArray::new(
+            Arc::new(arrow_schema::Field::new(
+                "item",
+                arrow_schema::DataType::Utf8,
+                true,
+            )),
+            OffsetBuffer::new(offsets.into()),
+            Arc::new(values_array),
+            None,
+        )
+    }
+
+    let member_chunk_ids = list_of_strings(chunks.iter().map(|c| c.member_chunk_ids.clone()));
+    let files = list_of_strings(chunks.iter().map(|c| c.files.clone()));
+    let key_types = list_of_strings(chunks.iter().map(|c| c.key_types.clone()));
+    let key_functions = list_of_strings(chunks.iter().map(|c| c.key_functions.clone()));
+
+    let mut vector_builder =
+        FixedSizeListBuilder::new(arrow_array::builder::Float32Builder::new(), dim as i32);
+    for emb in &embeddings {
+        vector_builder.values().append_slice(emb);
+        vector_builder.append(true);
+    }
+    let vectors = vector_builder.finish();
+
+    let list_field = || {
+        arrow_schema::DataType::List(Arc::new(arrow_schema::Field::new(
+            "item",
+            arrow_schema::DataType::Utf8,
+            true,
+        )))
+    };
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("cluster_id", arrow_schema::DataType::UInt32, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("path", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("member_chunk_ids", list_field(), true),
+        arrow_schema::Field::new("files", list_field(), true),
+        arrow_schema::Field::new("key_types", list_field(), true),
+        arrow_schema::Field::new("key_functions", list_field(), true),
+        arrow_schema::Field::new("dominant_relation", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("cohesion", arrow_schema::DataType::Float32, false),
+        arrow_schema::Field::new("summary_text", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("content_hash", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new(
+            "embedding_model_version",
+            arrow_schema::DataType::Utf8,
+            false,
+        ),
+        arrow_schema::Field::new(
+            "vector",
+            arrow_schema::DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new(
+                    "item",
+                    arrow_schema::DataType::Float32,
+                    true,
+                )),
+                dim as i32,
+            ),
+            false,
+        ),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(cluster_ids),
+            Arc::new(project_names),
+            Arc::new(paths),
+            Arc::new(member_chunk_ids) as ArrayRef,
+            Arc::new(files) as ArrayRef,
+            Arc::new(key_types) as ArrayRef,
+            Arc::new(key_functions) as ArrayRef,
+            Arc::new(dominant_relations),
+            Arc::new(cohesions),
+            Arc::new(summary_texts),
+            Arc::new(chunk_ids),
+            Arc::new(content_hashes),
+            Arc::new(model_versions),
+            Arc::new(vectors),
+        ],
+    )?)
+}
+
+async fn batches_to_cluster_chunks(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_cluster_chunks_from_batch(&batch, "_distance")?);
+            Ok(acc)
+        })
+        .await
+}
+
+async fn batches_to_cluster_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_cluster_chunks_from_batch(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
+fn extract_cluster_chunks_from_batch(
+    batch: &RecordBatch,
+    score_column: &str,
+) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+    use arrow_array::ListArray;
+
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let project_names = col("project_name")?;
+    let paths = col("path")?;
+    let dominant_relations = col("dominant_relation")?;
+    let summary_texts = col("summary_text")?;
+    let chunk_ids = col("chunk_id")?;
+    let content_hashes = col("content_hash")?;
+    let model_versions = col("embedding_model_version")?;
+
+    let cluster_ids = batch
+        .column_by_name("cluster_id")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("cluster_id".into()))?;
+    let cohesions = batch
+        .column_by_name("cohesion")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("cohesion".into()))?;
+
+    let list = |name: &str| -> Option<&ListArray> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+    };
+    let members_list = list("member_chunk_ids");
+    let files_list = list("files");
+    let key_types_list = list("key_types");
+    let key_functions_list = list("key_functions");
+
+    let scores = batch
+        .column_by_name(score_column)
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+    let extract_list = |arr: Option<&ListArray>, i: usize| -> Vec<String> {
+        arr.filter(|a| !a.is_null(i))
+            .map(|a| {
+                let v = a.value(i);
+                v.as_any()
+                    .downcast_ref::<StringArray>()
+                    .map(|sa| {
+                        (0..sa.len())
+                            .filter_map(|j| {
+                                if sa.is_null(j) {
+                                    None
+                                } else {
+                                    Some(sa.value(j).to_string())
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    };
+
+    let rows = (0..batch.num_rows())
+        .map(|i| {
+            let chunk = ClusterChunk {
+                cluster_id: cluster_ids.value(i),
+                project_name: project_names.value(i).to_string(),
+                path: paths.value(i).to_string(),
+                member_chunk_ids: extract_list(members_list, i),
+                files: extract_list(files_list, i),
+                key_types: extract_list(key_types_list, i),
+                key_functions: extract_list(key_functions_list, i),
+                dominant_relation: dominant_relations.value(i).to_string(),
+                cohesion: cohesions.value(i),
+                summary_text: summary_texts.value(i).to_string(),
+                chunk_id: chunk_ids.value(i).to_string(),
+                content_hash: content_hashes.value(i).to_string(),
+                embedding_model_version: model_versions.value(i).to_string(),
+            };
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
+        })
+        .collect();
+    Ok(rows)
+}
+
 fn file_chunks_to_batch(
     chunks: &[FileChunk],
     embeddings: Vec<Vec<f32>>,
@@ -2989,6 +3327,23 @@ impl crate::seams::VectorReader for VectorStore {
         limit: usize,
     ) -> Result<Vec<(FileChunk, f32)>, StoreError> {
         VectorStore::hybrid_search_files(self, query_text, query_embedding, limit).await
+    }
+
+    async fn search_clusters(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        VectorStore::search_clusters(self, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_clusters(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_clusters(self, query_text, query_embedding, limit).await
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, StoreError> {

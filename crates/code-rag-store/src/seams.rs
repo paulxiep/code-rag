@@ -151,6 +151,13 @@ pub trait VectorReader: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(code_rag_types::FileChunk, f32)>, StoreError>;
 
+    // R3: emergent-cluster summary chunks.
+    async fn search_clusters(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(code_rag_types::ClusterChunk, f32)>, StoreError>;
+
     // ---- hybrid (vector + FTS) search ----
     async fn hybrid_search_code(
         &self,
@@ -193,6 +200,14 @@ pub trait VectorReader: Send + Sync {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(code_rag_types::FileChunk, f32)>, StoreError>;
+
+    // R3: hybrid (vector + FTS) search over emergent-cluster summary chunks.
+    async fn hybrid_search_clusters(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(code_rag_types::ClusterChunk, f32)>, StoreError>;
 
     // ---- catalog ----
     async fn list_projects(&self) -> Result<Vec<String>, StoreError>;

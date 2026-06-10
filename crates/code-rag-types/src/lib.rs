@@ -441,6 +441,53 @@ pub struct FileChunk {
     pub embedding_model_version: String,
 }
 
+/// R3: an emergent-community ("Code Raptor cluster") summary chunk. One per
+/// community detected by R2's deterministic Louvain. The bottom-up counterpart
+/// to `FolderChunk` (top-down): it groups the code that *actually* depends on
+/// each other, regardless of folder layout, and answers Overview/architecture
+/// queries like "what are the main subsystems?" / "what handles X?".
+///
+/// Produced by the `code-raptor` topology engine (not the parser): it reads the
+/// persisted community assignments + member code chunks, renders a deterministic
+/// template summary, embeds it (BGE-small, same path as folder/file chunks), and
+/// upserts to the `cluster_chunks` table. `summary_text` is the exact embedded /
+/// BM25-scored / reranked string — persisted to avoid re-render drift.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClusterChunk {
+    /// Stable community id within the project (size-ranked, see `CommunityAssignment`).
+    pub cluster_id: u32,
+    /// Project this community belongs to (topology is per-project).
+    pub project_name: String,
+    /// Representative path: the dominant directory the members live in (the
+    /// subsystem's "home" in the tree). Used as the chunk's `file_path` in
+    /// `flatten()` so an architecture query whose expected path names this
+    /// subsystem (e.g. `crates/code-rag-engine`) is credited when the cluster
+    /// surfaces — the bottom-up counterpart to a FolderChunk's `folder_path`.
+    pub path: String,
+    /// chunk_ids of the member code chunks (functions/types) in this community.
+    pub member_chunk_ids: Vec<String>,
+    /// Distinct files the members span (basenames, alphabetical, capped).
+    pub files: Vec<String>,
+    /// Public types among the members. Alphabetical, deduped, capped at 12.
+    pub key_types: Vec<String>,
+    /// Public functions among the members. Alphabetical, deduped, capped at 12.
+    pub key_functions: Vec<String>,
+    /// Most common relation among intra-community edges (`calls`, `imports`, …),
+    /// or "mixed"/"n/a" — a coarse hint at what binds the community.
+    pub dominant_relation: String,
+    /// R2 cohesion of this community (intra edges / max possible), in `[0, 1]`.
+    pub cohesion: f32,
+    /// Pre-rendered template — same bytes embedded, BM25-scored, and reranked.
+    pub summary_text: String,
+
+    /// Deterministic ID: hash("cluster:{project}:{cluster_id}", summary_text).
+    pub chunk_id: String,
+    /// SHA256 of the canonicalized metadata tuple (enables skip-unchanged).
+    pub content_hash: String,
+    /// Embedding model identifier.
+    pub embedding_model_version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

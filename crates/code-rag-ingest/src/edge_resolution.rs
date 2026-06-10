@@ -26,16 +26,19 @@ fn parent_dir(path: &str) -> Option<&str> {
 /// (no identifier resolution needed) — e.g. `Contains`.
 fn direct_edge(
     relation: EdgeRelation,
-    source_id: &str,
-    source_ident: &str,
-    source_file: &str,
-    target_id: &str,
-    target_ident: &str,
-    target_file: &str,
+    source: (&str, &str, &str),
+    target: (&str, &str, &str),
     project: &str,
 ) -> GraphEdge {
+    let (source_id, source_ident, source_file) = source;
+    let (target_id, target_ident, target_file) = target;
     GraphEdge {
-        edge_id: GraphEdge::deterministic_edge_id(source_id, target_id, relation, EdgeContext::None),
+        edge_id: GraphEdge::deterministic_edge_id(
+            source_id,
+            target_id,
+            relation,
+            EdgeContext::None,
+        ),
         source_chunk_id: source_id.to_string(),
         target_chunk_id: target_id.to_string(),
         source_identifier: source_ident.to_string(),
@@ -58,8 +61,10 @@ pub fn build_contains_edges(
     folder_chunks: &[FolderChunk],
 ) -> Vec<GraphEdge> {
     let mut edges = Vec::new();
-    let file_by_path: HashMap<&str, &FileChunk> =
-        file_chunks.iter().map(|f| (f.file_path.as_str(), f)).collect();
+    let file_by_path: HashMap<&str, &FileChunk> = file_chunks
+        .iter()
+        .map(|f| (f.file_path.as_str(), f))
+        .collect();
     let folder_by_path: HashMap<&str, &FolderChunk> = folder_chunks
         .iter()
         .map(|f| (f.folder_path.as_str(), f))
@@ -70,12 +75,8 @@ pub fn build_contains_edges(
         if let Some(fc) = file_by_path.get(code.file_path.as_str()) {
             edges.push(direct_edge(
                 EdgeRelation::Contains,
-                &fc.chunk_id,
-                basename(&fc.file_path),
-                &fc.file_path,
-                &code.chunk_id,
-                &code.identifier,
-                &code.file_path,
+                (&fc.chunk_id, basename(&fc.file_path), &fc.file_path),
+                (&code.chunk_id, &code.identifier, &code.file_path),
                 &code.project_name,
             ));
         }
@@ -88,12 +89,12 @@ pub fn build_contains_edges(
         {
             edges.push(direct_edge(
                 EdgeRelation::Contains,
-                &folder.chunk_id,
-                basename(&folder.folder_path),
-                &folder.folder_path,
-                &fc.chunk_id,
-                basename(&fc.file_path),
-                &fc.file_path,
+                (
+                    &folder.chunk_id,
+                    basename(&folder.folder_path),
+                    &folder.folder_path,
+                ),
+                (&fc.chunk_id, basename(&fc.file_path), &fc.file_path),
                 &fc.project_name,
             ));
         }
@@ -126,8 +127,10 @@ pub fn build_import_edges(
             entry.insert(imp.imported_name.as_str(), imp.source_path.as_str());
         }
     }
-    let file_by_path: HashMap<&str, &FileChunk> =
-        file_chunks.iter().map(|f| (f.file_path.as_str(), f)).collect();
+    let file_by_path: HashMap<&str, &FileChunk> = file_chunks
+        .iter()
+        .map(|f| (f.file_path.as_str(), f))
+        .collect();
 
     let mut edges = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -150,8 +153,12 @@ pub fn build_import_edges(
                 } else {
                     EdgeRelation::Imports
                 };
-                let edge_id =
-                    GraphEdge::deterministic_edge_id(&src.chunk_id, tid, relation, EdgeContext::None);
+                let edge_id = GraphEdge::deterministic_edge_id(
+                    &src.chunk_id,
+                    tid,
+                    relation,
+                    EdgeContext::None,
+                );
                 if !seen.insert(edge_id.clone()) {
                     continue;
                 }
@@ -672,7 +679,10 @@ mod tests {
         assert_eq!(edges[0].target_chunk_id, "c_emb");
         assert_eq!(edges[0].relation, EdgeRelation::Implements);
         // unique-global resolution → Inferred confidence
-        assert_eq!(edges[0].confidence, code_rag_types::EdgeConfidence::Inferred);
+        assert_eq!(
+            edges[0].confidence,
+            code_rag_types::EdgeConfidence::Inferred
+        );
     }
 
     #[test]
@@ -704,7 +714,11 @@ mod tests {
         let mut rels = HashMap::new();
         rels.insert(
             "c_a".to_string(),
-            vec![TypeRelation::new("Bar", EdgeRelation::Embeds, EdgeContext::None)],
+            vec![TypeRelation::new(
+                "Bar",
+                EdgeRelation::Embeds,
+                EdgeContext::None,
+            )],
         );
         let edges = resolve_type_edges(&chunks, &rels, &HashMap::new());
         assert_eq!(edges.len(), 1);

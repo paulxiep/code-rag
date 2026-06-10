@@ -256,6 +256,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -276,6 +277,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -294,6 +296,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -313,6 +316,7 @@ mod tests {
             module_doc_chunks: vec![scored(sample_module_doc_chunk(), 0.6)],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -348,6 +352,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![scored(sample_folder_chunk(), 0.5)],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let context = build_context(&result);
@@ -367,6 +372,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let context = build_context(&result);
@@ -382,6 +388,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -411,6 +418,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 

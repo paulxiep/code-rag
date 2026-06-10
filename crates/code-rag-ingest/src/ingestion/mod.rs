@@ -738,7 +738,8 @@ mod tests {
         let temp_dir = create_test_workspace();
         let path = temp_dir.path().to_str().unwrap();
 
-        let (result, _calls_map, _imports_map, _type_relations) = run_ingestion(path, Some("my-app"));
+        let (result, _calls_map, _imports_map, _type_relations) =
+            run_ingestion(path, Some("my-app"));
 
         // All chunks should have the override name
         assert!(

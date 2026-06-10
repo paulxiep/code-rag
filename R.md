@@ -272,6 +272,21 @@ retrieval and clustering have a real topology to work on.
 - **Testable.** Add ~5 architecture/overview queries; cluster chunks hit for
   "what are the main subsystems / what handles X"; Overview recall ≥ baseline.
 
+> **Result — clusters gated OFF on all intents (measured 2026-06-10).** R3 shipped
+> the full slice (type, template, `cluster_chunks` table, retrieval arm, export,
+> WASM), but the **ground-truth per-intent sweep falsified the "Overview recall
+> improves" hypothesis**: as a retrieval arm, cluster summaries *displace* the
+> code/folder chunks that already answer architecture queries — Overview recall@5
+> −4pp at every limit, Comparison recall@10 −4pp at limit ≥2, Implementation
+> recall@pool +3pp at limit 4 (the only positive, with a recall@10 cost). So the arm
+> is gated off (`cluster_limit=0`, `cluster_vec=false`) per the project's
+> empirical-gating standard, with all machinery left wired. The impl-pool signal
+> suggests relevant clusters *are* retrieved but the cross-encoder buries them, so the
+> revisit is **slot-protection (cf. C2)** or the **LLM cluster-summary tier** — not the
+> current bare arm. (A secondary blocker: most architecture queries classify as
+> implementation/relationship, not overview — a B4-classifier concern.) See
+> [development_log.md](development_log.md) 2026-06-10.
+
 ### R4 — Structural analytics + architecture report
 
 - **Central nodes** (degree centrality — "the functions to understand first";

@@ -1,5 +1,148 @@
 # Development Log
 
+## 2026-06-10: Track R R3 — ClusterChunks + empirical per-intent gating (clusters OFF)
+
+### Summary
+
+R3 builds the emergent-community retrieval layer on top of R2's communities: a
+`ClusterChunk` type + deterministic template summary (`code-rag-engine::cluster`,
+mirroring FolderChunk) produced + embedded (BGE-small) + upserted to a `cluster_chunks`
+table by the `code-raptor` topology engine, plus the retrieval arm (per-intent
+`cluster_limit`/`cluster_vec`, RRF-fused + reranked), flatten, export, and the WASM
+in-browser arm — a full vertical slice. No other arm regresses; the wasm32 standalone
+build stays clean.
+
+**Outcome: the cluster retrieval arm is gated OFF on all intents, by measurement.** The
+empirical sweep below shows it does not earn a slot on recall today. All R3 machinery
+stays wired for a later revisit.
+
+### Drift caught + fixed (creditability)
+
+Clusters first flattened to a synthetic `project#clusterN` `file_path`, so the
+file-substring recall metric could never credit them — yet the plan's testable criterion
+("cluster chunks hit for 'main subsystems'") *assumes* they're creditable. Fixed by
+adding `ClusterChunk.path` = the dominant member directory (the subsystem's "home" in the
+tree), used as the flatten `file_path`. A cluster is now credited like a FolderChunk when
+its subsystem matches an architecture query's expected path (verified: the engine cluster
+surfaced as `cluster:code-rag/crates/code-rag-engine/src`).
+
+### Empirical per-intent gating sweep
+
+`CLUSTER_LIMIT=N` harness override (added to [harness.rs](src/bin/harness.rs)) sweeps the
+arm without recompiling; run under **ground-truth intent** to isolate the arm from
+classifier routing; `--rerank --hybrid`. Cells are recall@5 / @10 / @pool:
+
+| intent | OFF | L=1 | L=2 | L=4 |
+|---|---|---|---|---|
+| overview | **0.67**/0.77/0.84 | 0.63/0.77/0.84 | 0.63/0.77/0.84 | 0.63/0.77/0.84 |
+| comparison | 0.62/**0.73**/0.75 | 0.62/0.73/0.75 | 0.62/0.69/0.75 | 0.62/0.69/0.75 |
+| relationship | 0.48/0.59/0.59 | 0.49/0.59/0.59 | 0.49/0.59/0.59 | 0.49/0.59/0.59 |
+| implementation | 0.57/0.62/**0.62** | 0.57/0.61/0.62 | 0.57/0.61/0.62 | 0.57/0.61/**0.65** |
+
+**Finding — R.md's "Overview recall improves with cluster chunks active" hypothesis is
+empirically false on this dataset.** As a retrieval arm, emergent ClusterChunks *displace*
+the code/folder chunks that already answer architecture queries: Overview recall@5 drops
+−4pp at every limit, Comparison recall@10 −4pp at limit ≥2, Relationship +1pp (noise), and
+the only positive is Implementation recall@pool +3pp at limit 4 (with −1pp recall@10, flat
+recall@5). No intent earns the arm on recall.
+
+### Decision + revisit
+
+**Gate clusters OFF on all intents** (`cluster_limit=0`, `cluster_vec=false` in
+[intent.rs](crates/code-rag-engine/src/intent.rs)) — same pattern as B2 hybrid (shipped →
+disabled after regression → re-enabled once B3 fixed the root cause). The impl-pool +3pp
+signal indicates relevant clusters *are* retrieved but the cross-encoder buries them, so
+the revisit is **slot-protection** (cf. C2 graph-slot reservation) or the optional **LLM
+cluster-summary tier**, not leaving a net-negative arm on. Secondary blocker: 4/5
+architecture queries classify as implementation/relationship rather than overview — a
+B4-classifier concern, tracked separately. The `cluster_chunks` table, embeddings, export,
+WASM arm, and the `CLUSTER_LIMIT` sweep knob all stay in place.
+
+### Plumbing (R3)
+
+- `ClusterChunk { cluster_id, project_name, path, member_chunk_ids, files, key_types,
+  key_functions, dominant_relation, cohesion, summary_text, … }` in
+  [code-rag-types](crates/code-rag-types/src/lib.rs); template +
+  `MAX_FILES`/`render_summary`/`canonical_tuple` in
+  [code-rag-engine/cluster.rs](crates/code-rag-engine/src/cluster.rs).
+- `cluster_chunks` vector+FTS table (to_batch/extract/upsert/delete/search/hybrid_search +
+  `VectorReader` seam) in [vector_store.rs](crates/code-rag-store/src/vector_store.rs);
+  `code-raptor` assembles ([clusterchunk.rs](crates/code-raptor/src/clusterchunk.rs)),
+  embeds, and upserts in `build_topology`.
+- Retrieval: `cluster_limit` on `RetrievalConfig` + `cluster_fetch_multiplier`,
+  `ArmPolicy.cluster_vec`, the cluster arm in
+  [code-rag-core/retriever.rs](crates/code-rag-core/src/retriever.rs), `cluster_chunks` on
+  `RetrievalResult` + flatten. Export (`ExportIndex.cluster_chunks` + `cluster_idf`) and
+  WASM (`ChunkIndex` + `search` cluster arm + standalone retrieval) at parity.
+
+---
+
+## 2026-06-10: Track R R2 — Community detection + cohesion (emergent modules)
+
+### Summary
+
+Filled the `code-raptor` topology engine: it reads the persisted edge tables
+(`call_edges` + R1's `graph_edges`), builds one in-memory relation graph, partitions it
+with a deterministic **Louvain** implementation, and persists a community id + cohesion
+per code chunk to an additive `community_assignments` side table. Runs per-project as a
+post-ingest stage (wired into `orchestrate.rs`) and as a standalone `code-rag-ingest
+topology` CLI re-run (no re-parse). Retrieval-neutral by construction — R2 only writes a
+new side table; nothing reads it until R3.
+
+### Decisions locked with the user before building (see R.md §4 R2)
+
+- **Algorithm: deterministic Louvain; Leiden deferred.** Rust has no graspologic/Leiden
+  equivalent and `petgraph` ships no community detection, so it's a from-scratch
+  implementation either way; Louvain is "deterministic enough to ship". Determinism via
+  fixed node order + sorted neighbor iteration + size-desc/min-id re-indexing (no RNG) —
+  not seeded randomization. Revisit Leiden (a refinement pass per community) only if a
+  spot-check shows internally-disconnected communities.
+- **Folder-agnostic partitioning, file-level containment only.** Partition over
+  `calls ∪ imports ∪ implements/extends/embeds/references ∪ file→function contains` at
+  equal weight; **folder→file `contains` is excluded** from the partition input. Rationale
+  (user's insight): high-level folders are frequently *not* cohesive, so feeding the
+  folder tree into clustering would make communities recover the folders and make R5's
+  emergent-vs-folder drift comparison self-fulfilling. A `contains` edge is file-level iff
+  `source_file == target_file`. File nodes stay in the graph as hub connectors (carrying
+  file-level cohesion + import signal) but are flagged as containers and dropped from
+  persistence — only code chunks get a community id.
+- **Per-project scope** (`build_topology(project_name)`); corpus-wide union deferred.
+- **Additive `community_assignments` side table**, no `code_chunks` schema migration.
+
+### Algorithm (in `code-raptor`)
+
+[louvain.rs](crates/code-raptor/src/louvain.rs) — modularity-maximizing Louvain over a
+weighted undirected graph (multi-level: local-moving → aggregate → repeat). Determinism:
+nodes visited in fixed index order, ties broken toward the smallest community index,
+neighbor communities iterated in sorted order. [topology.rs](crates/code-raptor/src/topology.rs)
+projects the edge tables onto the graph per the keep-rules above.
+[cluster.rs](crates/code-raptor/src/cluster.rs) wraps it with the cross-cutting handling
+R.md calls for: code-node hub exclusion (degree > p99/floor) + majority-vote reattach
+(container/file nodes never excluded — folders aren't nodes at all, so the only folder-tree
+distortion risk is already gone), oversized-community split (>25% of the graph, recursive),
+low-cohesion re-split (≥50 nodes, cohesion <0.05), cohesion = intra-community edges / max
+possible, and stable re-indexing by `(code-member count desc, min code chunk_id asc)`.
+
+### Verification
+
+`cargo build --workspace` + targeted tests green (9 new code-raptor unit tests covering
+Louvain on known graphs, the folder-vs-file contains discriminator, determinism, and
+cohesion). Real-corpus run is **deterministic across two passes** (e.g. quant-trading-gym
+2184 chunks → 119 communities, daccord 533 → 18, invoice-parse 236 → 11, identical ids
+both runs); LanceDB delete-by-project + upsert round-trip clean.
+
+### Plumbing (R2)
+
+- `CommunityAssignment { project_name, chunk_id, community_id, cohesion }` in
+  [code-rag-types](crates/code-rag-types/src/lib.rs); `community_assignments` scalar table
+  (to_batch/extract/upsert/get/delete-by-project) in
+  [vector_store.rs](crates/code-rag-store/src/vector_store.rs).
+- `code-raptor::build_topology` invoked from
+  [orchestrate.rs](crates/code-rag-ingest/src/orchestrate.rs) after the R1 edge step, and
+  from a new `code-rag-ingest topology` subcommand for cluster-only re-runs.
+
+---
+
 ## 2026-06-08: Track R R1 — RelationGraph + Richer Edges (typed structural topology)
 
 ### Summary

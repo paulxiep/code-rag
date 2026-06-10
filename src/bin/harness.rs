@@ -11,7 +11,14 @@ use code_rag_chat::store::{Embedder, FastEmbedImpl, MsMarcoRerankerImpl, Reranke
 #[derive(Parser)]
 #[command(
     name = "code-rag-harness",
-    about = "Quality measurement harness for code-rag retrieval"
+    about = "Quality measurement harness for code-rag retrieval",
+    after_help = "ENVIRONMENT VARIABLES (sweep knobs, unset = pipeline defaults):\n  \
+        CLUSTER_LIMIT=N    Override the R3 cluster-chunk arm's per-intent limit to N for\n                     \
+        ALL intents (0 disables). Used with --ground-truth-intent to empirically\n                     \
+        gate the arm per intent. Clusters ship gated OFF (see development_log).\n  \
+        INTENT_THRESHOLD=F Override the intent classifier's confidence threshold.\n  \
+        INTENT_MARGIN=F    Override the classifier's top-2 margin threshold.\n  \
+        INTENT_KNN_K=N     Enable k-NN intent voting with k=N."
 )]
 struct Cli {
     /// Path to test_queries.json
@@ -126,6 +133,18 @@ async fn main() -> anyhow::Result<()> {
     let store = VectorStore::new(&cli.db_path, embedder.dimension()).await?;
 
     let mut config = EngineConfig::default();
+
+    // R3 per-intent gating sweep: CLUSTER_LIMIT=N overrides cluster_limit for
+    // ALL intents to N (unset → routing-table defaults). Used to empirically
+    // determine which intents benefit from the emergent-cluster arm, the same
+    // way rerank/hybrid/folder/file arms were per-intent tuned.
+    if let Ok(Ok(n)) = std::env::var("CLUSTER_LIMIT").map(|s| s.parse::<usize>()) {
+        println!("Overriding cluster_limit (all intents): {}", n);
+        for cfg in config.routing.routes.values_mut() {
+            cfg.cluster_limit = n;
+        }
+        config.routing.default.cluster_limit = n;
+    }
 
     // Initialize reranker if enabled (auto-downloads model on first use)
     let reranker: Option<Box<dyn Reranker>> = if cli.rerank {

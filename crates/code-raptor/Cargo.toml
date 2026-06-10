@@ -15,6 +15,9 @@ edition = "2024"
 [dependencies]
 code-rag-types = { path = "../code-rag-types" }
 code-rag-store = { path = "../code-rag-store" }
+# R3: ClusterChunk template rendering + public-visibility heuristic (pure, shared
+# with folder/file chunks so server/WASM see identical summary bytes).
+code-rag-engine = { path = "../code-rag-engine" }
 
 # In-memory topology + graph algorithms (community detection, betweenness,
 # cycles land here in R2–R4).

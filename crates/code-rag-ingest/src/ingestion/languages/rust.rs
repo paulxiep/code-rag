@@ -166,7 +166,12 @@ impl LanguageHandler for RustHandler {
             // the source and the trait is the target.
             "impl_item" => {
                 if let Some(trait_node) = node.child_by_field_name("trait") {
-                    push_rust_idents(&trait_node, source_bytes, EdgeRelation::Implements, &mut out);
+                    push_rust_idents(
+                        &trait_node,
+                        source_bytes,
+                        EdgeRelation::Implements,
+                        &mut out,
+                    );
                 }
             }
             // `trait Foo: Bar + Baz` → Foo Extends Bar, Baz (supertrait bounds).
@@ -189,12 +194,7 @@ impl LanguageHandler for RustHandler {
                     let mut c = params.walk();
                     for p in params.children(&mut c) {
                         if let Some(ty) = p.child_by_field_name("type") {
-                            push_rust_refs(
-                                &ty,
-                                source_bytes,
-                                EdgeContext::ParameterType,
-                                &mut out,
-                            );
+                            push_rust_refs(&ty, source_bytes, EdgeContext::ParameterType, &mut out);
                         }
                     }
                 }
@@ -218,9 +218,15 @@ fn push_rust_idents(
     relation: EdgeRelation,
     out: &mut Vec<TypeRelation>,
 ) {
-    for (name, is_generic) in collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"]) {
+    for (name, is_generic) in
+        collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"])
+    {
         if is_generic {
-            out.push(TypeRelation::new(name, EdgeRelation::References, EdgeContext::GenericArg));
+            out.push(TypeRelation::new(
+                name,
+                EdgeRelation::References,
+                EdgeContext::GenericArg,
+            ));
         } else {
             out.push(TypeRelation::new(name, relation, EdgeContext::None));
         }
@@ -230,8 +236,14 @@ fn push_rust_idents(
 /// Like [`push_rust_idents`] but the head type carries a `References` edge with the
 /// given positional `context` (parameter/return); generics stay `GenericArg`.
 fn push_rust_refs(type_node: &Node, src: &[u8], context: EdgeContext, out: &mut Vec<TypeRelation>) {
-    for (name, is_generic) in collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"]) {
-        let ctx = if is_generic { EdgeContext::GenericArg } else { context };
+    for (name, is_generic) in
+        collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"])
+    {
+        let ctx = if is_generic {
+            EdgeContext::GenericArg
+        } else {
+            context
+        };
         out.push(TypeRelation::new(name, EdgeRelation::References, ctx));
     }
 }
@@ -580,10 +592,10 @@ mod tests {
         let src = source.as_bytes();
         let mut matches = cursor.captures(&query, tree.root_node(), src);
         use tree_sitter::StreamingIterator;
-        if let Some((m, _)) = matches.next() {
-            if let Some(b) = m.captures.iter().find(|c| Some(c.index) == body_idx) {
-                return handler.extract_type_relations(source, &b.node, src);
-            }
+        if let Some((m, _)) = matches.next()
+            && let Some(b) = m.captures.iter().find(|c| Some(c.index) == body_idx)
+        {
+            return handler.extract_type_relations(source, &b.node, src);
         }
         Vec::new()
     }
@@ -591,8 +603,10 @@ mod tests {
     #[test]
     fn test_rust_implements() {
         let rels = type_relations_from("impl Embedder for FastEmbedImpl {}");
-        assert!(rels.iter().any(|r| r.relation == EdgeRelation::Implements
-            && r.target_name == "Embedder"));
+        assert!(
+            rels.iter()
+                .any(|r| r.relation == EdgeRelation::Implements && r.target_name == "Embedder")
+        );
     }
 
     #[test]
@@ -610,8 +624,10 @@ mod tests {
     #[test]
     fn test_rust_struct_embeds() {
         let rels = type_relations_from("struct AppState { store: VectorStore, n: usize }");
-        assert!(rels.iter().any(|r| r.relation == EdgeRelation::Embeds
-            && r.target_name == "VectorStore"));
+        assert!(
+            rels.iter()
+                .any(|r| r.relation == EdgeRelation::Embeds && r.target_name == "VectorStore")
+        );
     }
 
     #[test]

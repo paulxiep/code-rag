@@ -560,7 +560,12 @@ impl RelationGraph {
                 .entry(src.clone())
                 .or_default()
                 .push(tgt.clone());
-            reverse.entry(rel).or_default().entry(tgt).or_default().push(src);
+            reverse
+                .entry(rel)
+                .or_default()
+                .entry(tgt)
+                .or_default()
+                .push(src);
         }
         Self {
             forward,
@@ -573,7 +578,10 @@ impl RelationGraph {
     /// Register identifier → chunk_id mappings for target-term lookup.
     pub fn register_identifiers(&mut self, pairs: impl IntoIterator<Item = (String, String)>) {
         for (identifier, chunk_id) in pairs {
-            let entry = self.id_to_chunk.entry(identifier.to_lowercase()).or_default();
+            let entry = self
+                .id_to_chunk
+                .entry(identifier.to_lowercase())
+                .or_default();
             if !entry.contains(&chunk_id) {
                 entry.push(chunk_id);
             }
@@ -630,16 +638,31 @@ pub fn detect_relation(query: &str) -> Option<(EdgeRelation, RelationDir)> {
     let forward = q.contains("does"); // "what does X implement/extend/embed"
 
     if q.contains("implement") {
-        let dir = if forward { RelationDir::Forward } else { RelationDir::Reverse };
+        let dir = if forward {
+            RelationDir::Forward
+        } else {
+            RelationDir::Reverse
+        };
         return Some((EdgeRelation::Implements, dir));
     }
-    if q.contains("extend") || q.contains("subclass") || q.contains("inherit") || q.contains("subtype")
+    if q.contains("extend")
+        || q.contains("subclass")
+        || q.contains("inherit")
+        || q.contains("subtype")
     {
-        let dir = if forward { RelationDir::Forward } else { RelationDir::Reverse };
+        let dir = if forward {
+            RelationDir::Forward
+        } else {
+            RelationDir::Reverse
+        };
         return Some((EdgeRelation::Extends, dir));
     }
     if q.contains("embed") || q.contains("compose") {
-        let dir = if forward { RelationDir::Forward } else { RelationDir::Reverse };
+        let dir = if forward {
+            RelationDir::Forward
+        } else {
+            RelationDir::Reverse
+        };
         return Some((EdgeRelation::Embeds, dir));
     }
     None
@@ -678,7 +701,14 @@ pub fn extract_relation_target(query: &str) -> Option<String> {
     }
 
     // "what implements X" / "what extends X" / "what embeds X" (verb then target)
-    for verb in &["implements ", "implement ", "extends ", "extend ", "embeds ", "embed "] {
+    for verb in &[
+        "implements ",
+        "implement ",
+        "extends ",
+        "extend ",
+        "embeds ",
+        "embed ",
+    ] {
         if let Some(rest) = q.find(verb).map(|i| &query[i + verb.len()..])
             && let Some(term) = first_meaningful_token(rest)
         {
@@ -709,7 +739,11 @@ pub fn relation_augment(
         .iter()
         .find(|(_, id)| id.to_lowercase() == term_lower)
         .map(|(cid, _)| cid.clone())
-        .or_else(|| graph.unique_chunk_for_identifier(&term_lower).map(String::from))?;
+        .or_else(|| {
+            graph
+                .unique_chunk_for_identifier(&term_lower)
+                .map(String::from)
+        })?;
 
     let resolved: Vec<String> = match dir {
         RelationDir::Reverse => graph.sources_for(&target_chunk_id, relation).to_vec(),

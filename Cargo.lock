@@ -1697,6 +1697,7 @@ name = "code-raptor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
  "petgraph 0.6.5",

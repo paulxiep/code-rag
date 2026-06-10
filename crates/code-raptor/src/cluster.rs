@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::louvain::{louvain, WeightedGraph};
+use crate::louvain::{WeightedGraph, louvain};
 use crate::topology::Topology;
 
 /// Communities larger than this fraction of the graph are re-split.
@@ -223,7 +223,10 @@ fn induced_subgraph(g: &WeightedGraph, nodes: &[usize]) -> (WeightedGraph, Vec<u
             }
         }
     }
-    (WeightedGraph::from_edges(nodes.len(), edges), nodes.to_vec())
+    (
+        WeightedGraph::from_edges(nodes.len(), edges),
+        nodes.to_vec(),
+    )
 }
 
 /// Cohesion = intra-community edges / max possible undirected pairs, in `[0, 1]`.
@@ -318,10 +321,14 @@ mod tests {
             assert!(r.cohesion >= 0.0 && r.cohesion <= 1.0);
         }
         let again = detect(&Topology::build(&calls, &edges));
-        let pairs1: Vec<(String, u32)> =
-            results.iter().map(|r| (r.chunk_id.clone(), r.community_id)).collect();
-        let pairs2: Vec<(String, u32)> =
-            again.iter().map(|r| (r.chunk_id.clone(), r.community_id)).collect();
+        let pairs1: Vec<(String, u32)> = results
+            .iter()
+            .map(|r| (r.chunk_id.clone(), r.community_id))
+            .collect();
+        let pairs2: Vec<(String, u32)> = again
+            .iter()
+            .map(|r| (r.chunk_id.clone(), r.community_id))
+            .collect();
         assert_eq!(pairs1, pairs2);
     }
 

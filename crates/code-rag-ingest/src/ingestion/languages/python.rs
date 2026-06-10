@@ -163,7 +163,11 @@ impl LanguageHandler for PythonHandler {
 /// head with `context`, generic args (`Subscript[...]`) as `GenericArg`.
 fn push_py_refs(type_node: &Node, src: &[u8], context: EdgeContext, out: &mut Vec<TypeRelation>) {
     for (name, is_generic) in collect_type_idents(type_node, src, &["identifier"], &["subscript"]) {
-        let ctx = if is_generic { EdgeContext::GenericArg } else { context };
+        let ctx = if is_generic {
+            EdgeContext::GenericArg
+        } else {
+            context
+        };
         out.push(TypeRelation::new(name, EdgeRelation::References, ctx));
     }
 }

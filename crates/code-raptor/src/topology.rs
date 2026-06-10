@@ -98,9 +98,7 @@ impl Topology {
             .map(|(i, s)| (s.clone(), i))
             .collect();
 
-        let edges = pairs
-            .iter()
-            .map(|&(u, v)| (index[u], index[v], 1.0_f64));
+        let edges = pairs.iter().map(|&(u, v)| (index[u], index[v], 1.0_f64));
         let graph = WeightedGraph::from_edges(ids.len(), edges);
 
         let container_nodes: HashSet<usize> = container_ids
@@ -145,9 +143,21 @@ mod tests {
     fn folder_contains_dropped_file_contains_kept() {
         let edges = vec![
             // folder→file contains: source_file (folder) != target_file (file) → dropped.
-            ge("folderA", "fileX", "proj/src", "proj/src/x.rs", EdgeRelation::Contains),
+            ge(
+                "folderA",
+                "fileX",
+                "proj/src",
+                "proj/src/x.rs",
+                EdgeRelation::Contains,
+            ),
             // file→function contains: same path → kept, source flagged container.
-            ge("fileX", "fnA", "proj/src/x.rs", "proj/src/x.rs", EdgeRelation::Contains),
+            ge(
+                "fileX",
+                "fnA",
+                "proj/src/x.rs",
+                "proj/src/x.rs",
+                EdgeRelation::Contains,
+            ),
         ];
         let topo = Topology::build(&[], &edges);
         // folderA must not be a node; fileX + fnA are nodes; fileX is a container.

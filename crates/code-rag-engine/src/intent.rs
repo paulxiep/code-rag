@@ -425,6 +425,11 @@ pub struct ArmPolicy {
     /// a query's own target file hijacking function-level Relationship
     /// queries, flip Relationship to false — same mechanism as A3.
     pub file_vec: bool,
+    /// R3: emergent-cluster arm. Mirrors `folder_vec` — clusters are coarse
+    /// subsystem summaries, valuable for Overview/architecture, off for
+    /// Relationship (would displace function-level consumer-discovery answers,
+    /// same hijack mechanism A3 found for folders).
+    pub cluster_vec: bool,
 }
 
 /// Per-intent arm policy. Values are empirical — derived from the B5 space
@@ -444,6 +449,14 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             rerank: true,
             folder_vec: true,
             file_vec: true,
+            // R3: gated OFF. The ground-truth CLUSTER_LIMIT sweep (2026-06-10,
+            // see development_log) showed clusters HURT Overview recall@5 −4pp at
+            // every limit (1/2/4) — they displace the code/folder chunks that
+            // already answer architecture queries — with no pool gain. The plan's
+            // "Overview recall improves with clusters" hypothesis is empirically
+            // false on this dataset. Arm stays wired; revisit with slot-protection
+            // (cf. C2) or the optional LLM cluster-summary tier.
+            cluster_vec: false,
         },
         // Implementation: hybrid HURTS (-4.2pp). BM25 over-matches identifier tokens
         // in test/caller chunks, swamping the real implementation chunk.
@@ -455,6 +468,10 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             rerank: true,
             folder_vec: true,
             file_vec: true,
+            // R3: gated OFF. Sweep showed only a recall@pool +3pp at limit 4
+            // (with −1pp recall@10, flat recall@5) — not a clean win. See
+            // Overview note / development_log 2026-06-10.
+            cluster_vec: false,
         },
         // Relationship: hybrid+rerank tied with body-vec-only at 0.485.
         // Keep BM25 on because caller/dependency queries benefit from term match.
@@ -474,6 +491,9 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             folder_vec: false,
             // A4: true — stratified. See ArmPolicy.file_vec doc.
             file_vec: true,
+            // R3: gated OFF — sweep showed only +1pp recall@5 (noise). See
+            // Overview note / development_log 2026-06-10.
+            cluster_vec: false,
         },
         // Comparison: all arms off except body-vec. B3 finding preserved —
         // signature tokens + BM25 + rerank all over-rank ONE half of a pair.
@@ -485,6 +505,10 @@ pub fn arm_policy(intent: QueryIntent) -> ArmPolicy {
             rerank: false,
             folder_vec: true,
             file_vec: true,
+            // R3: gated OFF — sweep showed clusters HURT Comparison recall@10
+            // −4pp at limit ≥2 (folder context already anchors comparisons).
+            // See Overview note / development_log 2026-06-10.
+            cluster_vec: false,
         },
     }
 }
@@ -521,6 +545,9 @@ impl Default for RoutingTable {
                 // Overview r@pool 0.902 vs pseudo_a3 0.880 (+2.2pp).
                 // Slight r@5 regression (-1pp) offset by large pool gain.
                 file_limit: 2,
+                // R3: gated OFF (cluster_limit=0, cluster_vec=false). Empirical
+                // sweep showed clusters hurt Overview recall@5; see arm_policy.
+                cluster_limit: 0,
             },
         );
 
@@ -537,6 +564,8 @@ impl Default for RoutingTable {
                 // 0.788 both tracks). Kept at 1 to preserve file signal
                 // for file-level implementation queries.
                 file_limit: 1,
+                // R3: 0 — clusters gated OFF on all intents (see arm_policy; sweep).
+                cluster_limit: 0,
             },
         );
 
@@ -557,6 +586,8 @@ impl Default for RoutingTable {
                 module_doc_limit: 2,
                 folder_limit: 0,
                 file_limit: 1,
+                // R3: 0 — paired with cluster_vec=false (see arm_policy).
+                cluster_limit: 0,
             },
         );
 
@@ -572,6 +603,8 @@ impl Default for RoutingTable {
                 // r@5 0.688 vs pseudo_a3 0.625 (+6pp) AND r@pool 0.792 vs
                 // 0.667 (+12pp). Biggest A4 win across intents.
                 file_limit: 1,
+                // R3: 0 — clusters gated OFF on all intents (see arm_policy; sweep).
+                cluster_limit: 0,
             },
         );
 

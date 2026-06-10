@@ -16,6 +16,8 @@ pub struct NonCodeResults {
     pub folders: Vec<(code_rag_types::FolderChunk, f32)>,
     /// A4: file-level chunks. Empty when `config.file_limit == 0`.
     pub files: Vec<(code_rag_types::FileChunk, f32)>,
+    /// R3: emergent-cluster chunks. Empty when `config.cluster_limit == 0`.
+    pub clusters: Vec<(code_rag_types::ClusterChunk, f32)>,
 }
 
 /// Compute L2 (Euclidean) distance between two vectors.
@@ -215,12 +217,30 @@ pub fn hybrid_search_non_code(
         top_k(query_embedding, &index.file_chunks, config.file_limit)
     };
 
+    // R3: cluster arm. Same shape as folder/file.
+    let clusters = if config.cluster_limit == 0 {
+        Vec::new()
+    } else if let Some(ref idf) = index.cluster_idf {
+        let vec_results = top_k(query_embedding, &index.cluster_chunks, config.cluster_limit);
+        let bm25_results = bm25_search(
+            query,
+            &index.cluster_chunks,
+            |c| c.summary_text.as_str(),
+            idf,
+            config.cluster_limit,
+        );
+        rrf_fuse(&[vec_results, bm25_results], 60, |c| &c.chunk_id)
+    } else {
+        top_k(query_embedding, &index.cluster_chunks, config.cluster_limit)
+    };
+
     NonCodeResults {
         readme,
         crates,
         module_docs,
         folders,
         files,
+        clusters,
     }
 }
 
@@ -242,5 +262,7 @@ pub fn brute_force_non_code(
         folders: top_k(query_embedding, &index.folder_chunks, config.folder_limit),
         // A4: same — `top_k` short-circuits when limit is 0.
         files: top_k(query_embedding, &index.file_chunks, config.file_limit),
+        // R3: same — `top_k` short-circuits when cluster_limit is 0.
+        clusters: top_k(query_embedding, &index.cluster_chunks, config.cluster_limit),
     }
 }

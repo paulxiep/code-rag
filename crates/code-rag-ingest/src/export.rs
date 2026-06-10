@@ -1,9 +1,12 @@
 //! Export all chunks with embeddings from LanceDB to JSON for static deployment.
 
-use arrow_array::{Array, Float32Array, ListArray, RecordBatch, StringArray, UInt64Array};
+use arrow_array::{
+    Array, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array, UInt64Array,
+};
 use code_rag_engine::text::{IdfTable, build_searchable_text};
 use code_rag_types::{
-    CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+    ClusterChunk, CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk,
+    ReadmeChunk,
 };
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
@@ -26,6 +29,9 @@ pub struct ExportIndex {
     /// A4: file summary chunks. Empty on pre-A4 bundles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_chunks: Vec<EmbeddedChunk<FileChunk>>,
+    /// R3: emergent-cluster summary chunks. Empty on pre-R3 bundles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_chunks: Vec<EmbeddedChunk<ClusterChunk>>,
     pub intent_prototypes: HashMap<String, Vec<Vec<f32>>>,
     pub projects: Vec<String>,
     /// IDF tables for browser-side BM25 (B2).
@@ -45,6 +51,9 @@ pub struct ExportIndex {
     /// A4: IDF table over file summary_text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_idf: Option<IdfTable>,
+    /// R3: IDF table over cluster summary_text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_idf: Option<IdfTable>,
     /// C1: Call graph edges for browser-side graph traversal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_edges: Vec<ExportEdge>,
@@ -82,6 +91,9 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
 
     let file_chunks = export_file_chunks(&conn).await?;
     info!("Exported {} file chunks", file_chunks.len());
+
+    let cluster_chunks = export_cluster_chunks(&conn).await?;
+    info!("Exported {} cluster chunks", cluster_chunks.len());
 
     // Collect unique project names
     let mut projects: Vec<String> = code_chunks
@@ -143,6 +155,17 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         ))
     };
 
+    // R3: cluster IDF — same invariant as folder/file.
+    let cluster_idf = if cluster_chunks.is_empty() {
+        None
+    } else {
+        Some(IdfTable::build(
+            cluster_chunks
+                .iter()
+                .map(|ec| ec.chunk.summary_text.clone()),
+        ))
+    };
+
     // C1: Export call edges for browser-side graph traversal
     let call_edges = export_call_edges(&conn).await.unwrap_or_default();
     info!("Exported {} call edges", call_edges.len());
@@ -154,6 +177,7 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         module_doc_chunks,
         folder_chunks,
         file_chunks,
+        cluster_chunks,
         intent_prototypes,
         projects,
         code_idf,
@@ -162,6 +186,7 @@ pub async fn run_export(db_path: &str, output_path: &str) -> anyhow::Result<()> 
         module_doc_idf,
         folder_idf,
         file_idf,
+        cluster_idf,
         call_edges,
     };
 
@@ -559,6 +584,94 @@ async fn export_file_chunks(
                 exports: extract(exports_list, i),
                 imports: extract(imports_list, i),
                 purpose: opt_str(purposes, i),
+                summary_text: summary_texts.value(i).to_string(),
+                chunk_id: chunk_ids.value(i).to_string(),
+                content_hash: content_hashes.value(i).to_string(),
+                embedding_model_version: model_versions.value(i).to_string(),
+            };
+            result.push(EmbeddedChunk {
+                chunk,
+                embedding: get_embedding(batch, i),
+                signature_embedding: None,
+            });
+        }
+    }
+    Ok(result)
+}
+
+/// R3: Export emergent-cluster summary chunks + embeddings. Mirrors the A2/A4
+/// pattern — graceful-empty when `cluster_chunks` table doesn't exist (pre-R3
+/// databases), native List<Utf8> deserialization for the Vec<String> columns,
+/// plus the UInt32 `cluster_id` and Float32 `cohesion` scalar columns.
+async fn export_cluster_chunks(
+    conn: &lancedb::Connection,
+) -> anyhow::Result<Vec<EmbeddedChunk<ClusterChunk>>> {
+    let batches = match query_all(conn, "cluster_chunks").await {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut result = Vec::new();
+
+    for batch in &batches {
+        let project_names = str_col(batch, "project_name")?;
+        let paths = str_col(batch, "path")?;
+        let dominant_relations = str_col(batch, "dominant_relation")?;
+        let summary_texts = str_col(batch, "summary_text")?;
+        let chunk_ids = str_col(batch, "chunk_id")?;
+        let content_hashes = str_col(batch, "content_hash")?;
+        let model_versions = str_col(batch, "embedding_model_version")?;
+        let cluster_ids = batch
+            .column_by_name("cluster_id")
+            .and_then(|c: &Arc<dyn Array>| c.as_any().downcast_ref::<UInt32Array>())
+            .ok_or_else(|| anyhow::anyhow!("missing column: cluster_id"))?;
+        let cohesions = batch
+            .column_by_name("cohesion")
+            .and_then(|c: &Arc<dyn Array>| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or_else(|| anyhow::anyhow!("missing column: cohesion"))?;
+
+        let list_col = |name: &str| -> Option<&ListArray> {
+            batch
+                .column_by_name(name)
+                .and_then(|c: &Arc<dyn Array>| c.as_any().downcast_ref::<ListArray>())
+        };
+        let members_list = list_col("member_chunk_ids");
+        let files_list = list_col("files");
+        let key_types_list = list_col("key_types");
+        let key_functions_list = list_col("key_functions");
+
+        let extract = |arr: Option<&ListArray>, i: usize| -> Vec<String> {
+            arr.filter(|a| !a.is_null(i))
+                .map(|a| {
+                    let v = a.value(i);
+                    v.as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|sa| {
+                            (0..sa.len())
+                                .filter_map(|j| {
+                                    if sa.is_null(j) {
+                                        None
+                                    } else {
+                                        Some(sa.value(j).to_string())
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+        };
+
+        for i in 0..batch.num_rows() {
+            let chunk = ClusterChunk {
+                cluster_id: cluster_ids.value(i),
+                project_name: project_names.value(i).to_string(),
+                path: paths.value(i).to_string(),
+                member_chunk_ids: extract(members_list, i),
+                files: extract(files_list, i),
+                key_types: extract(key_types_list, i),
+                key_functions: extract(key_functions_list, i),
+                dominant_relation: dominant_relations.value(i).to_string(),
+                cohesion: cohesions.value(i),
                 summary_text: summary_texts.value(i).to_string(),
                 chunk_id: chunk_ids.value(i).to_string(),
                 content_hash: content_hashes.value(i).to_string(),

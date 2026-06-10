@@ -16,11 +16,15 @@
 //! re-parsing.
 
 mod cluster;
+mod clusterchunk;
 mod louvain;
 mod topology;
 
-use code_rag_store::VectorStore;
-use code_rag_types::CommunityAssignment;
+use std::collections::HashMap;
+
+use code_rag_store::seams::Embedder;
+use code_rag_store::{FastEmbedImpl, VectorStore};
+use code_rag_types::{ClusterChunk, CodeChunk, CommunityAssignment};
 use thiserror::Error;
 use tracing::info;
 
@@ -37,6 +41,8 @@ const STORE_DIM: usize = 384;
 pub enum TopologyError {
     #[error("store error: {0}")]
     Store(#[from] code_rag_store::StoreError),
+    #[error("embed error: {0}")]
+    Embed(#[from] code_rag_store::EmbedError),
 }
 
 /// Options for a topology build/refresh over an already-ingested index.
@@ -61,30 +67,40 @@ pub struct TopologyOpts {
 /// be re-run cluster-only without re-parsing.
 pub async fn build_topology(opts: TopologyOpts) -> Result<(), TopologyError> {
     let store = VectorStore::new(&opts.db_path, STORE_DIM).await?;
+    // One embedder for the whole run (model load is the expensive part).
+    let embedder = FastEmbedImpl::new()?;
     let projects = match &opts.project_name {
         Some(p) => vec![p.clone()],
         None => store.list_projects().await?,
     };
     for project in projects {
-        build_for_project(&store, &project).await?;
+        build_for_project(&store, &embedder, &project).await?;
     }
     Ok(())
 }
 
-/// Detect + persist communities for one project.
-async fn build_for_project(store: &VectorStore, project: &str) -> Result<(), TopologyError> {
+/// Detect communities + build ClusterChunks, and persist both, for one project.
+async fn build_for_project(
+    store: &VectorStore,
+    embedder: &dyn Embedder,
+    project: &str,
+) -> Result<(), TopologyError> {
     let call_edges = store.get_all_edges(project).await?;
     let graph_edges = store.get_all_graph_edges(project).await?;
 
     let topo = Topology::build(&call_edges, &graph_edges);
 
-    // Always clear stale assignments first so a now-empty topology removes them.
-    store.delete_community_assignments_by_project(project).await?;
+    // Always clear stale rows first so a now-empty topology removes them.
+    store
+        .delete_community_assignments_by_project(project)
+        .await?;
+    store.delete_cluster_chunks_by_project(project).await?;
     if topo.is_empty() {
         info!("topology: no edges for project '{project}' — skipped");
         return Ok(());
     }
 
+    // R2: community assignments.
     let results = cluster::detect(&topo);
     let n_communities = results
         .iter()
@@ -93,16 +109,45 @@ async fn build_for_project(store: &VectorStore, project: &str) -> Result<(), Top
         .map(|m| m + 1)
         .unwrap_or(0);
     let assignments: Vec<CommunityAssignment> = results
-        .into_iter()
+        .iter()
         .map(|r| CommunityAssignment {
             project_name: project.to_string(),
-            chunk_id: r.chunk_id,
+            chunk_id: r.chunk_id.clone(),
             community_id: r.community_id,
             cohesion: r.cohesion,
         })
         .collect();
-
     let count = store.upsert_community_assignments(&assignments).await?;
-    info!("topology: {count} chunks in {n_communities} communities (project '{project}')");
+
+    // R3: ClusterChunk summaries — fetch members, render, embed, upsert.
+    let member_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+    let chunks = store.get_chunks_by_ids(&member_ids).await?;
+    let members: HashMap<String, CodeChunk> = chunks
+        .into_iter()
+        .map(|c| (c.chunk_id.clone(), c))
+        .collect();
+    let cluster_chunks: Vec<ClusterChunk> = clusterchunk::build_cluster_chunks(
+        project,
+        &topo,
+        &results,
+        &members,
+        &call_edges,
+        &graph_edges,
+    );
+    if !cluster_chunks.is_empty() {
+        let texts: Vec<&str> = cluster_chunks
+            .iter()
+            .map(|c| c.summary_text.as_str())
+            .collect();
+        let embeddings = embedder.embed_batch(&texts)?;
+        store
+            .upsert_cluster_chunks(&cluster_chunks, embeddings)
+            .await?;
+    }
+
+    info!(
+        "topology: {count} chunks in {n_communities} communities, {} cluster chunks (project '{project}')",
+        cluster_chunks.len()
+    );
     Ok(())
 }

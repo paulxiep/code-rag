@@ -291,7 +291,9 @@ impl LanguageHandler for TypeScriptHandler {
                 }
             }
             // Function/method/arrow param + return type annotations → References.
-            "function_declaration" | "method_definition" | "arrow_function"
+            "function_declaration"
+            | "method_definition"
+            | "arrow_function"
             | "function_expression" => {
                 if let Some(params) = node.child_by_field_name("parameters") {
                     let mut c = params.walk();
@@ -317,7 +319,11 @@ fn push_ts_refs(type_node: &Node, src: &[u8], context: EdgeContext, out: &mut Ve
     for (name, is_generic) in
         collect_type_idents(type_node, src, &["type_identifier"], &["type_arguments"])
     {
-        let ctx = if is_generic { EdgeContext::GenericArg } else { context };
+        let ctx = if is_generic {
+            EdgeContext::GenericArg
+        } else {
+            context
+        };
         out.push(TypeRelation::new(name, EdgeRelation::References, ctx));
     }
 }
