@@ -1,5 +1,7 @@
 # Code RAG
 
+Test it by asking questions about my portfolio at [paulxie.com/demos/code-rag/](https://paulxie.com/demos/code-rag/)
+
 A RAG chatbot that answers questions about code repositories. Ingests all sibling project directories, parses Rust, Python, TypeScript, and Go codebases with tree-sitter, extracts docstrings and a persistent AST call graph, generates embeddings, and responds via Google Gemini. Intent classification routes queries to optimized retrieval strategies — including graph augmentation for relationship queries and per-comparator decomposition for comparison queries. Retrieval traces surface all sources with relevance scores — the system shows its work.
 
 - [Executive Summary](docs/executive_summary.md)
