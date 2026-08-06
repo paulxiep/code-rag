@@ -84,10 +84,7 @@ pub async fn build_topology(opts: TopologyOpts) -> Result<(), TopologyError> {
     let embedder = FastEmbedImpl::new()?;
     let report_dir: PathBuf = match &opts.report_dir {
         Some(d) => PathBuf::from(d),
-        None => Path::new(&opts.db_path)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("reports"),
+        None => default_report_dir(&opts.db_path),
     };
     let projects = match &opts.project_name {
         Some(p) => vec![p.clone()],
@@ -99,9 +96,19 @@ pub async fn build_topology(opts: TopologyOpts) -> Result<(), TopologyError> {
     Ok(())
 }
 
+/// Default architecture-report directory for a db path (`<db parent>/reports`).
+pub fn default_report_dir(db_path: &str) -> PathBuf {
+    Path::new(db_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("reports")
+}
+
 /// Report path for one project inside the report dir; the project name is
-/// sanitized so it is always a valid single filename component.
-fn report_path(report_dir: &Path, project: &str) -> PathBuf {
+/// sanitized so it is always a valid single filename component. Public so
+/// project-removal tooling (`code-rag-ingest purge`) can delete the artifact
+/// this crate emits.
+pub fn report_path(report_dir: &Path, project: &str) -> PathBuf {
     let safe: String = project
         .chars()
         .map(|c| {

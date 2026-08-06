@@ -8,6 +8,8 @@
 /C[1-5].md
 !/data/reports/
 /data/reports/*.json
+# Architecture reports are regenerated on every ingest/topology run
+/data/reports/architecture_*.md
 /cache
 .env
 /.fastembed_cache

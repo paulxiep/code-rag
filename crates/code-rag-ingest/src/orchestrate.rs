@@ -109,18 +109,25 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
 
     // Step 4: C1 — Resolve call edges and persist them.
     if !dry_run {
-        let project = result
-            .code_chunks
-            .first()
-            .map(|c| c.project_name.as_str())
-            .unwrap_or("unknown");
+        // Edge resolution is project-scoped (see edge_resolution.rs) and a
+        // portfolio ingest carries several projects at once, so stale-edge
+        // deletion and the topology refresh must cover every ingested project —
+        // not just the first chunk's. Sorted for deterministic run order.
+        let mut projects: Vec<String> = collect_project_names(&result).into_iter().collect();
+        projects.sort();
 
         let edges =
             crate::edge_resolution::resolve_edges(&result.code_chunks, &calls_map, &imports_map);
-        if !edges.is_empty() {
+        for project in &projects {
             store.delete_edges_by_project(project).await?;
+        }
+        if !edges.is_empty() {
             let count = store.upsert_call_edges(&edges).await?;
-            info!("Resolved {} call edges (project: {})", count, project);
+            info!(
+                "Resolved {} call edges across {} project(s)",
+                count,
+                projects.len()
+            );
         }
 
         // Track R (R1): build the typed relation graph and persist it to
@@ -145,24 +152,63 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
             &result.file_chunks,
             &imports_map,
         ));
-        store.delete_graph_edges_by_project(project).await?;
+        for project in &projects {
+            store.delete_graph_edges_by_project(project).await?;
+        }
         if !graph_edges.is_empty() {
             let count = store.upsert_graph_edges(&graph_edges).await?;
-            info!("Resolved {} relation edges (project: {})", count, project);
+            info!(
+                "Resolved {} relation edges across {} project(s)",
+                count,
+                projects.len()
+            );
         }
 
         // Track R (R2): derive the emergent topology from the edges we just
         // persisted — deterministic community detection + cohesion, written to
         // `community_assignments`. Reads the edge tables back (SoC: topology
         // reads, ingestion writes); safe to re-run cluster-only later.
+        // One ingested project → scoped rebuild; several → `None` refreshes
+        // every project with a single store/embedder open instead of N loads.
         code_raptor::build_topology(code_raptor::TopologyOpts {
             db_path: db_path.clone(),
-            project_name: Some(project.to_string()),
+            project_name: match projects.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            },
             report_dir: None,
         })
         .await?;
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Orchestration: Project purge
+// ============================================================================
+
+/// Remove every trace of the given projects from the index: all chunk tables,
+/// call + graph edges, community assignments, cluster chunks, and the emitted
+/// architecture report. Needed for projects whose source repo no longer exists
+/// on disk — a re-ingest can't see them, so it can never clean them up.
+pub async fn purge_projects(db_path: &str, projects: &[String]) -> anyhow::Result<()> {
+    // Purge touches only scalar predicates, never creates a vector table, so
+    // the dimension just satisfies the constructor (same as code-raptor).
+    let store = VectorStore::new(db_path, 384).await?;
+    let report_dir = code_raptor::default_report_dir(db_path);
+    for project in projects {
+        delete_project_from_all_tables(&store, project).await?;
+        store.delete_edges_by_project(project).await?;
+        store.delete_graph_edges_by_project(project).await?;
+        store.delete_community_assignments_by_project(project).await?;
+        store.delete_cluster_chunks_by_project(project).await?;
+        let report = code_raptor::report_path(&report_dir, project);
+        if report.exists() {
+            std::fs::remove_file(&report)?;
+        }
+        info!("Purged project '{project}' from the index");
+    }
     Ok(())
 }
 

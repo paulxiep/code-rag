@@ -80,6 +80,18 @@ enum Commands {
         #[arg(long)]
         report_dir: Option<String>,
     },
+    /// Remove projects from the index entirely (chunks, edges, communities,
+    /// cluster summaries, architecture report). For repos deleted from disk,
+    /// which a re-ingest can no longer see or clean up.
+    Purge {
+        /// Project names to purge
+        #[arg(value_name = "PROJECT", required = true)]
+        projects: Vec<String>,
+
+        /// Path to the LanceDB database
+        #[arg(short, long, default_value = "data/portfolio.lance")]
+        db_path: String,
+    },
 }
 
 #[tokio::main]
@@ -137,6 +149,10 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
             info!("Topology rebuild complete");
+        }
+        Commands::Purge { projects, db_path } => {
+            code_rag_ingest::purge_projects(&db_path, &projects).await?;
+            info!("Purge complete");
         }
     }
 

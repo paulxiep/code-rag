@@ -2,6 +2,13 @@
 //!
 //! Post-ingestion step: takes chunks + calls_map + imports_map, produces Vec<CallEdge>.
 //! Three-tier resolution with short-circuit at first unambiguous match.
+//!
+//! **Project-scoped.** The corpus is ingested (and retrieved) across projects,
+//! but the relation graph must never link projects: the identifier index is
+//! keyed by `(project, identifier)`, so a lookup only ever sees the source's
+//! own project. "Unique-global" (tier 3) therefore means unique *within the
+//! source's project*, and a reference to an identifier defined only in another
+//! project is dropped like any other unknown target.
 
 use std::collections::HashMap;
 
@@ -11,6 +18,10 @@ use code_rag_types::{
 };
 
 use crate::ingestion::language::{ImportInfo, TypeRelation};
+
+/// `(project, identifier) → [(chunk_id, file_path)]` — the project key is what
+/// keeps every resolution tier inside the source's own project.
+type IdIndex<'a> = HashMap<(&'a str, &'a str), Vec<(&'a str, &'a str)>>;
 
 /// Last path segment of a normalized (forward-slash) path.
 fn basename(path: &str) -> &str {
@@ -113,10 +124,10 @@ pub fn build_import_edges(
     file_chunks: &[FileChunk],
     imports_by_file: &HashMap<String, Vec<ImportInfo>>,
 ) -> Vec<GraphEdge> {
-    let mut id_index: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    let mut id_index: IdIndex = HashMap::new();
     for chunk in code_chunks {
         id_index
-            .entry(chunk.identifier.as_str())
+            .entry((chunk.project_name.as_str(), chunk.identifier.as_str()))
             .or_default()
             .push((chunk.chunk_id.as_str(), chunk.file_path.as_str()));
     }
@@ -144,6 +155,7 @@ pub fn build_import_edges(
             if let Some((tid, tfile, tier)) = resolve_target(
                 &src.chunk_id,
                 file,
+                &src.project_name,
                 &imp.imported_name,
                 &id_index,
                 &import_lookup,
@@ -190,7 +202,7 @@ pub fn build_import_edges(
 /// Tiers (in priority order, short-circuits at first unique match):
 /// 1. Same-file: callee identifier found in the same file's chunk list
 /// 2. Import-based: callee identifier matches an import → resolve source path to file
-/// 3. Unique-global: only one chunk with that identifier across the entire project
+/// 3. Unique-global: only one chunk with that identifier in the caller's project
 ///
 /// Ambiguous calls (multiple candidates, no import evidence) are skipped.
 pub fn resolve_edges(
@@ -198,11 +210,11 @@ pub fn resolve_edges(
     calls_map: &HashMap<String, Vec<String>>,
     imports_by_file: &HashMap<String, Vec<ImportInfo>>,
 ) -> Vec<CallEdge> {
-    // Build identifier → [(chunk_id, file_path)] index
-    let mut id_index: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    // Build (project, identifier) → [(chunk_id, file_path)] index
+    let mut id_index: IdIndex = HashMap::new();
     for chunk in chunks {
         id_index
-            .entry(chunk.identifier.as_str())
+            .entry((chunk.project_name.as_str(), chunk.identifier.as_str()))
             .or_default()
             .push((chunk.chunk_id.as_str(), chunk.file_path.as_str()));
     }
@@ -230,10 +242,11 @@ pub fn resolve_edges(
         };
 
         for callee_id in callee_identifiers {
-            let candidates = match id_index.get(callee_id.as_str()) {
-                Some(c) => c,
-                None => continue, // No chunk with this identifier exists
-            };
+            let candidates =
+                match id_index.get(&(caller.project_name.as_str(), callee_id.as_str())) {
+                    Some(c) => c,
+                    None => continue, // No chunk with this identifier in the caller's project
+                };
 
             // Skip self-edges (function calling itself)
             let non_self: Vec<_> = candidates
@@ -284,7 +297,7 @@ pub fn resolve_edges(
                 }
             }
 
-            // Tier 3: unique-global match
+            // Tier 3: unique within the caller's project
             if non_self.len() == 1 {
                 edges.push(make_edge(
                     caller,
@@ -307,8 +320,9 @@ pub fn resolve_edges(
 ///
 /// Reuses the same tiered disambiguation as call resolution (same-file > import >
 /// unique-global). `type_relations` maps `source_chunk_id → [TypeRelation]`. A
-/// relation whose target identifier matches no project chunk (e.g. `Vec`, `String`,
-/// or a third-party type) is dropped — only intra-project structural edges survive.
+/// relation whose target identifier matches no chunk in the *source's project*
+/// (e.g. `Vec`, `String`, a third-party type, or another project's definition)
+/// is dropped — only intra-project structural edges survive.
 /// Confidence: tier 1/2 (same-file / import) → `Extracted`; tier 3 (unique-global)
 /// → `Inferred`; ambiguous/self → skipped.
 pub fn resolve_type_edges(
@@ -316,10 +330,10 @@ pub fn resolve_type_edges(
     type_relations: &HashMap<String, Vec<TypeRelation>>,
     imports_by_file: &HashMap<String, Vec<ImportInfo>>,
 ) -> Vec<GraphEdge> {
-    let mut id_index: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    let mut id_index: IdIndex = HashMap::new();
     for chunk in chunks {
         id_index
-            .entry(chunk.identifier.as_str())
+            .entry((chunk.project_name.as_str(), chunk.identifier.as_str()))
             .or_default()
             .push((chunk.chunk_id.as_str(), chunk.file_path.as_str()));
     }
@@ -347,6 +361,7 @@ pub fn resolve_type_edges(
             if let Some((target_chunk_id, target_file, tier)) = resolve_target(
                 source.chunk_id.as_str(),
                 source.file_path.as_str(),
+                source.project_name.as_str(),
                 &rel.target_name,
                 &id_index,
                 &import_lookup,
@@ -388,16 +403,18 @@ pub fn resolve_type_edges(
 }
 
 /// Resolve a referenced identifier to a single chunk using the same tiers as call
-/// resolution. Returns `(target_chunk_id, target_file, tier)` or `None` for
-/// unknown/self/ambiguous targets. Shared by call and type-relation resolution.
+/// resolution, scoped to the source's project. Returns `(target_chunk_id,
+/// target_file, tier)` or `None` for unknown/self/ambiguous/foreign targets.
+/// Shared by import and type-relation resolution.
 fn resolve_target<'a>(
     source_chunk_id: &str,
     source_file: &str,
+    source_project: &str,
     target_name: &str,
-    id_index: &HashMap<&'a str, Vec<(&'a str, &'a str)>>,
+    id_index: &IdIndex<'a>,
     import_lookup: &HashMap<&str, HashMap<&str, &str>>,
 ) -> Option<(&'a str, &'a str, u8)> {
-    let candidates = id_index.get(target_name)?;
+    let candidates = id_index.get(&(source_project, target_name))?;
     let non_self: Vec<_> = candidates
         .iter()
         .filter(|(cid, _)| *cid != source_chunk_id)
@@ -428,7 +445,7 @@ fn resolve_target<'a>(
         }
     }
 
-    // Tier 3: unique-global
+    // Tier 3: unique within the source's project
     if non_self.len() == 1 {
         return Some((non_self[0].0, non_self[0].1, 3));
     }
@@ -498,6 +515,15 @@ mod tests {
     use code_rag_types::CodeChunk;
 
     fn make_chunk(chunk_id: &str, identifier: &str, file_path: &str) -> CodeChunk {
+        make_chunk_in("test", chunk_id, identifier, file_path)
+    }
+
+    fn make_chunk_in(
+        project: &str,
+        chunk_id: &str,
+        identifier: &str,
+        file_path: &str,
+    ) -> CodeChunk {
         CodeChunk {
             file_path: file_path.into(),
             language: "rust".into(),
@@ -505,7 +531,7 @@ mod tests {
             node_type: "function_item".into(),
             code_content: format!("fn {}() {{}}", identifier),
             start_line: 1,
-            project_name: "test".into(),
+            project_name: project.into(),
             docstring: None,
             signature: None,
             chunk_id: chunk_id.into(),
@@ -616,6 +642,83 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].callee_chunk_id, "c_bar1");
         assert_eq!(edges[0].resolution_tier, 2);
+    }
+
+    // ---- Project scoping: the graph must never link projects ----
+
+    #[test]
+    fn test_call_never_resolves_cross_project() {
+        // `bar` exists only in project beta — unique corpus-wide, but foreign
+        // to the caller's project, so no edge (was: tier-3 "unique-global").
+        let chunks = vec![
+            make_chunk_in("alpha", "c_foo", "foo", "alpha/src/a.rs"),
+            make_chunk_in("beta", "c_bar", "bar", "beta/src/b.rs"),
+        ];
+        let mut calls_map = HashMap::new();
+        calls_map.insert("c_foo".into(), vec!["bar".into()]);
+
+        let edges = resolve_edges(&chunks, &calls_map, &HashMap::new());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_call_same_project_wins_over_foreign_duplicate() {
+        // `bar` exists in both projects; only the caller's own is a candidate,
+        // so what would be ambiguous corpus-wide resolves cleanly at tier 3.
+        let chunks = vec![
+            make_chunk_in("alpha", "c_foo", "foo", "alpha/src/a.rs"),
+            make_chunk_in("alpha", "c_bar_a", "bar", "alpha/src/b.rs"),
+            make_chunk_in("beta", "c_bar_b", "bar", "beta/src/b.rs"),
+        ];
+        let mut calls_map = HashMap::new();
+        calls_map.insert("c_foo".into(), vec!["bar".into()]);
+
+        let edges = resolve_edges(&chunks, &calls_map, &HashMap::new());
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].callee_chunk_id, "c_bar_a");
+        assert_eq!(edges[0].resolution_tier, 3);
+    }
+
+    #[test]
+    fn test_type_edge_never_resolves_cross_project() {
+        use code_rag_types::{EdgeContext, EdgeRelation};
+        // `String` defined only in project beta (the R4-report leak scenario):
+        // an alpha reference must be dropped like any unknown target.
+        let chunks = vec![
+            make_chunk_in("alpha", "c_src", "collect", "alpha/src/lib.rs"),
+            make_chunk_in("beta", "c_string", "String", "beta/internal/diag.go"),
+        ];
+        let mut rels = HashMap::new();
+        rels.insert(
+            "c_src".to_string(),
+            vec![TypeRelation::new(
+                "String",
+                EdgeRelation::References,
+                EdgeContext::ReturnType,
+            )],
+        );
+        let edges = resolve_type_edges(&chunks, &rels, &HashMap::new());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_import_edge_never_resolves_cross_project() {
+        use code_rag_types::EdgeRelation;
+        // `Bar` defined only in project beta; an alpha file importing the name
+        // must not produce an edge, even though the name is unique corpus-wide.
+        let code = vec![
+            make_chunk_in("beta", "c_bar", "Bar", "beta/src/mod_b.rs"),
+            make_chunk_in("alpha", "c_foo", "foo", "alpha/src/foo.rs"),
+        ];
+        let mut files = vec![make_file_chunk("c_foo_file", "alpha/src/foo.rs")];
+        files[0].project_name = "alpha".into();
+        let mut imports = HashMap::new();
+        imports.insert(
+            "alpha/src/foo.rs".to_string(),
+            vec![ImportInfo::import("Bar", "crate::mod_b")],
+        );
+        let edges = build_import_edges(&code, &files, &imports);
+        assert!(!edges.iter().any(|e| e.relation == EdgeRelation::Imports));
     }
 
     #[test]

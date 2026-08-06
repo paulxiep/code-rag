@@ -449,6 +449,23 @@ pub fn run_ingestion(
         }
     }
 
+    // Byte-identical definitions in the same file (e.g. a method duplicated
+    // across impl blocks) hash to the same chunk_id (`deterministic_chunk_id`
+    // is path+content, not line-aware), and LanceDB's merge-insert rejects a
+    // batch containing one id twice. Keep the first — the text is identical,
+    // so retrieval loses nothing — and warn so the duplication is visible.
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    all_chunks.retain(|c| {
+        let fresh = seen_ids.insert(c.chunk_id.clone());
+        if !fresh {
+            warn!(
+                "duplicate identical definition `{}` in {} — keeping first occurrence",
+                c.identifier, c.file_path
+            );
+        }
+        fresh
+    });
+
     let crate_chunks: Vec<CrateChunk> = entries
         .iter()
         .filter(|e| is_cargo_toml(e))

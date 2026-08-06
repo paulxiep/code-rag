@@ -12,7 +12,7 @@ pub use ingestion::{
     CallsMap, DEFAULT_EMBEDDING_MODEL, DeletionsByTable, ExistingFileIndex, ImportsMap,
     IngestionResult, IngestionStats, ReconcileResult, TypeRelationsMap, reconcile, run_ingestion,
 };
-pub use orchestrate::{IngestOpts, ingest_repo};
+pub use orchestrate::{IngestOpts, ingest_repo, purge_projects};
 
 // Re-export store functionality for convenience.
 // `Embedder` is the seam trait; `FastEmbedImpl` is the concrete fastembed-backed impl.

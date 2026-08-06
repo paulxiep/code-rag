@@ -318,8 +318,11 @@ retrieval and clustering have a real topology to work on.
 > central-node injection was skipped pending its own measured experiment (R3
 > precedent). The first real report exposed an **R1 cross-project resolution
 > leak** (ubiquitous identifiers like `String` resolving into other projects);
-> report-level project filter shipped, resolution-level fix tracked as a
-> follow-up. See [development_log.md](development_log.md) 2026-08-06.
+> report-level project filter shipped, and the resolution-level fix landed the
+> same day — the identifier index is now keyed `(project, identifier)`, so the
+> graph never links projects while retrieval stays corpus-wide. Harness held
+> flat (relationship pool +1pp). See [development_log.md](development_log.md)
+> 2026-08-06 (both entries).
 
 ### R5 — Architecture comparison + visualization + exports
 

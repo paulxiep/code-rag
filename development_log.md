@@ -1,5 +1,68 @@
 # Development Log
 
+## 2026-08-06: Project-scoped edge resolution (R1 leak fix) + purge subcommand
+
+### Root cause
+
+The R4 report exposed cross-project edges (`String` → caravan, `Result` →
+quant-trading-gym). Structural cause, three facts stacked: (1) a portfolio
+ingest is one flat `WalkDir` pass — every project's chunks travel together into
+edge resolution ([orchestrate.rs](crates/code-rag-ingest/src/orchestrate.rs));
+(2) all three resolvers indexed `identifier → chunks` with **no project
+dimension**, so tier-3 "unique-global" meant unique across the whole corpus and
+tier-2's unanchored `path_matches_import` (`ends_with`/`contains`) let
+`crate::error` match another project's `error.rs`; (3) edges are stamped with
+the *source* chunk's project, so per-project store reads faithfully returned
+foreign targets. Design intent (RAG retrieves across projects; **the graph
+never links projects**) was documented in a comment but never implemented.
+
+### Fix
+
+- [edge_resolution.rs](crates/code-rag-ingest/src/edge_resolution.rs): the
+  identifier index is now keyed `(project, identifier)` (`IdIndex` alias);
+  `resolve_target` takes the source's project; call-edge tiers use the
+  caller's. Tier 3 is now unique-*within-project*; a name defined only in
+  another project is dropped like any unknown target. 4 new tests.
+- **Second bug, same call site:** `orchestrate.rs` took `project` from the
+  *first chunk* — in portfolio mode only one project's stale edges were purged
+  and only one topology rebuilt. Now loops sorted `collect_project_names`
+  for both edge-table deletes; `build_topology` gets `Some(p)` for a
+  single-project ingest, `None` (refresh all, one embedder load) otherwise.
+  This run was the first to resolve edges across all 6 projects.
+- **Latent crash surfaced by re-ingest:** byte-identical definitions in one
+  file hash to the same chunk_id (`deterministic_chunk_id` is path+content,
+  not line-aware) and LanceDB merge-insert rejects duplicate ids in a batch.
+  `run_ingestion` now dedups (keep first, `warn!` each) — 18 duplicates across
+  the corpus, incl. 4 in code-rag itself.
+- **`code-rag-ingest purge <PROJECT>...`** (new subcommand): removes a project
+  from every chunk table + call/graph edges + community assignments + cluster
+  chunks + its architecture report. Needed because a re-ingest can't see repos
+  deleted from disk. Used to purge `cioport` and `daccord` (repos removed from
+  the portfolio). `code-raptor` exposes `default_report_dir`/`report_path` for
+  the report cleanup. Architecture reports are now gitignored (regenerated
+  artifacts).
+
+### Measurement (post-fix, purged 6-project corpus, `--rerank --hybrid`)
+
+`post_projscope_clean_dc86662` (classifier) vs `post_r3_final_a70614c`
+(pre-fix, 8-project): comparison 0.62/0.73/0.75 (identical), implementation
+0.61/0.67/0.67 (−3pp r@5), overview 0.70/0.77/0.81 (+2pp r@5), relationship
+0.47/0.61/0.61 (−2pp r@5, **+1pp r@10/pool**). Flat within noise despite
+removing every cross-project edge — they were wrong answers, not signal; the
+implementation dip tracks corpus drift (concurrens grew, code-rag gained the
+R4 code, two projects purged). **This report pair is the new working baseline**
+for the 6-project corpus. The code-rag architecture report is now fully
+project-local (edge count 2355 → 1951) and still finds the real
+`ingestion/mod.rs ↔ reconcile.rs` cycle.
+
+### Follow-ups
+
+- `path_matches_import` unanchored fallback can still mis-match *within* a
+  project — tighten under its own measured run.
+- `EdgeConfidence::Ambiguous` is never constructed (ambiguity is skipped).
+
+---
+
 ## 2026-08-06: Track R R4 — Structural analytics + architecture report
 
 ### Summary
