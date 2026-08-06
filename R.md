@@ -309,6 +309,18 @@ retrieval and clustering have a real topology to work on.
   repo (e.g. `retrieve`, `ingest`); detected cycles match known circular deps;
   optional overview-injection doesn't regress recall.
 
+> **Result — shipped 2026-08-06.** All analytics + the report landed
+> (`data/reports/architecture_<project>.md`, `--report-dir` on the topology
+> CLI). Two deviations: cycles use Tarjan SCC + bounded canonical DFS instead
+> of Johnson's blocked search (blocking is unsound under a cycle-length cap),
+> and the never-used `petgraph` dependency was removed (§3) — all graph
+> algorithms are hand-rolled for determinism. The optional Overview
+> central-node injection was skipped pending its own measured experiment (R3
+> precedent). The first real report exposed an **R1 cross-project resolution
+> leak** (ubiquitous identifiers like `String` resolving into other projects);
+> report-level project filter shipped, resolution-level fix tracked as a
+> follow-up. See [development_log.md](development_log.md) 2026-08-06.
+
 ### R5 — Architecture comparison + visualization + exports
 
 - **Architecture comparison** (requires Track A): compare emergent communities

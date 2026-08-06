@@ -158,6 +158,7 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
         code_raptor::build_topology(code_raptor::TopologyOpts {
             db_path: db_path.clone(),
             project_name: Some(project.to_string()),
+            report_dir: None,
         })
         .await?;
     }

@@ -1,5 +1,71 @@
 # Development Log
 
+## 2026-08-06: Track R R4 — Structural analytics + architecture report
+
+### Summary
+
+R4 turns the R1–R3 topology into architectural insight: degree centrality ("read
+these first"), cross-community bridges (Brandes edge-betweenness),
+surprising-connection ranking, file-level dependency-cycle detection, and a
+deterministic markdown **architecture report** emitted per project at ingest and
+on cluster-only re-runs (`code-rag-ingest topology [--report-dir]`, default
+`data/reports/architecture_<project>.md`). Analytics are derived data —
+recomputed each run from the persisted edge tables, never stored (no retrieval
+consumer exists; revisit only if R5 MCP tools need sub-second responses). No
+retrieval path is touched, so no harness re-run is required.
+
+### Design
+
+- **Degree in the engine, the rest native** (per the plan split):
+  [centrality.rs](crates/code-rag-engine/src/centrality.rs) is pure/wasm-safe so
+  the R5 browser demo computes the identical ranking; Brandes
+  ([betweenness.rs](crates/code-raptor/src/betweenness.rs), source-capped at
+  1500 with deterministic stride sampling), cycles
+  ([cycles.rs](crates/code-raptor/src/cycles.rs)), assembly
+  ([analytics.rs](crates/code-raptor/src/analytics.rs)) and rendering
+  ([report.rs](crates/code-raptor/src/report.rs), timestamp-free →
+  byte-deterministic) stay native in `code-raptor`.
+- **Cycles: Tarjan SCC + bounded canonical DFS, not Johnson's blocked search.**
+  R.md named Johnson (1975), but its unblocking assumes complete exploration —
+  under a cycle-length cap (12, max 50 cycles) a depth-pruned blocked search can
+  miss short cycles. The SCC restriction + min-vertex-canonical bounded DFS is
+  exact for every cycle within the cap and cheap on mostly-acyclic import
+  graphs. File granularity falls out of R1's definition→file lift; only
+  `Imports`/`ReExports` edges are cycle inputs (`Contains` is hierarchical,
+  call cycles are recursion).
+- **Surprise score** = betweenness × weight / edges-between-the-pair: one of few
+  links between two communities outranks an edge inside a thick expected seam.
+- **petgraph removed** (deviation from R.md §3): declared since R0 but never
+  used — Louvain, Brandes, Tarjan and the cycle DFS are all hand-rolled for
+  determinism control.
+
+### Cross-project resolution leak (found by the report, follow-up)
+
+First real run put `String` (caravan) and `Result` (quant-trading-gym) at the
+top of code-rag's central list: R1 `References` resolution resolves ubiquitous
+identifiers to *other projects'* definitions (unique-global heuristic), so
+per-project topologies contain cross-project endpoints. Report-level fix
+shipped: central-node and community-concern picks are filtered to
+project-local chunks; **bridges are deliberately unfiltered so the leak stays
+visible**. The real fix is in `code-rag-ingest` edge resolution (same-project
+constraint and/or a ubiquitous-identifier stoplist for `References`) and
+changes partition inputs → needs a harness re-run when done. Until then,
+persisted communities are unchanged by R4.
+
+### Verification
+
+- `cargo build --workspace` + `cargo test --workspace` green (all suites, 0
+  failures); `trunk build --features standalone` green (wasm purity — new
+  engine module compiles to wasm32).
+- Cluster-only re-run (no re-parse) on `code-rag`: central list matches
+  intuition — `new`/`VectorStore` (store), `retrieve`, `run_retrieval`,
+  `ScoredChunk`, `run_ingestion` — and cycle detection found the real
+  `ingestion/mod.rs ↔ ingestion/reconcile.rs` import cycle.
+- Deferred per plan: MCP topology tools → R5; Overview central-node injection →
+  separate measured experiment (R3 precedent: unmeasured arms don't ship on).
+
+---
+
 ## 2026-06-10: Track R R3 — ClusterChunks + empirical per-intent gating (clusters OFF)
 
 ### Summary

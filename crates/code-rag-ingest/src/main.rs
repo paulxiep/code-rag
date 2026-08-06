@@ -75,6 +75,10 @@ enum Commands {
         /// Restrict to one project (default: refresh every ingested project)
         #[arg(short, long)]
         project_name: Option<String>,
+
+        /// Directory for architecture reports (default: <db parent>/reports)
+        #[arg(long)]
+        report_dir: Option<String>,
     },
 }
 
@@ -123,11 +127,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Topology {
             db_path,
             project_name,
+            report_dir,
         } => {
             info!("Rebuilding topology for {}", db_path);
             code_raptor::build_topology(code_raptor::TopologyOpts {
                 db_path,
                 project_name,
+                report_dir,
             })
             .await?;
             info!("Topology rebuild complete");

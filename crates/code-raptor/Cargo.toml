@@ -19,9 +19,9 @@ code-rag-store = { path = "../code-rag-store" }
 # with folder/file chunks so server/WASM see identical summary bytes).
 code-rag-engine = { path = "../code-rag-engine" }
 
-# In-memory topology + graph algorithms (community detection, betweenness,
-# cycles land here in R2–R4).
-petgraph = "0.6"
+# Graph algorithms (Louvain, Brandes betweenness, Tarjan SCC + cycle
+# enumeration) are hand-rolled for full determinism control — no graph-crate
+# dependency. R.md §3 nominally named petgraph; dropped in R4 (never used).
 
 # Error handling
 anyhow = "1.0"

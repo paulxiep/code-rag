@@ -10,17 +10,22 @@
 //! `code-rag-store` (to read the edge tables) and `code-rag-types`, never on
 //! `code-rag-ingest`.
 //!
-//! R0 scaffold: the real algorithms arrive in R2+. For now this exposes the
-//! topology-stage seam so the ingestion-time orchestrator and `code-rag-mcp`
-//! have a stable call site, and so a cluster-only re-run can be wired without
-//! re-parsing.
+//! The topology-stage seam (this file) is what the ingestion-time orchestrator
+//! and `code-rag-mcp` call; a cluster-only re-run works without re-parsing.
+//! R2 landed community detection + cohesion, R3 the `ClusterChunk` summaries,
+//! R4 the structural analytics + architecture report. Viz/exports are R5.
 
+mod analytics;
+mod betweenness;
 mod cluster;
 mod clusterchunk;
+mod cycles;
 mod louvain;
+mod report;
 mod topology;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use code_rag_store::seams::Embedder;
 use code_rag_store::{FastEmbedImpl, VectorStore};
@@ -43,6 +48,8 @@ pub enum TopologyError {
     Store(#[from] code_rag_store::StoreError),
     #[error("embed error: {0}")]
     Embed(#[from] code_rag_store::EmbedError),
+    #[error("report io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Options for a topology build/refresh over an already-ingested index.
@@ -52,16 +59,22 @@ pub struct TopologyOpts {
     pub db_path: String,
     /// Restrict to a single project, or `None` for the whole corpus.
     pub project_name: Option<String>,
+    /// Directory the architecture reports are written to (one
+    /// `architecture_<project>.md` per project). `None` → `<db_path
+    /// parent>/reports`, which with the default db path lands next to the
+    /// harness report family in `data/reports/`.
+    pub report_dir: Option<String>,
 }
 
 /// Build (or refresh) the topology for an already-ingested index.
 ///
-/// R2: reads the persisted edge tables, builds the relation topology, runs
-/// deterministic community detection (Louvain; Leiden deferred), and persists a
-/// community id + cohesion per code chunk to `community_assignments`. Runs
-/// per-project (the unit emergent modules are compared against folders within);
-/// `project_name = None` refreshes every ingested project. R3+ will extend this
-/// to also write `ClusterChunk`s and the architecture report.
+/// Reads the persisted edge tables, builds the relation topology, runs
+/// deterministic community detection (Louvain; Leiden deferred), persists a
+/// community id + cohesion per code chunk to `community_assignments` plus one
+/// `ClusterChunk` summary per community (R3), and emits the R4 architecture
+/// report (centrality, bridges, surprising connections, dependency cycles).
+/// Runs per-project (the unit emergent modules are compared against folders
+/// within); `project_name = None` refreshes every ingested project.
 ///
 /// Deliberately separate from ingestion so it can run right after an ingest or
 /// be re-run cluster-only without re-parsing.
@@ -69,14 +82,37 @@ pub async fn build_topology(opts: TopologyOpts) -> Result<(), TopologyError> {
     let store = VectorStore::new(&opts.db_path, STORE_DIM).await?;
     // One embedder for the whole run (model load is the expensive part).
     let embedder = FastEmbedImpl::new()?;
+    let report_dir: PathBuf = match &opts.report_dir {
+        Some(d) => PathBuf::from(d),
+        None => Path::new(&opts.db_path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("reports"),
+    };
     let projects = match &opts.project_name {
         Some(p) => vec![p.clone()],
         None => store.list_projects().await?,
     };
     for project in projects {
-        build_for_project(&store, &embedder, &project).await?;
+        build_for_project(&store, &embedder, &project, &report_dir).await?;
     }
     Ok(())
+}
+
+/// Report path for one project inside the report dir; the project name is
+/// sanitized so it is always a valid single filename component.
+fn report_path(report_dir: &Path, project: &str) -> PathBuf {
+    let safe: String = project
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    report_dir.join(format!("architecture_{safe}.md"))
 }
 
 /// Detect communities + build ClusterChunks, and persist both, for one project.
@@ -84,6 +120,7 @@ async fn build_for_project(
     store: &VectorStore,
     embedder: &dyn Embedder,
     project: &str,
+    report_dir: &Path,
 ) -> Result<(), TopologyError> {
     let call_edges = store.get_all_edges(project).await?;
     let graph_edges = store.get_all_graph_edges(project).await?;
@@ -96,6 +133,11 @@ async fn build_for_project(
         .await?;
     store.delete_cluster_chunks_by_project(project).await?;
     if topo.is_empty() {
+        // Remove a stale report too — same truthfulness rule as the row deletes.
+        let stale = report_path(report_dir, project);
+        if stale.exists() {
+            std::fs::remove_file(&stale)?;
+        }
         info!("topology: no edges for project '{project}' — skipped");
         return Ok(());
     }
@@ -144,6 +186,18 @@ async fn build_for_project(
             .upsert_cluster_chunks(&cluster_chunks, embeddings)
             .await?;
     }
+
+    // R4: structural analytics + architecture report. Derived data — computed
+    // fresh each run from what is already in scope, rendered pure, written as
+    // one markdown artifact per project.
+    let a = analytics::compute(project, &topo, &results, &graph_edges, &members);
+    let lines = analytics::community_lines(project, &topo, &cluster_chunks, &members);
+    let questions = report::suggested_questions(&a, &lines);
+    let md = report::render_markdown(project, &a, &lines, &questions);
+    std::fs::create_dir_all(report_dir)?;
+    let path = report_path(report_dir, project);
+    std::fs::write(&path, md)?;
+    info!("topology: wrote architecture report {}", path.display());
 
     info!(
         "topology: {count} chunks in {n_communities} communities, {} cluster chunks (project '{project}')",

@@ -90,6 +90,21 @@ impl WeightedGraph {
         self.degree[i]
     }
 
+    /// Every undirected edge once as `(u, v, w)` with `u <= v`, in ascending
+    /// `(u, v)` order (adjacency is sorted) — deterministic. Self-loops appear
+    /// as `(i, i, w)`; callers that don't want them filter.
+    pub fn edges(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        self.adjacency
+            .iter()
+            .enumerate()
+            .flat_map(|(i, neigh)| {
+                neigh
+                    .iter()
+                    .filter(move |&&(j, _)| j >= i)
+                    .map(move |&(j, w)| (i, j, w))
+            })
+    }
+
     /// Number of distinct undirected edges among `members` (self-loops ignored).
     /// Used for cohesion scoring.
     pub fn intra_edge_count(&self, members: &std::collections::HashSet<usize>) -> usize {

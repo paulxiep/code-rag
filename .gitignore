@@ -1,5 +1,11 @@
 /target
 /data/*
+
+# Historical per-milestone design docs (tracks A/B/C, shipped 2026-04..05);
+# kept local-only — R.md is the pattern for tracked milestone specs.
+/A[1-5].md
+/B[1-5].md
+/C[1-5].md
 !/data/reports/
 /data/reports/*.json
 /cache
