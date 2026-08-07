@@ -17,10 +17,10 @@
 //!   one inside a thick, expected seam. A tunable heuristic, kept next to the
 //!   caps below.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use code_rag_engine::centrality::degree_centrality;
-use code_rag_types::{ClusterChunk, CodeChunk, GraphEdge};
+use code_rag_types::{CallEdge, ClusterChunk, CodeChunk, EdgeRelation, GraphEdge};
 
 use crate::betweenness::edge_betweenness;
 use crate::cluster::CommunityResult;
@@ -64,6 +64,10 @@ pub struct Bridge {
     /// Distinct topology edges between this community pair.
     pub pair_edge_count: usize,
     pub surprise: f64,
+    /// Provenance: sorted, deduped relation tags of the underlying edges
+    /// (`calls`, `imports`, `references`, `rationale_for`, …). Every reported
+    /// bridge states *what* it is — an unexplainable edge is a bug.
+    pub relations: Vec<&'static str>,
 }
 
 /// One community row for the report (size, cohesion, concern).
@@ -101,6 +105,7 @@ pub fn compute(
     project: &str,
     topo: &Topology,
     results: &[CommunityResult],
+    call_edges: &[CallEdge],
     graph_edges: &[GraphEdge],
     members: &HashMap<String, CodeChunk>,
 ) -> ProjectAnalytics {
@@ -187,12 +192,23 @@ pub fn compute(
         }
     }
 
+    // Provenance: relation tags per unordered chunk-id pair, from the raw
+    // edges (same keep-rules as Topology::build), so every reported bridge
+    // can state what it actually is.
+    let relations_of = edge_relations(call_edges, graph_edges);
+
     let bc = edge_betweenness(g);
     let mut bridges: Vec<Bridge> = cross
         .into_iter()
         .map(|(u, v, w, pair)| {
             let betweenness = bc.get(&(u.min(v), u.max(v))).copied().unwrap_or(0.0);
             let pair_edge_count = pair_counts[&pair];
+            let (a, b) = (topo.ids[u].as_str(), topo.ids[v].as_str());
+            let key = (a.min(b).to_string(), a.max(b).to_string());
+            let relations: Vec<&'static str> = relations_of
+                .get(&key)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
             Bridge {
                 source: label(u),
                 target: label(v),
@@ -201,6 +217,7 @@ pub fn compute(
                 communities: pair,
                 pair_edge_count,
                 surprise: betweenness * w / pair_edge_count as f64,
+                relations,
             }
         })
         .collect();
@@ -309,6 +326,36 @@ fn lift_communities(topo: &Topology, results: &[CommunityResult]) -> Vec<Option<
     community_of
 }
 
+/// Relation tags per unordered chunk-id pair, mirroring `Topology::build`'s
+/// keep-rules (calls from `call_edges`; graph edges minus projected `Calls`,
+/// self-edges and folder-level `Contains`). `BTreeSet` → sorted, deduped tags.
+fn edge_relations(
+    call_edges: &[CallEdge],
+    graph_edges: &[GraphEdge],
+) -> HashMap<(String, String), BTreeSet<&'static str>> {
+    let mut map: HashMap<(String, String), BTreeSet<&'static str>> = HashMap::new();
+    let key = |a: &str, b: &str| (a.min(b).to_string(), a.max(b).to_string());
+    for e in call_edges {
+        if e.caller_chunk_id != e.callee_chunk_id {
+            map.entry(key(&e.caller_chunk_id, &e.callee_chunk_id))
+                .or_default()
+                .insert("calls");
+        }
+    }
+    for e in graph_edges {
+        if e.source_chunk_id == e.target_chunk_id || e.relation == EdgeRelation::Calls {
+            continue;
+        }
+        if e.relation == EdgeRelation::Contains && e.source_file != e.target_file {
+            continue; // folder-level containment — not a topology edge
+        }
+        map.entry(key(&e.source_chunk_id, &e.target_chunk_id))
+            .or_default()
+            .insert(e.relation.as_str());
+    }
+    map
+}
+
 /// chunk_id → (identifier, file) harvested from graph-edge records.
 fn edge_labels(graph_edges: &[GraphEdge]) -> HashMap<&str, (&str, &str)> {
     let mut map: HashMap<&str, (&str, &str)> = HashMap::new();
@@ -397,7 +444,7 @@ mod tests {
         let (calls, graph_edges, members) = fixture();
         let topo = Topology::build(&calls, &graph_edges);
         let results = cluster::detect(&topo);
-        let a = compute("p", &topo, &results, &graph_edges, &members);
+        let a = compute("p", &topo, &results, &calls, &graph_edges, &members);
 
         assert_eq!(a.node_count, 6);
         assert_eq!(a.edge_count, 7);
@@ -410,6 +457,8 @@ mod tests {
         let top_s = &a.surprising[0];
         assert_eq!(top_s.source.chunk_id, top.source.chunk_id);
         assert!(top_s.surprise > 0.0);
+        // Provenance: the bridge states what it is.
+        assert_eq!(top.relations, vec!["calls"]);
         assert!(a.cycles.is_empty());
     }
 
@@ -424,7 +473,7 @@ mod tests {
         members.insert("FILE".to_string(), code("FILE", "src/x.rs"));
         let topo = Topology::build(&calls, &graph_edges);
         let results = cluster::detect(&topo);
-        let a = compute("p", &topo, &results, &graph_edges, &members);
+        let a = compute("p", &topo, &results, &calls, &graph_edges, &members);
         assert!(a.central_nodes.iter().all(|c| c.chunk_id != "FILE"));
         assert!(!a.central_nodes.is_empty());
         // Members carry labels through.
@@ -439,7 +488,7 @@ mod tests {
         members.get_mut("a").unwrap().project_name = "other".into();
         let topo = Topology::build(&calls, &graph_edges);
         let results = cluster::detect(&topo);
-        let a = compute("p", &topo, &results, &graph_edges, &members);
+        let a = compute("p", &topo, &results, &calls, &graph_edges, &members);
         assert!(a.central_nodes.iter().all(|c| c.chunk_id != "a"));
         assert_eq!(a.central_nodes.len(), 5);
     }

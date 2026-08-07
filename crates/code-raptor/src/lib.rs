@@ -197,7 +197,7 @@ async fn build_for_project(
     // R4: structural analytics + architecture report. Derived data — computed
     // fresh each run from what is already in scope, rendered pure, written as
     // one markdown artifact per project.
-    let a = analytics::compute(project, &topo, &results, &graph_edges, &members);
+    let a = analytics::compute(project, &topo, &results, &call_edges, &graph_edges, &members);
     let lines = analytics::community_lines(project, &topo, &cluster_chunks, &members);
     let questions = report::suggested_questions(&a, &lines);
     let md = report::render_markdown(project, &a, &lines, &questions);

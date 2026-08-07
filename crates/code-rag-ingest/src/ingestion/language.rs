@@ -170,11 +170,19 @@ pub(crate) fn collect_type_idents(
 }
 
 /// Track R (R1): scan the comment lines immediately preceding a definition for
-/// `NOTE:` / `WHY:` / `HACK:` rationale markers, returning identifier-like tokens
-/// mentioned there. High-precision: only CamelCase or snake_case tokens (len ≥ 4)
-/// qualify, and target resolution further drops any that aren't project symbols —
-/// so a comment like `// WHY: needed because Reranker stalls` yields `Reranker`
-/// but not prose words. Language-agnostic: keys off the marker, not comment syntax.
+/// rationale markers (the `NOTE` / `WHY` / `HACK` words, colon-suffixed),
+/// returning identifier-like tokens mentioned *after* the marker.
+///
+/// **Anchored:** a marker only counts when it begins the comment's text —
+/// comment leader stripped, then the marker must be the first thing on the
+/// line. A marker quoted mid-sentence (prose, or a doc example describing the
+/// convention) never fires; an earlier version matched anywhere in the line
+/// and famously linked this very function to `Reranker` by scanning its own
+/// doc example when code-rag ingested itself.
+///
+/// High-precision: only CamelCase or snake_case tokens (len ≥ 4) after the
+/// marker qualify, and target resolution further drops any that aren't
+/// project symbols. Language-agnostic: keys off the marker, not comment syntax.
 pub(crate) fn extract_rationale_targets(source: &str, def_start_row: usize) -> Vec<String> {
     if def_start_row == 0 {
         return Vec::new();
@@ -188,16 +196,11 @@ pub(crate) fn extract_rationale_targets(source: &str, def_start_row: usize) -> V
         if line.is_empty() {
             continue;
         }
-        let is_comment = line.starts_with("//")
-            || line.starts_with('#')
-            || line.starts_with('*')
-            || line.starts_with("/*");
-        if !is_comment {
+        let Some(comment_text) = strip_comment_leader(line) else {
             break; // hit code — stop scanning the comment block
-        }
-        let upper = line.to_uppercase();
-        if upper.contains("NOTE:") || upper.contains("WHY:") || upper.contains("HACK:") {
-            for tok in line.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        };
+        if let Some(rationale) = strip_rationale_marker(comment_text) {
+            for tok in rationale.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
                 let is_identifier_like = tok.len() >= 4
                     && tok
                         .chars()
@@ -213,6 +216,30 @@ pub(crate) fn extract_rationale_targets(source: &str, def_start_row: usize) -> V
     found
 }
 
+/// Strip a comment leader (`///`, `//!`, `//`, `#`, `*`, `/*`) and following
+/// whitespace; None if the line isn't a comment.
+fn strip_comment_leader(line: &str) -> Option<&str> {
+    for leader in ["///", "//!", "//", "/*", "#", "*"] {
+        if let Some(rest) = line.strip_prefix(leader) {
+            return Some(rest.trim_start());
+        }
+    }
+    None
+}
+
+/// If the comment text *starts* with a rationale marker (case-insensitive
+/// `NOTE:` / `WHY:` / `HACK:`), return the text after the marker.
+fn strip_rationale_marker(text: &str) -> Option<&str> {
+    for marker in ["NOTE:", "WHY:", "HACK:"] {
+        if let Some(head) = text.get(..marker.len())
+            && head.eq_ignore_ascii_case(marker)
+        {
+            return Some(&text[marker.len()..]);
+        }
+    }
+    None
+}
+
 /// Shared helper: collect all descendant nodes whose kind is in `kinds` (the node
 /// itself is not matched). Used to find heritage clauses that may be nested under a
 /// wrapper node (e.g. TS `class_heritage`).
@@ -226,6 +253,70 @@ pub(crate) fn collect_nodes_by_kind<'a>(node: &Node<'a>, kinds: &[&str]) -> Vec<
         out.extend(collect_nodes_by_kind(&child, kinds));
     }
     out
+}
+
+#[cfg(test)]
+mod rationale_tests {
+    use super::extract_rationale_targets;
+
+    fn targets(source: &str) -> Vec<String> {
+        // Definition is always the last line of the fixture.
+        let def_row = source.lines().count() - 1;
+        extract_rationale_targets(source, def_row)
+    }
+
+    #[test]
+    fn anchored_marker_yields_identifiers_after_it() {
+        let src = "// WHY: needed because FooBar stalls\nfn f() {}";
+        assert_eq!(targets(src), vec!["FooBar"]);
+        let src = "# NOTE: uses snake_case_thing internally\ndef f():";
+        assert_eq!(targets(src), vec!["snake_case_thing"]);
+    }
+
+    #[test]
+    fn mid_line_marker_does_not_fire() {
+        // The self-trigger reproduction: a doc line *quoting* a marker example
+        // must not create rationale targets (this exact shape once linked the
+        // scanner to `Reranker` when code-rag ingested itself).
+        let src = "/// so a comment like `// WHY: needed because Reranker stalls` yields it\nfn f() {}";
+        assert!(targets(src).is_empty());
+    }
+
+    #[test]
+    fn marker_must_start_the_comment_text() {
+        // A marker preceded by prose does not anchor, so nothing on the line
+        // is scanned — not even identifier-like tokens after the colon.
+        let src = "// prose mentioning HACK: SomeType here\nfn f() {}";
+        assert!(targets(src).is_empty());
+    }
+
+    #[test]
+    fn only_anchored_lines_in_block_contribute() {
+        let src = "\
+// WHY: FirstTarget explains this
+// plain description line mentioning OtherType
+// NOTE: SecondTarget also relevant
+fn f() {}";
+        let mut got = targets(src);
+        got.sort();
+        assert_eq!(got, vec!["FirstTarget", "SecondTarget"]);
+    }
+
+    #[test]
+    fn scan_stops_at_code() {
+        let src = "\
+// WHY: UpperTarget unrelated
+let x = 1;
+// no marker here
+fn f() {}";
+        assert!(targets(src).is_empty());
+    }
+
+    #[test]
+    fn lowercase_prose_tokens_ignored() {
+        let src = "// NOTE: needed because the cache stalls sometimes\nfn f() {}";
+        assert!(targets(src).is_empty());
+    }
 }
 
 fn collect_type_idents_inner(

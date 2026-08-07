@@ -165,8 +165,10 @@ pub fn suggested_questions(
     }
     if let Some(b) = analytics.surprising.first() {
         out.push(format!(
-            "Why are `{}` and `{}` coupled across module boundaries?",
-            b.source.identifier, b.target.identifier
+            "Why are `{}` and `{}` coupled across module boundaries ({})?",
+            b.source.identifier,
+            b.target.identifier,
+            relation_tags(b),
         ));
     }
     if let Some(c) = analytics.cycles.first() {
@@ -186,23 +188,34 @@ fn write_bridge_table(
 ) {
     let _ = writeln!(
         w,
-        "| From | To | {score_header} | Weight | Communities | Pair edges |"
+        "| From | To | Relation | {score_header} | Weight | Communities | Pair edges |"
     );
-    let _ = writeln!(w, "|---|---|---|---|---|---|");
+    let _ = writeln!(w, "|---|---|---|---|---|---|---|");
     for b in bridges {
         let _ = writeln!(
             w,
-            "| `{}` ({}) | `{}` ({}) | {} | {} | {} ↔ {} | {} |",
+            "| `{}` ({}) | `{}` ({}) | {} | {} | {} | {} ↔ {} | {} |",
             code_str_or_dash(&b.source.identifier),
             text_or_dash(&b.source.file),
             code_str_or_dash(&b.target.identifier),
             text_or_dash(&b.target.file),
+            relation_tags(b),
             score(b),
             b.weight,
             b.communities.0,
             b.communities.1,
             b.pair_edge_count,
         );
+    }
+}
+
+/// A bridge's relation tags joined `calls+references`, `-` if unknown (a
+/// topology edge with no surviving raw-edge record would be a bug upstream).
+fn relation_tags(b: &Bridge) -> String {
+    if b.relations.is_empty() {
+        "-".to_string()
+    } else {
+        b.relations.join("+")
     }
 }
 
@@ -279,7 +292,7 @@ mod tests {
         let topo = Topology::build(&calls, &[]);
         let results = cluster::detect(&topo);
         let ccs = crate::clusterchunk::build_cluster_chunks("p", &topo, &results, &members, &calls, &[]);
-        let analytics = compute("p", &topo, &results, &[], &members);
+        let analytics = compute("p", &topo, &results, &calls, &[], &members);
         let lines = crate::analytics::community_lines("p", &topo, &ccs, &members);
         let questions = suggested_questions(&analytics, &lines);
         render_markdown("p", &analytics, &lines, &questions)
@@ -303,6 +316,9 @@ mod tests {
         assert!(md.contains("None detected"));
         // Central identifiers surface with their member labels.
         assert!(md.contains("`fn_"));
+        // Every bridge row states its relation provenance.
+        assert!(md.contains("| Relation |"));
+        assert!(md.contains("| calls |"));
     }
 
     #[test]
@@ -315,6 +331,7 @@ mod tests {
         let analytics = compute(
             "empty",
             &Topology::build(&[], &[]),
+            &[],
             &[],
             &[],
             &HashMap::new(),

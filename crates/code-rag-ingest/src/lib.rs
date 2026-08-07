@@ -4,6 +4,7 @@
 //! For embedding and storage, it uses the shared coderag-store crate.
 
 pub mod edge_resolution;
+pub mod import_match;
 pub mod ingestion;
 pub mod orchestrate;
 

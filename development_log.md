@@ -1,5 +1,104 @@
 # Development Log
 
+## 2026-08-07: Rationale-scanner anchoring + relation provenance in the architecture report
+
+### The Reranker bridge, explained
+
+The `Reranker ↔ extract_rationale_targets` top "surprising connection" in
+code-rag's own report — flagged as unexplained after the import-match rewrite —
+is a self-referential false positive: **the R1 rationale scanner matched the
+`WHY:` inside its own doc comment's example.**
+[extract_rationale_targets](crates/code-rag-ingest/src/ingestion/language.rs)
+scans comment lines above a definition for `NOTE:`/`WHY:`/`HACK:`; its own doc
+contained `` `// WHY: needed because Reranker stalls` `` as an *example*, the
+marker check was `contains(…)` (unanchored), the token scan extracted
+`Reranker`, and tier-3 resolution found the unique project `Reranker`
+(seams.rs) → a `RationaleFor` edge from the scanner to the trait. The report
+compounded the mystery by not showing edge relations, and undirected bridge
+rendering obscured the direction.
+
+### Fixes (one incidental, one structural)
+
+- **Anchored marker rule** (same philosophy as the import-match rewrite): a
+  marker only counts when it *starts* the comment's text (leader `///`/`//!`/
+  `//`/`/*`/`#`/`*` stripped), and identifier tokens are extracted only from
+  the text *after* the marker — quoted/mid-sentence markers and the marker
+  words themselves can never produce targets. 6 new tests incl. the exact
+  self-trigger reproduction.
+- **Relation provenance on every reported bridge** — the structural guarantee
+  that no future edge is unexplainable at a glance: `Bridge.relations`
+  ([analytics.rs](crates/code-raptor/src/analytics.rs), built from the raw
+  call/graph edges with the topology's keep-rules) renders as a **Relation**
+  column in both bridge tables and inside the "Why are X and Y coupled (…)?"
+  suggested question.
+
+### Verification
+
+Re-ingest + report regeneration: the false bridge is gone from
+`architecture_code-rag.md`; every bridge row now reads `imports` /
+`re_exports` / `references` / `calls` — e.g. the new top bridge
+(`LanguageHandler ↔ ingestion/mod.rs`, `re_exports`) explains itself. Harness
+pair `post_rationale_anchor(_gt)_8064e31` vs `post_importmatch(_gt)_a099872`:
+flat (aggregate 0.60/0.69/0.72 vs 0.61/0.69/0.72; the only moving cell is
+overview@5 −3pp ≈ 1 query with @pool flat — rank jitter, again partly
+self-referential since this change edits code-rag's own corpus). All 178
+ingest + 30 raptor tests green; workspace build green.
+
+---
+
+## 2026-08-07: Language-aware anchored import matching + EdgeConfidence::Ambiguous removed
+
+### Why
+
+Follow-up to the project-scoping fix, pulled ahead of R5 because tier-2 import
+matching was undocumented and partly broken. The old `path_matches_import` was
+a single Rust-tuned normalization (strip `crate::`/`super::`/`self::`, `::`→`/`,
+blanket `.`→`/`) plus an **unanchored `contains` fallback**. Consequences,
+verified per language: TS relative specifiers (`./x`) normalized to `//x` and
+**never matched at all**; Go never matched (no `.go` check, domain dots
+mangled); Rust `super::foo` matched *any* `foo.rs` in the project; Python
+`from . import x` normalized to `"/"` and matched **every file** (tier-3
+resolutions mis-tagged tier-2/`Extracted`); cross-crate `code_rag_types` missed
+`code-rag-types/src/lib.rs` (underscore/hyphen).
+
+### Fix
+
+- **New [import_match.rs](crates/code-rag-ingest/src/import_match.rs)** — one
+  documented, anchored rule per language, dispatched on the *importing* file's
+  extension; no substring heuristics; external specifiers (stdlib, npm, Go
+  domain paths) match nothing by design. Rust: `crate::` anchored suffixes,
+  module-aware `super::`/`self::` (a file is a child of its directory module),
+  workspace-crate `<name>/src/…` with `_`/`-` interchange. Python: anchored
+  dotted paths + dot-relative resolution from the source package. TS: `./`/`../`
+  joined to the source dir (`.js` specifier → `.ts` file, `/index.ts(x)`
+  variants); bare/scoped specifiers are external. Go: ≥2-segment package-dir
+  suffix with module-prefix stripping. 12 matcher tests + first-ever TS and Go
+  end-to-end resolution tests (172 ingest tests total).
+- **`EdgeConfidence::Ambiguous` removed**
+  ([types](crates/code-rag-types/src/lib.rs)): never constructed anywhere —
+  ambiguity produces *no edge* by design, so nothing could carry the tag; and
+  confidence is currently written-but-never-read downstream. `from_tag` falls
+  back to `Inferred` for unknown tags, so old rows are safe. Deviation from
+  R.md §4 R1's original enum noted here.
+
+### Measurement (same purged 6-project corpus as `post_projscope_clean` — first unconfounded comparison)
+
+`post_importmatch(_gt)_a099872` vs `post_projscope_clean(_gt)_dc86662`,
+`--rerank --hybrid`: **flat everywhere** — aggregate 0.61/0.69/0.72 (Δ 0/−0.01/0),
+relationship GT 0.49/0.60/0.60 unchanged, comparison + implementation unchanged.
+The one moving cell is overview recall@10 −4pp (~1 query slid from rank ≤10 to
+>10; its @5 and @pool are flat, so retrieval still finds the chunks — rank
+jitter, partly self-referential: this change edits code-rag's own corpus).
+Expected: the recall dataset is Rust-centric, so the matcher's wins show in the
+*graph*, not recall — code-rag topology 1951→2205 edges (better cross-crate +
+`super::` anchoring, plus the new module's own code), and TS-heavy concurrens
+now has a 3100-node / 7882-edge topology with working relative-import edges.
+Curiosity kept for later: the `Reranker ↔ extract_rationale_targets` top
+surprise bridge survived the rewrite, so it is a real edge, not a matching
+artifact.
+
+---
+
 ## 2026-08-06: Project-scoped edge resolution (R1 leak fix) + purge subcommand
 
 ### Root cause

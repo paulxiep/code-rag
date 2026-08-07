@@ -251,13 +251,14 @@ impl EdgeContext {
 }
 
 /// Track R (R1): how confidently an edge was derived. Mirrors C1's tiered
-/// resolution: `Extracted` = AST-direct, `Inferred` = heuristic/unique-global,
-/// `Ambiguous` = multiple candidates with no disambiguating evidence.
+/// resolution: `Extracted` = anchored evidence (same-file or import match,
+/// tiers 1-2), `Inferred` = unique-within-project (tier 3). A resolution with
+/// multiple candidates and no disambiguating evidence produces *no edge* —
+/// which is why there is no `Ambiguous` variant.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeConfidence {
     Extracted,
     Inferred,
-    Ambiguous,
 }
 
 impl EdgeConfidence {
@@ -265,7 +266,6 @@ impl EdgeConfidence {
         match self {
             EdgeConfidence::Extracted => "extracted",
             EdgeConfidence::Inferred => "inferred",
-            EdgeConfidence::Ambiguous => "ambiguous",
         }
     }
 
@@ -273,7 +273,6 @@ impl EdgeConfidence {
         Some(match s {
             "extracted" => EdgeConfidence::Extracted,
             "inferred" => EdgeConfidence::Inferred,
-            "ambiguous" => EdgeConfidence::Ambiguous,
             _ => return None,
         })
     }

@@ -17,6 +17,7 @@ use code_rag_types::{
     GraphEdge, content_hash,
 };
 
+use crate::import_match::import_matches;
 use crate::ingestion::language::{ImportInfo, TypeRelation};
 
 /// `(project, identifier) → [(chunk_id, file_path)]` — the project key is what
@@ -280,19 +281,13 @@ pub fn resolve_edges(
                 && let Some(source_path) = file_imports.get(callee_id.as_str())
             {
                 // Find candidates whose file_path matches the resolved import source
-                let import_matches: Vec<_> = non_self
+                let matched: Vec<_> = non_self
                     .iter()
-                    .filter(|(_, fp)| path_matches_import(fp, source_path))
+                    .filter(|(_, fp)| import_matches(fp, source_path, &caller.file_path))
                     .collect();
 
-                if import_matches.len() == 1 {
-                    edges.push(make_edge(
-                        caller,
-                        import_matches[0].0,
-                        callee_id,
-                        import_matches[0].1,
-                        2,
-                    ));
+                if matched.len() == 1 {
+                    edges.push(make_edge(caller, matched[0].0, callee_id, matched[0].1, 2));
                     continue;
                 }
             }
@@ -436,12 +431,12 @@ fn resolve_target<'a>(
     if let Some(file_imports) = import_lookup.get(source_file)
         && let Some(src_path) = file_imports.get(target_name)
     {
-        let import_matches: Vec<_> = non_self
+        let matched: Vec<_> = non_self
             .iter()
-            .filter(|(_, fp)| path_matches_import(fp, src_path))
+            .filter(|(_, fp)| import_matches(fp, src_path, source_file))
             .collect();
-        if import_matches.len() == 1 {
-            return Some((import_matches[0].0, import_matches[0].1, 2));
+        if matched.len() == 1 {
+            return Some((matched[0].0, matched[0].1, 2));
         }
     }
 
@@ -451,42 +446,6 @@ fn resolve_target<'a>(
     }
 
     None // ambiguous
-}
-
-/// Check if a file path matches a Rust import source path.
-/// E.g., `source_path = "crate::ingestion::parser"` should match
-/// `file_path = "src/ingestion/parser.rs"` or `"src/ingestion/parser/mod.rs"`.
-fn path_matches_import(file_path: &str, source_path: &str) -> bool {
-    // Strip crate prefix and convert :: to /
-    let normalized = source_path
-        .trim_start_matches("crate::")
-        .trim_start_matches("super::")
-        .trim_start_matches("self::")
-        .replace("::", "/")
-        .replace('.', "/"); // Python dots
-
-    // Check if the file path ends with the normalized import path
-    // Rust: src/module.rs or src/module/mod.rs
-    // Python: module.py or module/__init__.py
-    let checks = [
-        format!("{}.rs", normalized),
-        format!("{}/mod.rs", normalized),
-        format!("{}.py", normalized),
-        format!("{}/__init__.py", normalized),
-        format!("{}.ts", normalized),
-        format!("{}.tsx", normalized),
-        format!("{}/index.ts", normalized),
-        format!("{}/index.tsx", normalized),
-    ];
-
-    for check in &checks {
-        if file_path.ends_with(check.as_str()) || file_path == check.as_str() {
-            return true;
-        }
-    }
-
-    // Also check if import path directly matches file path (without extension mapping)
-    file_path.contains(&normalized)
 }
 
 fn make_edge(
@@ -736,25 +695,50 @@ mod tests {
     }
 
     #[test]
-    fn test_path_matches_import_rust() {
-        assert!(path_matches_import(
-            "src/ingestion/parser.rs",
-            "crate::ingestion::parser"
-        ));
-        assert!(path_matches_import(
-            "src/ingestion/parser/mod.rs",
-            "crate::ingestion::parser"
-        ));
-        assert!(!path_matches_import(
-            "src/other/parser.rs",
-            "crate::ingestion::parser"
-        ));
+    fn test_ts_relative_import_resolution() {
+        // `formatDate` exists twice; App.tsx imports './utils/format', which
+        // must pick the utils one at tier 2. (Was impossible before the
+        // import_match rewrite — TS relative specifiers never matched.)
+        let chunks = vec![
+            make_chunk("c_app", "App", "web/src/App.tsx"),
+            make_chunk("c_fmt1", "formatDate", "web/src/utils/format.ts"),
+            make_chunk("c_fmt2", "formatDate", "web/src/other/format.ts"),
+        ];
+        let mut calls_map = HashMap::new();
+        calls_map.insert("c_app".into(), vec!["formatDate".into()]);
+        let mut imports_map = HashMap::new();
+        imports_map.insert(
+            "web/src/App.tsx".into(),
+            vec![ImportInfo::import("formatDate", "./utils/format")],
+        );
+
+        let edges = resolve_edges(&chunks, &calls_map, &imports_map);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].callee_chunk_id, "c_fmt1");
+        assert_eq!(edges[0].resolution_tier, 2);
     }
 
     #[test]
-    fn test_path_matches_import_python() {
-        assert!(path_matches_import("utils/helper.py", "utils.helper"));
-        assert!(!path_matches_import("other/helper.py", "utils.helper"));
+    fn test_go_import_edge_resolution() {
+        use code_rag_types::EdgeRelation;
+        // `NewStore` exists twice; main.go imports the store package path,
+        // which disambiguates to the file inside that directory at tier 2.
+        let code = vec![
+            make_chunk("c_store", "NewStore", "myapp/internal/store/store.go"),
+            make_chunk("c_other", "NewStore", "myapp/cmd/other.go"),
+        ];
+        let files = vec![make_file_chunk("c_main_file", "myapp/cmd/main.go")];
+        let mut imports = HashMap::new();
+        imports.insert(
+            "myapp/cmd/main.go".to_string(),
+            vec![ImportInfo::import("NewStore", "myapp/internal/store")],
+        );
+
+        let edges = build_import_edges(&code, &files, &imports);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relation, EdgeRelation::Imports);
+        assert_eq!(edges[0].target_chunk_id, "c_store");
+        assert_eq!(edges[0].confidence, EdgeConfidence::Extracted);
     }
 
     // ---- Track R (R1): type-relation resolution ----

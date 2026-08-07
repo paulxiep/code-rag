@@ -172,7 +172,9 @@ retrieval and clustering have a real topology to work on.
     None }` — an optional tag carried on `References` edges so a type reference
     records *where* it occurs.
   - `EdgeConfidence { Extracted, Inferred, Ambiguous }`. Deterministic,
-    relation-aware `edge_id`.
+    relation-aware `edge_id`. *(2026-08-07: `Ambiguous` removed — ambiguity
+    yields no edge by design, so the variant could never be constructed; see
+    development_log.md.)*
   - `calls` edges are **not** duplicated here — they are projected from the
     existing `call_edges` table at topology-build time, so C1/C2's call-specific
     `resolution_tier` semantics stay intact.
@@ -200,7 +202,10 @@ retrieval and clustering have a real topology to work on.
     to a follow-up without blocking the topology.
   - Resolve targets with the existing identifier index + per-file imports
     (reuse `edge_resolution.rs`); tag `Extracted` for AST-direct, `Inferred` for
-    heuristic/unique-global, `Ambiguous` otherwise.
+    heuristic/unique-global, `Ambiguous` otherwise. *(2026-08-07: tier-2 import
+    matching rewritten as documented per-language anchored rules —
+    `import_match.rs`; skipped-not-tagged ambiguity means no `Ambiguous`
+    variant.)*
 - **Storage (`code-rag-store`).** New `graph_edges` scalar table (no vectors),
   upsert/query mirroring `call_edges`; `relation` / `context` / `confidence`
   stored as their string tags.
