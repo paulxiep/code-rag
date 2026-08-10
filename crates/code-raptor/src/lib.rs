@@ -20,9 +20,14 @@ mod betweenness;
 mod cluster;
 mod clusterchunk;
 mod cycles;
+mod drift;
+mod graph_model;
+mod graphml;
+pub mod insights;
 mod louvain;
 mod report;
 mod topology;
+mod viz;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -64,6 +69,10 @@ pub struct TopologyOpts {
     /// parent>/reports`, which with the default db path lands next to the
     /// harness report family in `data/reports/`.
     pub report_dir: Option<String>,
+    /// Directory the R5 viz + GraphML artifacts are written to (one
+    /// `graph_viz_<project>.json` + `topology_<project>.graphml` per project).
+    /// `None` → `<db_path parent>/viz`.
+    pub viz_dir: Option<String>,
 }
 
 /// Build (or refresh) the topology for an already-ingested index.
@@ -86,12 +95,16 @@ pub async fn build_topology(opts: TopologyOpts) -> Result<(), TopologyError> {
         Some(d) => PathBuf::from(d),
         None => default_report_dir(&opts.db_path),
     };
+    let viz_dir: PathBuf = match &opts.viz_dir {
+        Some(d) => PathBuf::from(d),
+        None => default_viz_dir(&opts.db_path),
+    };
     let projects = match &opts.project_name {
         Some(p) => vec![p.clone()],
         None => store.list_projects().await?,
     };
     for project in projects {
-        build_for_project(&store, &embedder, &project, &report_dir).await?;
+        build_for_project(&store, &embedder, &project, &report_dir, &viz_dir).await?;
     }
     Ok(())
 }
@@ -104,12 +117,18 @@ pub fn default_report_dir(db_path: &str) -> PathBuf {
         .join("reports")
 }
 
-/// Report path for one project inside the report dir; the project name is
-/// sanitized so it is always a valid single filename component. Public so
-/// project-removal tooling (`code-rag-ingest purge`) can delete the artifact
-/// this crate emits.
-pub fn report_path(report_dir: &Path, project: &str) -> PathBuf {
-    let safe: String = project
+/// Default viz/GraphML artifact directory for a db path (`<db parent>/viz`).
+pub fn default_viz_dir(db_path: &str) -> PathBuf {
+    Path::new(db_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("viz")
+}
+
+/// A project name reduced to a valid single filename component. The UI's
+/// `viz_data.rs` mirrors this rule to build fetch URLs — keep them in sync.
+fn sanitize_project(project: &str) -> String {
+    project
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
@@ -118,8 +137,24 @@ pub fn report_path(report_dir: &Path, project: &str) -> PathBuf {
                 '_'
             }
         })
-        .collect();
-    report_dir.join(format!("architecture_{safe}.md"))
+        .collect()
+}
+
+/// Report path for one project inside the report dir. Public so
+/// project-removal tooling (`code-rag-ingest purge`) can delete the artifact
+/// this crate emits — same for [`viz_path`] / [`graphml_path`].
+pub fn report_path(report_dir: &Path, project: &str) -> PathBuf {
+    report_dir.join(format!("architecture_{}.md", sanitize_project(project)))
+}
+
+/// Browser viz artifact path for one project inside the viz dir.
+pub fn viz_path(viz_dir: &Path, project: &str) -> PathBuf {
+    viz_dir.join(format!("graph_viz_{}.json", sanitize_project(project)))
+}
+
+/// GraphML artifact path for one project inside the viz dir.
+pub fn graphml_path(viz_dir: &Path, project: &str) -> PathBuf {
+    viz_dir.join(format!("topology_{}.graphml", sanitize_project(project)))
 }
 
 /// Detect communities + build ClusterChunks, and persist both, for one project.
@@ -128,6 +163,7 @@ async fn build_for_project(
     embedder: &dyn Embedder,
     project: &str,
     report_dir: &Path,
+    viz_dir: &Path,
 ) -> Result<(), TopologyError> {
     let call_edges = store.get_all_edges(project).await?;
     let graph_edges = store.get_all_graph_edges(project).await?;
@@ -140,10 +176,15 @@ async fn build_for_project(
         .await?;
     store.delete_cluster_chunks_by_project(project).await?;
     if topo.is_empty() {
-        // Remove a stale report too — same truthfulness rule as the row deletes.
-        let stale = report_path(report_dir, project);
-        if stale.exists() {
-            std::fs::remove_file(&stale)?;
+        // Remove stale artifacts too — same truthfulness rule as the row deletes.
+        for stale in [
+            report_path(report_dir, project),
+            viz_path(viz_dir, project),
+            graphml_path(viz_dir, project),
+        ] {
+            if stale.exists() {
+                std::fs::remove_file(&stale)?;
+            }
         }
         info!("topology: no edges for project '{project}' — skipped");
         return Ok(());
@@ -197,14 +238,39 @@ async fn build_for_project(
     // R4: structural analytics + architecture report. Derived data — computed
     // fresh each run from what is already in scope, rendered pure, written as
     // one markdown artifact per project.
-    let a = analytics::compute(project, &topo, &results, &call_edges, &graph_edges, &members);
+    let a = analytics::compute(
+        project,
+        &topo,
+        &results,
+        &call_edges,
+        &graph_edges,
+        &members,
+    );
     let lines = analytics::community_lines(project, &topo, &cluster_chunks, &members);
-    let questions = report::suggested_questions(&a, &lines);
-    let md = report::render_markdown(project, &a, &lines, &questions);
+    // R5: emergent-vs-folder drift comparison, rendered into the report.
+    let drift = drift::compare(project, &results, &members);
+    let questions = report::suggested_questions(&a, &lines, &drift);
+    let md = report::render_markdown(project, &a, &lines, &drift, &questions);
     std::fs::create_dir_all(report_dir)?;
     let path = report_path(report_dir, project);
     std::fs::write(&path, md)?;
     info!("topology: wrote architecture report {}", path.display());
+
+    // R5: browser viz artifact (capped) + GraphML (full graph), from one
+    // shared export-graph assembly.
+    let export_graph =
+        graph_model::build_export_graph(&topo, &results, &members, &call_edges, &graph_edges);
+    let viz_file = viz::build_viz(project, &export_graph, &lines, viz::NODE_CAP, viz::EDGE_CAP);
+    std::fs::create_dir_all(viz_dir)?;
+    let vpath = viz_path(viz_dir, project);
+    std::fs::write(&vpath, viz::render_json(&viz_file))?;
+    let gpath = graphml_path(viz_dir, project);
+    std::fs::write(&gpath, graphml::render_graphml(project, &export_graph))?;
+    info!(
+        "topology: wrote viz artifacts {} + {}",
+        vpath.display(),
+        gpath.display()
+    );
 
     info!(
         "topology: {count} chunks in {n_communities} communities, {} cluster chunks (project '{project}')",

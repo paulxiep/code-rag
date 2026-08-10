@@ -241,6 +241,17 @@ pub trait VectorReader: Send + Sync {
         &self,
         project_name: &str,
     ) -> Result<Vec<code_rag_types::GraphEdge>, StoreError>;
+
+    // ---- Track R (R5): topology reads for the MCP topology tools ----
+    async fn get_community_assignments(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<code_rag_types::CommunityAssignment>, StoreError>;
+
+    async fn get_cluster_chunks(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<code_rag_types::ClusterChunk>, StoreError>;
 }
 
 // ---------- VectorWriter ----------

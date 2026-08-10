@@ -278,7 +278,8 @@ mod rationale_tests {
         // The self-trigger reproduction: a doc line *quoting* a marker example
         // must not create rationale targets (this exact shape once linked the
         // scanner to `Reranker` when code-rag ingested itself).
-        let src = "/// so a comment like `// WHY: needed because Reranker stalls` yields it\nfn f() {}";
+        let src =
+            "/// so a comment like `// WHY: needed because Reranker stalls` yields it\nfn f() {}";
         assert!(targets(src).is_empty());
     }
 

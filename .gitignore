@@ -15,6 +15,11 @@
 /.fastembed_cache
 /dist
 /crates/code-rag-ui/dist
+# R5 topology viz artifacts staged for the demo (CI-generated; local copies
+# come from data/viz for dev)
+/crates/code-rag-ui/static/viz/
+# Demo index bundle (CI-generated; local copies from `code-rag-ingest export`)
+/crates/code-rag-ui/static/index.json
 /models
 /.code-rag
 

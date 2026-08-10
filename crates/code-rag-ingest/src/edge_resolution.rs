@@ -243,11 +243,11 @@ pub fn resolve_edges(
         };
 
         for callee_id in callee_identifiers {
-            let candidates =
-                match id_index.get(&(caller.project_name.as_str(), callee_id.as_str())) {
-                    Some(c) => c,
-                    None => continue, // No chunk with this identifier in the caller's project
-                };
+            let candidates = match id_index.get(&(caller.project_name.as_str(), callee_id.as_str()))
+            {
+                Some(c) => c,
+                None => continue, // No chunk with this identifier in the caller's project
+            };
 
             // Skip self-edges (function calling itself)
             let non_self: Vec<_> = candidates

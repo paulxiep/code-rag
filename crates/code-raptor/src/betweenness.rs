@@ -147,7 +147,13 @@ mod tests {
     fn deterministic_across_runs() {
         let g = WeightedGraph::from_edges(
             5,
-            [(0, 1, 1.0), (1, 2, 2.0), (2, 3, 1.0), (3, 4, 1.0), (0, 4, 1.0)],
+            [
+                (0, 1, 1.0),
+                (1, 2, 2.0),
+                (2, 3, 1.0),
+                (3, 4, 1.0),
+                (0, 4, 1.0),
+            ],
         );
         assert_eq!(edge_betweenness(&g), edge_betweenness(&g));
     }

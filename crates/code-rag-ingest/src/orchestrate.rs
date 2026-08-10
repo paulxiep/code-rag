@@ -177,6 +177,7 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
                 _ => None,
             },
             report_dir: None,
+            viz_dir: None,
         })
         .await?;
     }
@@ -190,22 +191,31 @@ pub async fn ingest_repo(opts: IngestOpts) -> anyhow::Result<()> {
 
 /// Remove every trace of the given projects from the index: all chunk tables,
 /// call + graph edges, community assignments, cluster chunks, and the emitted
-/// architecture report. Needed for projects whose source repo no longer exists
+/// artifacts (architecture report, viz JSON, GraphML). Needed for projects
+/// whose source repo no longer exists
 /// on disk — a re-ingest can't see them, so it can never clean them up.
 pub async fn purge_projects(db_path: &str, projects: &[String]) -> anyhow::Result<()> {
     // Purge touches only scalar predicates, never creates a vector table, so
     // the dimension just satisfies the constructor (same as code-raptor).
     let store = VectorStore::new(db_path, 384).await?;
     let report_dir = code_raptor::default_report_dir(db_path);
+    let viz_dir = code_raptor::default_viz_dir(db_path);
     for project in projects {
         delete_project_from_all_tables(&store, project).await?;
         store.delete_edges_by_project(project).await?;
         store.delete_graph_edges_by_project(project).await?;
-        store.delete_community_assignments_by_project(project).await?;
+        store
+            .delete_community_assignments_by_project(project)
+            .await?;
         store.delete_cluster_chunks_by_project(project).await?;
-        let report = code_raptor::report_path(&report_dir, project);
-        if report.exists() {
-            std::fs::remove_file(&report)?;
+        for artifact in [
+            code_raptor::report_path(&report_dir, project),
+            code_raptor::viz_path(&viz_dir, project),
+            code_raptor::graphml_path(&viz_dir, project),
+        ] {
+            if artifact.exists() {
+                std::fs::remove_file(&artifact)?;
+            }
         }
         info!("Purged project '{project}' from the index");
     }

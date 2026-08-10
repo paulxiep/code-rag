@@ -1,5 +1,7 @@
 use super::retriever::{RetrievalResult, ScoredChunk};
-use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{
+    ClusterChunk, CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+};
 
 /// System prompt - instructs the LLM how to behave
 pub const SYSTEM_PROMPT: &str = r#"You are a helpful assistant answering questions about a developer's portfolio of coding projects.
@@ -24,6 +26,14 @@ pub fn build_context(result: &RetrievalResult) -> String {
     // crates, above module-doc/code. Empty when folder_limit=0 (A2 default).
     if !result.folder_chunks.is_empty() {
         sections.push(format_folder_section(&result.folder_chunks));
+    }
+
+    // R3: emergent-cluster summaries — subsystem granularity, between folder
+    // and file in the coarse→fine ordering. Empty when the cluster arm is
+    // gated off (cluster_limit=0, the R3 default), but whenever the arm
+    // retrieves, its summaries must reach the prompt like every other type.
+    if !result.cluster_chunks.is_empty() {
+        sections.push(format_cluster_section(&result.cluster_chunks));
     }
 
     // A4: file-level summaries — between folder and module_doc to preserve
@@ -141,6 +151,23 @@ fn format_folder_section(chunks: &[ScoredChunk<FolderChunk>]) -> String {
         out.push_str(&format!(
             "\n### `{}` ({})\n{}\n",
             chunk.folder_path, chunk.project_name, chunk.summary_text
+        ));
+    }
+
+    out
+}
+
+fn format_cluster_section(chunks: &[ScoredChunk<ClusterChunk>]) -> String {
+    let mut out = String::from("## Emergent Subsystems\n");
+
+    for scored in chunks {
+        let chunk = &scored.chunk;
+        // `summary_text` is already a complete template synopsis (size, key
+        // types/functions, files, cohesion, likely concern) — drop it in
+        // as-is, same as the folder section.
+        out.push_str(&format!(
+            "\n### `{}` ({})\n{}\n",
+            chunk.path, chunk.project_name, chunk.summary_text
         ));
     }
 
@@ -360,6 +387,77 @@ mod tests {
         assert!(context.contains("my_project/crates/engine/src"));
         assert!(context.contains("Retriever"));
         assert!(context.contains("(module: src)"));
+    }
+
+    fn sample_cluster_chunk() -> ClusterChunk {
+        ClusterChunk {
+            cluster_id: 0,
+            project_name: "my_project".into(),
+            path: "my_project/crates/engine/src".into(),
+            member_chunk_ids: vec!["a".into(), "b".into()],
+            files: vec!["my_project/crates/engine/src/lib.rs".into()],
+            key_types: vec!["Retriever".into()],
+            key_functions: vec!["retrieve".into()],
+            dominant_relation: "calls".into(),
+            cohesion: 0.4,
+            summary_text: "Cluster 0 (2 functions across 1 file): key types Retriever; key functions retrieve; dominant relation calls; cohesion 0.40; likely concern: retrieve".into(),
+            chunk_id: "cluster-id".into(),
+            content_hash: "cluster-hash".into(),
+            embedding_model_version: "BGESmallENV15_384".into(),
+        }
+    }
+
+    #[test]
+    fn test_build_context_with_clusters() {
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
+            cluster_chunks: vec![scored(sample_cluster_chunk(), 0.5)],
+            intent: QueryIntent::Overview,
+        };
+        let context = build_context(&result);
+        assert!(context.contains("## Emergent Subsystems"));
+        assert!(context.contains("my_project/crates/engine/src"));
+        assert!(context.contains("likely concern: retrieve"));
+    }
+
+    #[test]
+    fn test_build_context_cluster_between_folder_and_file() {
+        // Coarse→fine ordering: folder section before cluster, cluster before file.
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![scored(sample_folder_chunk(), 0.5)],
+            file_chunks: vec![],
+            cluster_chunks: vec![scored(sample_cluster_chunk(), 0.5)],
+            intent: QueryIntent::Overview,
+        };
+        let context = build_context(&result);
+        let folder_at = context.find("## Relevant Folders").unwrap();
+        let cluster_at = context.find("## Emergent Subsystems").unwrap();
+        assert!(folder_at < cluster_at);
+    }
+
+    #[test]
+    fn test_build_context_empty_clusters_omit_section() {
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![scored(sample_readme_chunk(), 0.8)],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
+            cluster_chunks: vec![],
+            intent: QueryIntent::Overview,
+        };
+        let context = build_context(&result);
+        assert!(!context.contains("## Emergent Subsystems"));
     }
 
     #[test]

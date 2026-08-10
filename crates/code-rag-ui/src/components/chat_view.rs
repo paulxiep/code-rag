@@ -113,6 +113,24 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
         }
     };
 
+    // R5: submit queries queued by the topology view (click-a-node). Waits out
+    // an in-flight query — the effect re-runs when `loading` flips false.
+    #[cfg(feature = "standalone")]
+    {
+        let pending = use_context::<crate::PendingQuery>().expect("PendingQuery context missing");
+        Effect::new(move |_| {
+            if pending.0.get().is_none() || loading.get() {
+                return;
+            }
+            let Some(q) = pending.0.get_untracked() else {
+                return;
+            };
+            pending.0.set(None);
+            set_input.set(q);
+            on_submit();
+        });
+    }
+
     view! {
         <div class="chat-container">
             <Show

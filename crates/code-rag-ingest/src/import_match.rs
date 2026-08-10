@@ -61,7 +61,10 @@ fn match_rust(candidate: &str, spec: &str, source_file: &str) -> bool {
         return ends_with_at_slash(candidate, &format!("{p}.rs"))
             || ends_with_at_slash(candidate, &format!("{p}/mod.rs"));
     }
-    if spec == "self" || spec == "super" || spec.starts_with("self::") || spec.starts_with("super::")
+    if spec == "self"
+        || spec == "super"
+        || spec.starts_with("self::")
+        || spec.starts_with("super::")
     {
         return match_rust_relative(candidate, spec, source_file).unwrap_or(false);
     }
@@ -167,8 +170,7 @@ fn match_python(candidate: &str, spec: &str, source_file: &str) -> bool {
         }
     }
     if rest.is_empty() {
-        return candidate == format!("{dir}/__init__.py")
-            || parent_dir(candidate) == Some(dir);
+        return candidate == format!("{dir}/__init__.py") || parent_dir(candidate) == Some(dir);
     }
     let expected = format!("{dir}/{}", rest.replace('.', "/"));
     candidate == format!("{expected}.py") || candidate == format!("{expected}/__init__.py")
@@ -232,7 +234,10 @@ fn match_go(candidate: &str, spec: &str) -> bool {
 // ---- shared path helpers (forward-slash, repo-relative) ----
 
 fn extension(path: &str) -> &str {
-    basename(path).rsplit_once('.').map(|(_, e)| e).unwrap_or("")
+    basename(path)
+        .rsplit_once('.')
+        .map(|(_, e)| e)
+        .unwrap_or("")
 }
 
 fn basename(path: &str) -> &str {
@@ -347,11 +352,7 @@ mod tests {
             "p/src/ingestion/mod.rs"
         ));
         // plain file c.rs: self::x → child at c/x.rs.
-        assert!(import_matches(
-            "p/src/c/x.rs",
-            "self::x",
-            "p/src/c.rs"
-        ));
+        assert!(import_matches("p/src/c/x.rs", "self::x", "p/src/c.rs"));
         assert!(!import_matches("p/src/x.rs", "self::x", "p/src/c.rs"));
     }
 
@@ -379,22 +380,42 @@ mod tests {
 
     #[test]
     fn python_absolute_dotted() {
-        assert!(import_matches("app/utils/helper.py", "utils.helper", "app/main.py"));
+        assert!(import_matches(
+            "app/utils/helper.py",
+            "utils.helper",
+            "app/main.py"
+        ));
         assert!(import_matches(
             "app/utils/helper/__init__.py",
             "utils.helper",
             "app/main.py"
         ));
-        assert!(!import_matches("app/other/helper.py", "utils.helper", "app/main.py"));
+        assert!(!import_matches(
+            "app/other/helper.py",
+            "utils.helper",
+            "app/main.py"
+        ));
     }
 
     #[test]
     fn python_relative_dots() {
         // .helpers from pkg/mod.py → pkg/helpers.py, not any helpers.py.
-        assert!(import_matches("app/pkg/helpers.py", ".helpers", "app/pkg/mod.py"));
-        assert!(!import_matches("app/other/helpers.py", ".helpers", "app/pkg/mod.py"));
+        assert!(import_matches(
+            "app/pkg/helpers.py",
+            ".helpers",
+            "app/pkg/mod.py"
+        ));
+        assert!(!import_matches(
+            "app/other/helpers.py",
+            ".helpers",
+            "app/pkg/mod.py"
+        ));
         // ..sub.mod walks up one package.
-        assert!(import_matches("app/sub/mod.py", "..sub.mod", "app/pkg/leaf.py"));
+        assert!(import_matches(
+            "app/sub/mod.py",
+            "..sub.mod",
+            "app/pkg/leaf.py"
+        ));
     }
 
     #[test]
@@ -434,7 +455,11 @@ mod tests {
 
     #[test]
     fn ts_bare_and_scoped_are_external() {
-        assert!(!import_matches("web/src/react.ts", "react", "web/src/App.tsx"));
+        assert!(!import_matches(
+            "web/src/react.ts",
+            "react",
+            "web/src/App.tsx"
+        ));
         assert!(!import_matches(
             "web/src/scope/pkg.ts",
             "@scope/pkg",
@@ -483,14 +508,26 @@ mod tests {
         ));
         // ≥2-segment remainder required: a bare `store` dir elsewhere must not
         // match `aaa/bbb/store`.
-        assert!(!import_matches("p/store/x.go", "aaa/bbb/store", "p/main.go"));
+        assert!(!import_matches(
+            "p/store/x.go",
+            "aaa/bbb/store",
+            "p/main.go"
+        ));
     }
 
     // ---- cross-language guards ----
 
     #[test]
     fn candidate_extension_must_match_language() {
-        assert!(!import_matches("app/utils/helper.py", "crate::utils::helper", "p/src/a.rs"));
-        assert!(!import_matches("p/src/utils/helper.rs", "utils.helper", "app/main.py"));
+        assert!(!import_matches(
+            "app/utils/helper.py",
+            "crate::utils::helper",
+            "p/src/a.rs"
+        ));
+        assert!(!import_matches(
+            "p/src/utils/helper.rs",
+            "utils.helper",
+            "app/main.py"
+        ));
     }
 }

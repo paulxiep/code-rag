@@ -123,7 +123,12 @@ pub fn find_import_cycles(graph_edges: &[GraphEdge]) -> Vec<Cycle> {
             files: c.into_iter().map(|v| files[v].to_string()).collect(),
         })
         .collect();
-    out.sort_by(|a, b| a.files.len().cmp(&b.files.len()).then_with(|| a.files.cmp(&b.files)));
+    out.sort_by(|a, b| {
+        a.files
+            .len()
+            .cmp(&b.files.len())
+            .then_with(|| a.files.cmp(&b.files))
+    });
     out
 }
 
@@ -245,7 +250,11 @@ mod tests {
 
     #[test]
     fn dag_has_no_cycles() {
-        let edges = vec![import("a.rs", "b.rs"), import("b.rs", "c.rs"), import("a.rs", "c.rs")];
+        let edges = vec![
+            import("a.rs", "b.rs"),
+            import("b.rs", "c.rs"),
+            import("a.rs", "c.rs"),
+        ];
         assert!(find_import_cycles(&edges).is_empty());
     }
 

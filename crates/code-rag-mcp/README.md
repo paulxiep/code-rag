@@ -1,12 +1,12 @@
 # code-rag-mcp
 
-An MCP server that exposes local semantic + graph retrieval over a single repository to Claude Code (and any other MCP client). Paired with a Claude Code Skill that routes the right questions to the right tool — Grep for exact strings, `code_rag_*` for "how does X work", "what calls X", and architecture/onboarding queries.
+An MCP server that exposes local semantic + graph retrieval over a single repository to Claude Code (and any other MCP client). Paired with a Claude Code Skill that routes the right questions to the right tool — Grep for exact strings, `code_rag_*` for "how does X work", "what calls X", architecture/onboarding queries, and topology insight ("what are the main subsystems", "any circular dependencies", "trace the call path from X to Y").
 
-Built on the [code-rag](../..) pipeline: intent classification, hybrid BM25 + BGE-small semantic search, cross-encoder reranking (ms-marco-MiniLM-L-6-v2), and a persisted call graph with 3-tier symbol resolution.
+Built on the [code-rag](../..) pipeline: intent classification, hybrid BM25 + BGE-small semantic search, cross-encoder reranking (ms-marco-MiniLM-L-6-v2), a persisted call graph with 3-tier symbol resolution, and an emergent-community topology (deterministic Louvain over calls + imports + type relations).
 
 ## What you get
 
-Five MCP tools, all prefixed `code_rag_`:
+Nine MCP tools, all prefixed `code_rag_`:
 
 | Tool | Purpose |
 |---|---|
@@ -14,9 +14,19 @@ Five MCP tools, all prefixed `code_rag_`:
 | `code_rag_graph(identifier, direction?)` | Callers / callees of a function |
 | `code_rag_overview(topic?)` | Forces Overview intent for architecture questions |
 | `code_rag_neighbors(chunk_id, window?)` | Expand a prior hit's source window |
-| `code_rag_reindex()` | Full re-ingest of the repo |
+| `code_rag_reindex(mode?)` | Re-ingest the repo (incremental by default) |
+| `code_rag_communities(project?)` | Emergent modules + drift vs the folder layout |
+| `code_rag_central_nodes(project?, limit?)` | Most-connected definitions — "read these first" |
+| `code_rag_cycles(project?)` | Circular dependencies in the import graph |
+| `code_rag_path(from, to)` | Shortest call chain between two functions, with a Mermaid flowchart |
 
 Plus a bundled Claude Code [skill](skills/code-rag.md) that tells Claude when to reach for each.
+
+### Architecture insight
+
+The four topology tools answer structural questions vector search can't: `code_rag_communities` shows the *emergent* modules your code actually forms (detected from the dependency structure, deliberately blind to the folder tree) and where they diverge from your directory layout; `code_rag_central_nodes` ranks the definitions to read first; `code_rag_cycles` finds circular imports; `code_rag_path` traces call chains and returns a Mermaid diagram Claude can drop straight into its answer.
+
+Ingest also writes standalone artifacts you can open yourself: a per-project architecture report at `.code-rag-mcp/reports/architecture_<project>.md` (central nodes, cross-module bridges, surprising connections, dependency cycles, emergent-vs-folder drift) and a `topology_<project>.graphml` under `.code-rag-mcp/viz/` that loads in Gephi or yEd for offline graph exploration. Both are deterministic — identical bytes for an unchanged codebase.
 
 ## Prerequisites
 
@@ -98,11 +108,11 @@ Or disable the reranker entirely with `--no-rerank` (recall drops ~5 points but 
 
 ## Supported languages
 
-The ingestion pipeline uses tree-sitter parsers for Rust, Python, TypeScript, and JavaScript. Other languages are silently skipped. READMEs and folder-level summaries are language-agnostic.
+The ingestion pipeline uses tree-sitter parsers for Rust, Python, TypeScript (incl. TSX/JS), and Go. Other languages are silently skipped. READMEs and folder-level summaries are language-agnostic.
 
 ## Troubleshooting
 
-**"AppState init failed: ... code_chunks table not found"** — the index doesn't exist yet. Run `code-rag-ingest ingest . --db-path ./.code-rag/index.lance --single-repo --full`.
+**"AppState init failed: ... code_chunks table not found"** — the index doesn't exist yet. Ask Claude Code to run `code_rag_reindex mode=full` (or run the exe's internal subcommand yourself: `code-rag-mcp ingest . --db-path ./.code-rag-mcp/index.lance --single-repo --full`).
 
 **Reranker download hangs on first run** — large network fetch (~90 MB). Disable with `--no-rerank` or set `CODE_RAG_RERANKER_DIR`.
 

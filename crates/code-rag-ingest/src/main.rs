@@ -79,6 +79,10 @@ enum Commands {
         /// Directory for architecture reports (default: <db parent>/reports)
         #[arg(long)]
         report_dir: Option<String>,
+
+        /// Directory for viz + GraphML artifacts (default: <db parent>/viz)
+        #[arg(long)]
+        viz_dir: Option<String>,
     },
     /// Remove projects from the index entirely (chunks, edges, communities,
     /// cluster summaries, architecture report). For repos deleted from disk,
@@ -140,12 +144,14 @@ async fn main() -> anyhow::Result<()> {
             db_path,
             project_name,
             report_dir,
+            viz_dir,
         } => {
             info!("Rebuilding topology for {}", db_path);
             code_raptor::build_topology(code_raptor::TopologyOpts {
                 db_path,
                 project_name,
                 report_dir,
+                viz_dir,
             })
             .await?;
             info!("Topology rebuild complete");

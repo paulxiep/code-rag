@@ -349,6 +349,27 @@ retrieval and clustering have a real topology to work on.
 - **Testable.** Demo renders + click-to-query works; comparison highlights at
   least one real top-down/bottom-up divergence; GraphML loads in a graph tool.
 
+> **Result — shipped 2026-08-10.** Full slice, plus the four MCP topology
+> tools R4 deferred here (`code_rag_communities` / `central_nodes` / `cycles`
+> / `path` — persisted `community_assignments` + cheap pure recompute via a
+> new `code-raptor::insights` facade; no Louvain or betweenness in any tool
+> path, all sub-second; `VectorReader` gained `get_community_assignments` +
+> `get_cluster_chunks`). Drift ships as a `drift.rs` module + a new
+> `## Emergent vs folder structure` report section and found real divergences
+> immediately (code-rag mean purity 0.78; the `vector_store.rs` monolith
+> splits into 15 communities). The demo topology view is d3-force via a
+> `static/graph.js` bridge (embedder.js pattern), 8-slot theme-aware palette
+> + honest "Other" bucket, click-a-node → auto-submitted chat query — browser
+> smoke-tested light + dark. Mermaid ships through the revived `find_path`
+> (`path_augment` finally constructs `GraphDirection::Path`; NL two-identifier
+> parsing deliberately NOT implemented — explicit params are the route).
+> Deviations: `ExportGraphEdge` (§3 table) was never added — superseded by the
+> per-project `graph_viz_<project>.json` artifact (node cap 5000, edge cap
+> 15 000, low-value classes dropped first); Obsidian export skipped as
+> planned. All 12 artifacts byte-identical across two runs; retrieval
+> untouched → no harness re-run. See
+> [development_log.md](development_log.md) 2026-08-10.
+
 ---
 
 ## 5. Research vs production

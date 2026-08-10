@@ -64,6 +64,16 @@ impl CallGraph {
             .map(|ids| ids[0].as_str())
     }
 
+    /// All chunk IDs registered for an identifier (case-insensitive); empty if
+    /// unknown. Lets callers distinguish "not found" from "ambiguous" where
+    /// `unique_chunk_for_identifier` collapses both to `None`.
+    pub fn chunks_for_identifier(&self, identifier: &str) -> &[String] {
+        self.id_to_chunk
+            .get(&identifier.to_lowercase())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Direct callers of the given chunk.
     pub fn callers_of(&self, chunk_id: &str) -> &[String] {
         self.reverse
@@ -201,15 +211,16 @@ pub fn detect_direction(query: &str) -> GraphDirection {
         return GraphDirection::Callees;
     }
 
-    // "path between" / "flow" / "trace" → need two endpoints (handled by caller)
+    // "path between" / "flow" / "trace" → need two endpoints. Parsing two
+    // identifiers out of natural language is deliberately NOT implemented
+    // (fragile); two-endpoint queries are served by the explicit-params route
+    // instead — `path_augment` / the MCP `code_rag_path` tool (R5).
     if q.contains("path between")
         || q.contains("path from")
         || q.contains("flow")
         || q.contains("trace")
         || q.contains("chain")
     {
-        // Path needs two identifiers; caller must parse them.
-        // Fall through to Both for now; graph_augment will upgrade if it finds two.
         return GraphDirection::Both;
     }
 
@@ -390,6 +401,48 @@ pub fn graph_augment(
         target_identifier,
         direction,
         resolved_chunk_ids,
+    })
+}
+
+/// Why an explicit path query produced no result (R5).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathError {
+    /// The identifier matched no chunk in the graph index.
+    UnknownIdentifier(String),
+    /// The identifier matched several chunks — too ambiguous to trace.
+    AmbiguousIdentifier(String),
+    /// Both endpoints resolved but no call chain connects them (forward).
+    NoPath,
+}
+
+/// Trace the shortest call chain between two explicitly named identifiers.
+///
+/// The explicit two-endpoint route that `detect_direction` deliberately does
+/// not attempt from natural language: identifiers arrive as parameters (MCP
+/// `code_rag_path`, or a UI selection), each resolves via the graph's
+/// identifier index, and the resulting `GraphAugmentResult` carries
+/// `GraphDirection::Path` with the full hop chain in `resolved_chunk_ids`
+/// (both endpoints included).
+pub fn path_augment(
+    from_identifier: &str,
+    to_identifier: &str,
+    graph: &CallGraph,
+) -> Result<GraphAugmentResult, PathError> {
+    let resolve = |identifier: &str| -> Result<String, PathError> {
+        match graph.chunks_for_identifier(identifier) {
+            [] => Err(PathError::UnknownIdentifier(identifier.to_string())),
+            [one] => Ok(one.clone()),
+            _ => Err(PathError::AmbiguousIdentifier(identifier.to_string())),
+        }
+    };
+    let from = resolve(from_identifier)?;
+    let to = resolve(to_identifier)?;
+    let path = graph.find_path(&from, &to).ok_or(PathError::NoPath)?;
+    Ok(GraphAugmentResult {
+        target_chunk_id: from.clone(),
+        target_identifier: from_identifier.to_string(),
+        direction: GraphDirection::Path(from, to),
+        resolved_chunk_ids: path,
     })
 }
 
@@ -700,6 +753,30 @@ pub fn extract_relation_target(query: &str) -> Option<String> {
         }
     }
 
+    // "what does X implement/extend/embed" — Forward queries put the subject
+    // BEFORE the verb, so the verb-then-target loop below can never extract
+    // it (and often can't even match: "implement?" has no trailing space).
+    // Same idiom as `extract_target_term`'s "what does X call" handling.
+    // Leading-space verb forms so end-of-string / "?" endings don't matter.
+    if let Some(start) = q.find("does ").map(|i| i + "does ".len()) {
+        let rest = &query[start..];
+        let rest_lower = &q[start..];
+        for verb in &[
+            " implement",
+            " extend",
+            " subclass",
+            " inherit",
+            " embed",
+            " compose",
+        ] {
+            if let Some(end) = rest_lower.find(verb)
+                && let Some(term) = first_meaningful_token(rest[..end].trim())
+            {
+                return Some(term);
+            }
+        }
+    }
+
     // "what implements X" / "what extends X" / "what embeds X" (verb then target)
     for verb in &[
         "implements ",
@@ -843,6 +920,61 @@ mod tests {
     fn test_find_path_self() {
         let g = make_graph();
         assert_eq!(g.find_path("A", "A"), Some(vec!["A".into()]));
+    }
+
+    /// A → B → C with registered identifiers; `dup` registered twice.
+    fn path_graph() -> CallGraph {
+        let mut g = make_graph();
+        g.register_identifiers(vec![
+            ("alpha".to_string(), "A".to_string()),
+            ("beta".to_string(), "B".to_string()),
+            ("gamma".to_string(), "C".to_string()),
+            ("dup".to_string(), "A".to_string()),
+            ("dup".to_string(), "B".to_string()),
+        ]);
+        g
+    }
+
+    #[test]
+    fn test_path_augment_found_carries_path_direction() {
+        let g = path_graph();
+        let r = path_augment("alpha", "gamma", &g).unwrap();
+        assert_eq!(
+            r.direction,
+            GraphDirection::Path("A".to_string(), "C".to_string())
+        );
+        assert_eq!(r.resolved_chunk_ids, vec!["A", "B", "C"]);
+        assert_eq!(r.target_chunk_id, "A");
+        assert_eq!(r.target_identifier, "alpha");
+    }
+
+    #[test]
+    fn test_path_augment_no_path() {
+        let g = path_graph();
+        assert_eq!(
+            path_augment("gamma", "alpha", &g).unwrap_err(),
+            PathError::NoPath
+        );
+    }
+
+    #[test]
+    fn test_path_augment_unknown_and_ambiguous() {
+        let g = path_graph();
+        assert_eq!(
+            path_augment("nope", "gamma", &g).unwrap_err(),
+            PathError::UnknownIdentifier("nope".to_string())
+        );
+        assert_eq!(
+            path_augment("alpha", "dup", &g).unwrap_err(),
+            PathError::AmbiguousIdentifier("dup".to_string())
+        );
+    }
+
+    #[test]
+    fn test_path_augment_self_is_single_hop() {
+        let g = path_graph();
+        let r = path_augment("alpha", "alpha", &g).unwrap();
+        assert_eq!(r.resolved_chunk_ids, vec!["A"]);
     }
 
     #[test]
@@ -1208,6 +1340,30 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_relation_target_forward_subject() {
+        // Forward phrasings put the subject BEFORE the verb; the trailing "?"
+        // means the verb-then-target patterns can't even match.
+        assert_eq!(
+            extract_relation_target("What does FastEmbedImpl implement?"),
+            Some("FastEmbedImpl".into())
+        );
+        assert_eq!(
+            extract_relation_target("what does the FooStruct embed?"),
+            Some("FooStruct".into())
+        );
+        assert_eq!(
+            extract_relation_target("What does MyHandler extend?"),
+            Some("MyHandler".into())
+        );
+        // Forward phrasing WITH a trailing target keeps extracting the subject
+        // (the traversal anchor): "does X implement Y" answers via X's targets.
+        assert_eq!(
+            extract_relation_target("Does FastEmbedImpl implement Embedder?"),
+            Some("FastEmbedImpl".into())
+        );
+    }
+
+    #[test]
     fn test_relation_augment_implements_reverse() {
         let g = make_relation_graph();
         // Target not in vector candidates — resolved via the graph id index.
@@ -1217,6 +1373,27 @@ mod tests {
         assert_eq!(target, "c_emb");
         resolved.sort();
         assert_eq!(resolved, vec!["c_fe".to_string(), "c_onnx".to_string()]);
+    }
+
+    #[test]
+    fn test_relation_augment_implements_forward() {
+        // The Copilot-flagged gap: Forward direction + subject-before-verb.
+        let g = make_relation_graph();
+        let candidates = vec![("c_other".into(), "something".into())];
+        let (target, resolved) =
+            relation_augment("What does FastEmbedImpl implement?", &candidates, &g).unwrap();
+        assert_eq!(target, "c_fe");
+        assert_eq!(resolved, vec!["c_emb".to_string()]);
+    }
+
+    #[test]
+    fn test_relation_augment_embeds_forward() {
+        let g = make_relation_graph();
+        let candidates = vec![("c_foo".into(), "FooStruct".into())];
+        let (target, resolved) =
+            relation_augment("What does FooStruct embed?", &candidates, &g).unwrap();
+        assert_eq!(target, "c_foo");
+        assert_eq!(resolved, vec!["c_bar".to_string()]);
     }
 
     #[test]

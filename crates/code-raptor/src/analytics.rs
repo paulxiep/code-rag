@@ -43,9 +43,8 @@ pub struct EndpointLabel {
 /// One entry of the "read these first" list.
 #[derive(Clone, Debug)]
 pub struct CentralEntry {
-    /// Stable node key — not rendered in the report, but the R5 viz/export
-    /// (click-a-node → query) keys on it.
-    #[allow(dead_code)]
+    /// Stable node key — not rendered in the report; the R5 MCP central-nodes
+    /// tool and click-a-node → query flows key on it.
     pub chunk_id: String,
     pub identifier: String,
     pub file: String,
@@ -140,41 +139,14 @@ pub fn compute(
     };
 
     // Central nodes: shared wasm-safe degree ranking, containers filtered.
-    let container_ids: std::collections::HashSet<&str> = topo
-        .container_nodes
-        .iter()
-        .map(|&i| topo.ids[i].as_str())
-        .collect();
-    let index_of: HashMap<&str, usize> = topo
-        .ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.as_str(), i))
-        .collect();
-    let central_nodes: Vec<CentralEntry> = degree_centrality(
-        g.edges()
-            .map(|(u, v, w)| (topo.ids[u].clone(), topo.ids[v].clone(), w)),
-    )
-    .into_iter()
-    .filter(|c| !container_ids.contains(c.id.as_str()))
-    .filter(|c| {
-        members
-            .get(&c.id)
-            .is_some_and(|m| m.project_name == project)
-    })
-    .take(TOP_CENTRAL)
-    .map(|c| {
-        let idx = index_of[c.id.as_str()];
-        let l = label(idx);
-        CentralEntry {
-            chunk_id: l.chunk_id,
-            identifier: l.identifier,
-            file: l.file,
-            degree: c.degree,
-            community_id: community_of[idx],
-        }
-    })
-    .collect();
+    let central_nodes = central_entries(
+        project,
+        topo,
+        &community_of,
+        members,
+        graph_edges,
+        TOP_CENTRAL,
+    );
 
     // Cross-community edges + per-pair edge counts (for the surprise score).
     let mut pair_counts: HashMap<(u32, u32), usize> = HashMap::new();
@@ -294,12 +266,71 @@ pub fn community_lines(
     out
 }
 
+/// The "read these first" ranking: wasm-safe degree centrality over the
+/// topology, containers and cross-project chunks filtered, labeled from
+/// members with an edge-record fallback. Shared by [`compute`] (report,
+/// `TOP_CENTRAL`) and `insights::central_nodes` (MCP, caller-chosen limit).
+pub(crate) fn central_entries(
+    project: &str,
+    topo: &Topology,
+    community_of: &[Option<u32>],
+    members: &HashMap<String, CodeChunk>,
+    graph_edges: &[GraphEdge],
+    limit: usize,
+) -> Vec<CentralEntry> {
+    let container_ids: std::collections::HashSet<&str> = topo
+        .container_nodes
+        .iter()
+        .map(|&i| topo.ids[i].as_str())
+        .collect();
+    let index_of: HashMap<&str, usize> = topo
+        .ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    let fallback = edge_labels(graph_edges);
+    degree_centrality(
+        topo.graph
+            .edges()
+            .map(|(u, v, w)| (topo.ids[u].clone(), topo.ids[v].clone(), w)),
+    )
+    .into_iter()
+    .filter(|c| !container_ids.contains(c.id.as_str()))
+    .filter(|c| {
+        members
+            .get(&c.id)
+            .is_some_and(|m| m.project_name == project)
+    })
+    .take(limit)
+    .map(|c| {
+        let idx = index_of[c.id.as_str()];
+        let chunk_id = topo.ids[idx].clone();
+        let (identifier, file) = if let Some(m) = members.get(&chunk_id) {
+            (m.identifier.clone(), m.file_path.clone())
+        } else {
+            fallback
+                .get(chunk_id.as_str())
+                .map(|&(i, f)| (i.to_string(), f.to_string()))
+                .unwrap_or_default()
+        };
+        CentralEntry {
+            chunk_id,
+            identifier,
+            file,
+            degree: c.degree,
+            community_id: community_of[idx],
+        }
+    })
+    .collect()
+}
+
 /// Community per node index, extended from code chunks to container (file)
 /// nodes by majority vote over assigned neighbors (tie → smallest community
 /// id — the same rule hub reattachment uses). Import edges are usually *the*
 /// cross-module coupling, and they hang off file nodes; without the lift they
 /// would be invisible to bridge reporting.
-fn lift_communities(topo: &Topology, results: &[CommunityResult]) -> Vec<Option<u32>> {
+pub(crate) fn lift_communities(topo: &Topology, results: &[CommunityResult]) -> Vec<Option<u32>> {
     let assigned: HashMap<&str, u32> = results
         .iter()
         .map(|r| (r.chunk_id.as_str(), r.community_id))
@@ -357,7 +388,7 @@ fn edge_relations(
 }
 
 /// chunk_id → (identifier, file) harvested from graph-edge records.
-fn edge_labels(graph_edges: &[GraphEdge]) -> HashMap<&str, (&str, &str)> {
+pub(crate) fn edge_labels(graph_edges: &[GraphEdge]) -> HashMap<&str, (&str, &str)> {
     let mut map: HashMap<&str, (&str, &str)> = HashMap::new();
     for e in graph_edges {
         map.entry(e.source_chunk_id.as_str())

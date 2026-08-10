@@ -10,6 +10,8 @@ mod embedder;
 #[cfg(feature = "standalone")]
 mod gemini;
 #[cfg(feature = "standalone")]
+mod graph_bridge;
+#[cfg(feature = "standalone")]
 mod reranker;
 #[cfg(feature = "standalone")]
 mod search;
@@ -17,12 +19,29 @@ mod search;
 mod standalone_api;
 #[cfg(feature = "standalone")]
 mod text_search;
+#[cfg(feature = "standalone")]
+mod viz_data;
 
 use leptos::mount::mount_to_body;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use components::ChatView;
+
+/// Which top-level view is active (standalone demo only).
+#[cfg(feature = "standalone")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ActiveTab {
+    Chat,
+    Topology,
+}
+
+/// Context newtype: a query queued by the topology view (click-a-node) for
+/// `ChatView` to pick up and submit. Newtype so the context can never collide
+/// with another `RwSignal<Option<String>>`.
+#[cfg(feature = "standalone")]
+#[derive(Clone, Copy)]
+pub struct PendingQuery(pub RwSignal<Option<String>>);
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -80,7 +99,7 @@ fn backend_app() -> impl IntoView {
 #[cfg(feature = "standalone")]
 fn standalone_app() -> impl IntoView {
     use code_rag_engine::intent::IntentClassifier;
-    use components::AuthPanel;
+    use components::{AuthPanel, TopologyView};
     use std::sync::Arc;
 
     // Auth state (loaded from localStorage)
@@ -92,6 +111,14 @@ fn standalone_app() -> impl IntoView {
     let classifier_signal: RwSignal<Option<Arc<IntentClassifier>>> = RwSignal::new(None);
     provide_context(index_signal);
     provide_context(classifier_signal);
+
+    // R5: active tab + the topology→chat pending-query channel.
+    let tab: RwSignal<ActiveTab> = RwSignal::new(ActiveTab::Chat);
+    provide_context(tab);
+    provide_context(PendingQuery(RwSignal::new(None)));
+    // Latches true on first activation so users who never open the topology
+    // tab never pay its artifact fetch / simulation cost.
+    let topology_opened = RwSignal::new(false);
 
     let (projects, set_projects) = signal(Vec::<String>::new());
     let (load_error, set_load_error) = signal(Option::<String>::None);
@@ -166,7 +193,39 @@ fn standalone_app() -> impl IntoView {
             </Show>
 
             <Show when=index_ready>
-                <ChatView api_base=api_base.clone() />
+                <div class="tab-strip" role="tablist">
+                    <button
+                        class="tab-btn"
+                        role="tab"
+                        class:active=move || tab.get() == ActiveTab::Chat
+                        attr:aria-selected=move || (tab.get() == ActiveTab::Chat).to_string()
+                        on:click=move |_| tab.set(ActiveTab::Chat)
+                    >
+                        "Chat"
+                    </button>
+                    <button
+                        class="tab-btn"
+                        role="tab"
+                        class:active=move || tab.get() == ActiveTab::Topology
+                        attr:aria-selected=move || (tab.get() == ActiveTab::Topology).to_string()
+                        on:click=move |_| {
+                            topology_opened.set(true);
+                            tab.set(ActiveTab::Topology);
+                        }
+                    >
+                        "Topology"
+                    </button>
+                </div>
+                // Both panels stay mounted (chat history + graph layout are
+                // component-local state); tabs only toggle visibility.
+                <div class="tab-panel" class:hidden=move || tab.get() != ActiveTab::Chat>
+                    <ChatView api_base=api_base.clone() />
+                </div>
+                <div class="tab-panel" class:hidden=move || tab.get() != ActiveTab::Topology>
+                    <Show when=move || topology_opened.get()>
+                        <TopologyView />
+                    </Show>
+                </div>
             </Show>
         </div>
     }

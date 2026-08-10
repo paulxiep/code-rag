@@ -14,5 +14,6 @@ pub mod folder;
 pub mod fusion;
 pub mod graph;
 pub mod intent;
+pub mod mermaid;
 pub mod retriever;
 pub mod text;

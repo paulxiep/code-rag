@@ -9,7 +9,7 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **Portfolio showcase**: Demonstrates Rust, RAG architecture, and chatbot development skills
 - **Meta-project**: Can answer questions about itself and other portfolio projects
 - **Code understanding**: Semantic search over function-level code chunks
-- **Releasable dev tool (MCP server)**: The retrieval brain ships as `code-rag-mcp`, a single-binary Model Context Protocol server any developer can install in three steps (download exe → edit one YAML → run exe) to give Claude Code intent-routed retrieval, call-graph traversal, and architecture overviews — no terminal commands, no API keys.
+- **Releasable dev tool (MCP server)**: The retrieval brain ships as `code-rag-mcp`, a single-binary Model Context Protocol server any developer can install in three steps (download exe → edit one YAML → run exe) to give Claude Code intent-routed retrieval, call-graph traversal, architecture overviews, and topology insight — emergent-module maps with folder-drift comparison, dependency-cycle detection, and call-path tracing — no terminal commands, no API keys.
 
 ## Key Features
 
@@ -17,7 +17,12 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **Docstring extraction**: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc), `//` (Go) — enriches embeddings and LLM context
 - **Hierarchy chunks (Track A)**: `FolderChunk` (1 per directory; 5-line template — folder/files+languages/key types/key functions/subfolders, ~118 in portfolio) and `FileChunk` (1 per source file; 4-line template — file/exports/imports/purpose, ~247 in portfolio). Built deterministically at ingest from CodeChunk metadata + C1 imports map — no LLM. Pure render functions in `code-rag-engine::{folder,file}` keep server-embedded bytes byte-identical to browser BM25 bytes
 - **Single text module (A1)**: `code-rag-engine::text` is the sole home for `tokenize`, `IdfTable`, BM25 kernel, `build_searchable_text`, `split_camel_case`, and intent prototype texts — compiles to native + wasm32. No more drift between server / store / raptor / UI
-- **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table (~3011 edges), 3-tier resolver (same-file → import-based → unique-global), graph traversal (callers/callees/path) augments retrieval at query time. AST scoped-identifier (`module::function()`) extraction added
+- **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table, 3-tier resolver (same-file → import-based → unique-global), graph traversal (callers/callees/path) augments retrieval at query time. AST scoped-identifier (`module::function()`) extraction added
+- **Typed relation topology (Track R)**: `graph_edges` persists imports / re_exports / contains / implements / extends / embeds / references / rationale_for edges, resolved per-language with anchored rules and a project-scoped identifier index — the graph never links sibling projects while retrieval stays corpus-wide
+- **Emergent communities (Code Raptor)**: deterministic Louvain (fixed iteration order, no RNG — identical partition and community ids on every run) over the relation topology, with utility-hub exclusion, oversized/low-cohesion re-splits, and per-community cohesion scores persisted in `community_assignments`. Folder→file containment is excluded from the partition input so the emergent structure can be honestly compared against the folder layout
+- **Architecture report + drift**: one byte-deterministic markdown artifact per project — "read these first" centrality ranking, cross-community bridges with relation provenance, surprising-connection ranking, import-cycle detection (Tarjan SCC + bounded canonical DFS), and an emergent-vs-folder **drift** section (community purity vs directory layout)
+- **Interactive topology view**: demo tab rendering each project's community graph with d3-force (community-colored, degree-sized, relation-dashed, theme-aware); clicking a node auto-submits a code-rag query about it
+- **Topology exports**: per-project viz JSON (browser artifact, capped) + full-graph GraphML (opens in Gephi/yEd), byte-identical across runs
 - **Test code exclusion at ingest**: 3-level — directory `tests/`, filename `test_*.py` / `*.test.ts`, AST-walked `#[cfg(test)]` enclosing-mod detection. Removed ~24% of chunks (3772 → 2861)
 - **Intent classification**: Cosine similarity against prototype query embeddings + k-NN (k=3) weighted voting + keyword pre-filter with adversarial guards — 74% accuracy (semantic, not keyword-based)
 - **Query routing**: Declarative routing table maps intent (overview, implementation, relationship, comparison) to per-type retrieval limits across all six chunk types (code, folder, file, readme, crate, module_doc)
@@ -39,7 +44,7 @@ A RAG (Retrieval-Augmented Generation) chatbot that answers questions about code
 - **Web UI**: Leptos WASM SPA (Rust compiled to WebAssembly)
 - **GitHub Pages demo**: Full RAG pipeline runs in-browser via `standalone` feature — no backend needed
 - **Shared engine**: `code-rag-engine` crate compiles to both native and wasm32
-- **Claude Code MCP server**: Five tools (`code_rag_search`, `code_rag_graph`, `code_rag_overview`, `code_rag_neighbors`, `code_rag_reindex`) plus a bundled Claude Code skill that routes queries between built-in Grep/Read and the MCP tools. Single-binary install: download `code-rag-mcp` from the GitHub Release, edit a YAML config (`target_path` + `workspace: true|false`), run the exe — it writes the skill + `.mcp.json` + `.gitignore` entry into the target dir, then exits. The first ingest happens transparently when the agent makes its first MCP call. Manually-triggered release workflow ships matrix-built binaries for Linux / macOS / Windows; the embedded `ingest` subcommand subsumes the standalone index-builder so end users only need one binary.
+- **Claude Code MCP server**: Nine tools — retrieval (`code_rag_search`, `code_rag_overview`, `code_rag_graph`, `code_rag_neighbors`, `code_rag_reindex`) plus topology insight (`code_rag_communities` with drift comparison, `code_rag_central_nodes`, `code_rag_cycles`, `code_rag_path` with Mermaid call-flow output) — and a bundled Claude Code skill that routes queries between built-in Grep/Read and the MCP tools. Single-binary install: download `code-rag-mcp` from the GitHub Release, edit a YAML config (`target_path` + `workspace: true|false`), run the exe — it writes the skill + `.mcp.json` + `.gitignore` entry into the target dir, then exits. The first ingest happens transparently when the agent makes its first MCP call. Manually-triggered release workflow ships matrix-built binaries for Linux / macOS / Windows; the embedded `ingest` subcommand subsumes the standalone index-builder so end users only need one binary.
 
 ## Quick Start
 
@@ -53,31 +58,35 @@ docker-compose up
 
 Open http://localhost:3000 for the chat interface.
 
-## Current Quality Metrics (post-A4)
+## Current Quality Metrics (2026-08, 6-project corpus)
 
-Measured against the 87-case test dataset (79 recall-scoreable), composite per-intent `ArmPolicy` with all hierarchy arms active, classifier routing (commit df49136, fresh db, label `post_a4_fresh`):
+Measured with the composite per-intent `ArmPolicy`, hybrid + rerank, classifier routing (label `post_rationale_anchor`, commit 8064e31):
 
 | Metric | Classifier |
 |--------|:---------:|
-| recall@5 (aggregate) | 0.72 |
-| recall@10 (aggregate) | 0.79 |
-| **recall@pool** (aggregate) | **0.80** |
-| MRR | 0.73 |
+| recall@5 (aggregate) | 0.60 |
+| recall@10 (aggregate) | 0.69 |
+| **recall@pool** (aggregate) | **0.72** |
 | Intent accuracy (97-case held-out corpus) | 74% |
 
-Per-intent recall@5: overview 0.82, implementation 0.74, relationship 0.59, comparison 0.69. Per-intent recall@pool: overview 0.90, implementation 0.79, relationship 0.68, comparison 0.79.
+Per-intent recall@5 / @10 / @pool: overview 0.70/0.77/0.81, implementation 0.61/0.67/0.67, relationship 0.47/0.61/0.61, comparison 0.62/0.73/0.75.
 
-The lifts came from the retrieval infrastructure: cross-encoder reranking (B1), hybrid BM25+dense with RRF (B2), signature-aware `searchable_text` (B3), and a tuned per-intent `ArmPolicy` (B5). B4 raised classifier accuracy 58%→74%, closing the classifier-vs-GT retrieval gap to ~2pp — classification is no longer the dominant bottleneck. A dual-vector experiment (`signature_vector`) was tested and rejected (short-text geometry + sparse-arm RRF penalty); the column remains for future work. Track C added Graph RAG (C1: relationship 0.50→0.57), graph result protection (C2: relationship 0.57→0.60), and comparison query decomposition (C3: comparison 0.62→0.65, aggregate 0.71→0.72, MRR 0.69→0.71, recall@10 → 0.76). Track A consolidated text primitives into one wasm-pure module (A1), added `FolderChunk` (A2 dark / A3 active — Comparison 0.31→0.67 +36pp under fresh routing) and `FileChunk` (A4 — Comparison r@pool +12.5pp; introduced `recall@pool` as a more faithful RAG-pipeline metric than top-k recall).
+**Corpus note — not comparable to the earlier post-A4 0.72@5**: two portfolio projects were purged (source repos deleted), the cross-project resolution leak was fixed (edges that once resolved into other projects inflated recall with wrong answers), and the corpus grew to include code-rag's own Track R code. The drop is a measurement-context change, not a quality regression — the leak fix itself moved per-intent numbers only within noise (comparison identical, others ±2–3pp), and the rest tracks months of corpus drift against a frozen test dataset.
+
+The lifts came from the retrieval infrastructure: cross-encoder reranking (B1), hybrid BM25+dense with RRF (B2), signature-aware `searchable_text` (B3), and a tuned per-intent `ArmPolicy` (B5). B4 raised classifier accuracy 58%→74%, closing the classifier-vs-GT retrieval gap to ~2pp — classification is no longer the dominant bottleneck. Track C added Graph RAG (C1), graph result protection (C2), and comparison query decomposition (C3). Track A consolidated text primitives into one wasm-pure module (A1) and added the folder/file hierarchy arms (A2–A4; `recall@pool` introduced as the more faithful RAG-pipeline metric). Track R is retrieval-neutral by design — its one retrieval experiment (R3 cluster-summary arm) was measured, found net-negative, and gated OFF per the project's empirical-gating standard, with the machinery left wired for a revisit.
 
 ## Current State
 
-310+ tests, 0 warnings:
-- `code-raptor`: Ingestion CLI — trait-based language handlers, incremental ingestion, docstring + signature + call extraction, **3-tier call edge resolution**, **3-level test code exclusion**, **folder + file chunk builders (`ingestion::{folder,file}`)**, data export (incl. IDF tables + signature embeddings + call edges + folder/file IDFs)
-- `code-rag-engine`: Shared algorithms — intent classification (k-NN + pre-filter + comparator extraction), context building, scoring, N-ary `rrf_fuse`, `ArmPolicy`, **`graph` (`graph_augment`, `merge_graph_chunks`, `reserve_graph_slots`, `detect_direction`)**, **`comparison` (`fuse_comparator_lists`)**, **`text` (single-source `tokenize`, `IdfTable`, BM25 kernel, `build_searchable_text`, `split_camel_case`, prototype texts — A1)**, **`folder::render_summary` + `file::render_summary` (pure deterministic templates — A2/A4)** (compiles to native + wasm32)
-- `code-rag-store`: Embedder + VectorStore + Reranker — scored search API, hybrid BM25+vector search via LanceDB FTS, nullable `signature_vector` column, **scalar-only `call_edges` table** + `get_chunks_by_ids`, **`folder_chunks` + `file_chunks` tables with native `List<Utf8>` for vec metadata**
-- `code-rag-types`: Shared types — UUID chunk IDs, content hashes, nullable docstrings, **`CallEdge` + `ExportEdge`**, **`FolderChunk` + `FileChunk`**
+547 tests, 0 warnings:
+- `code-rag-ingest`: Ingestion CLI — trait-based language handlers (Rust, Python, TypeScript, Go), incremental ingestion, docstring + signature + call extraction, **3-tier call edge resolution** (project-scoped identifier index), **typed relation-edge extraction** (imports/type relations/containment/rationale), **3-level test code exclusion**, **folder + file chunk builders**, data export (incl. IDF tables + call edges + folder/file/cluster IDFs)
+- `code-raptor`: **Topology engine (Track R)** — builds the relation topology from persisted edges, deterministic Louvain community detection + cohesion, ClusterChunk summaries, structural analytics (centrality / betweenness bridges / surprise ranking / import cycles / **emergent-vs-folder drift**), byte-deterministic architecture report + viz JSON + GraphML writers, `insights` facade backing the MCP topology tools
+- `code-rag-engine`: Shared algorithms — intent classification (k-NN + pre-filter + comparator extraction), context building, scoring, N-ary `rrf_fuse`, `ArmPolicy`, **`graph` (`graph_augment`, `path_augment`, `merge_graph_chunks`, `reserve_graph_slots`, `detect_direction`, `RelationGraph`)**, **`centrality` (degree ranking, browser-identical)**, **`mermaid` (call-path flowcharts)**, **`comparison`**, **`text` (single-source tokenize/IDF/BM25/searchable_text — A1)**, **`folder` / `file` / `cluster` summary templates** (compiles to native + wasm32)
+- `code-rag-store`: Embedder + VectorStore + Reranker — scored search API, hybrid BM25+vector search via LanceDB FTS, 7 vector tables + 3 scalar tables (`call_edges`, `graph_edges`, `community_assignments`), `VectorReader`/`VectorWriter` Caravan seams incl. topology reads
+- `code-rag-types`: Shared types — deterministic chunk/edge IDs, content hashes, **`CallEdge` + `GraphEdge` (typed relations) + `CommunityAssignment` + `ClusterChunk`**, **`FolderChunk` + `FileChunk`**
+- `code-rag-core` / `code-rag-llm`: chat-side core (`AppState`, `retrieve`) and LLM-provider impls, extracted at Caravan M5
 - `code-rag-chat`: Query API — retrieval (graph augmentation + comparison decomposition pre-branch + folder/file arms), LLM, quality harness (with **`recall@pool` metric**), serves WASM UI
-- `code-rag-ui`: Leptos WASM SPA — default mode calls backend API, standalone mode runs full RAG pipeline in-browser (mirrors graph augmentation + comparison decomposition + folder/file arms line-for-line; back-compat with pre-A2 `index.json` via `#[serde(default)]`)
+- `code-rag-mcp`: MCP stdio server — nine tools (five retrieval + four topology), bundled Claude Code skill, single-binary release
+- `code-rag-ui`: Leptos WASM SPA — chat + **topology tabs**; standalone mode runs the full RAG pipeline in-browser and renders each project's community graph (d3-force, click-a-node → query); back-compat with older `index.json` bundles via `#[serde(default)]`
 
 ## Technology
 

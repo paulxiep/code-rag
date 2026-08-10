@@ -23,6 +23,12 @@ code-rag-engine = { path = "../code-rag-engine" }
 # enumeration) are hand-rolled for full determinism control — no graph-crate
 # dependency. R.md §3 nominally named petgraph; dropped in R4 (never used).
 
+# R5 viz artifact: struct-declaration field order + Vec-only shapes make
+# serde_json output byte-deterministic; hand-rolled string writers stay the
+# convention for prose/markup formats (report, GraphML, Mermaid) only.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"

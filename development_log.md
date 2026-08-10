@@ -1,5 +1,116 @@
 # Development Log
 
+## 2026-08-10: Track R R5 — Architecture drift + topology view + exports + MCP topology tools
+
+### Summary
+
+R5 closes Track R: the emergent topology becomes user-facing. Four deliverables
+in one milestone — (1) **drift comparison** (emergent communities vs folder
+layout) as a new report section; (2) an **interactive topology view** in the
+GH-Pages demo (d3-force canvas, community-colored, click-a-node → chat query);
+(3) **exports** — per-project `graph_viz_<project>.json` (browser artifact) +
+GraphML (Gephi/yEd), both byte-deterministic; (4) the four **MCP topology
+tools** deferred from R4 (`code_rag_communities`, `code_rag_central_nodes`,
+`code_rag_cycles`, `code_rag_path` — the last pairing the revived `find_path`
+with a Mermaid call-flow rendering). Retrieval is untouched → no harness
+re-run (the "route architecture queries to both views" criterion is satisfied
+by the report + MCP surfaces).
+
+### Design
+
+- **Drift** ([drift.rs](crates/code-raptor/src/drift.rs)): folder identity =
+  parent dir of each member's `file_path` (the `dominant_dir` derivation — no
+  edge join), so MCP reuses it from persisted assignments +
+  `get_chunks_by_ids` alone. Per-community purity, per-folder concentration,
+  ranked `Divergence` list (`(1−purity)·size`, MIN_GROUP_SIZE 3, threshold
+  0.6, top 8), size-weighted mean purity. Renders as two tables (scattered
+  communities / fragmented folders) — the report's "tables for enumerable
+  facts" idiom — with an "aligned" fallback; feeds one suggested question.
+  The comparison is meaningful because R2 excluded folder edges from
+  partitioning: agreement is earned, not recovered from the input.
+- **Export model** ([graph_model.rs](crates/code-raptor/src/graph_model.rs)):
+  one shared assembly (nodes labeled via members + edge-record fallback,
+  `lift_communities` for containers; one edge per unordered pair with sorted
+  relation tags + folded confidence — extracted iff any contributor is
+  AST/import-proven, call tiers 1–2 count) feeding both writers. Viz JSON via
+  **serde** (deviation from the hand-roll convention, deliberate: struct
+  field order + Vec-only shapes are byte-deterministic and JSON escaping of
+  user paths is where hand-rolled bugs live; markdown/XML/Mermaid stay
+  hand-rolled). Caps: top-5000 nodes by degree, 15 000 edges (inferred
+  references-only dropped first); pre-cap totals + `truncated` recorded.
+- **Demo view**: d3-force/d3-zoom via jsdelivr `/+esm` in a new
+  `static/graph.js` singleton (the embedder.js global-function bridge
+  pattern); canvas 2d, DPR-scaled, own rAF (pauses when hidden); palette read
+  from new `--viz-c1..c8`/`--viz-other`/`--viz-edge` CSS custom properties
+  with a MutationObserver on `data-theme` → live re-skin. 8 fixed community
+  slots + neutral "Other" for id ≥ 8 — hues never wrap, the legend never
+  lies. Tabs keep both views mounted (`display:none`), chat state survives;
+  `PendingQuery` context + a ChatView effect auto-submits the clicked node's
+  query (definitions → relationship phrasing, containers → overview
+  phrasing). Artifacts fetched lazily per project, raw JSON handed to
+  graph.js (no serde_wasm_bindgen round-trip of 5000 nodes).
+- **MCP tools**: no tool runs Louvain or betweenness — community ids come
+  from persisted `community_assignments` (tool output matches report/DB);
+  degree/cycles/drift are O(E) pure recomputes through the new **`pub mod
+  insights`** facade (`central_nodes` extracted from `analytics::compute`,
+  behavior guarded by the report byte-determinism test). MCP gains a direct
+  `code-raptor` dep (legal direction: raptor → store+types+engine only).
+  Seam additions: `VectorReader::{get_community_assignments,
+  get_cluster_chunks}` (+ scalar `get_cluster_chunks_by_project` on the
+  store; the cluster extractor already tolerated a missing score column).
+  Response shaping is pure + unit-tested in
+  [topology_tools.rs](crates/code-rag-mcp/src/topology_tools.rs); absent
+  `project` param → per-project array, unknown → invalid_params listing
+  what's indexed.
+- **`find_path` revived** ([graph.rs](crates/code-rag-engine/src/graph.rs)
+  `path_augment`): explicit two-identifier params resolve via a new
+  `chunks_for_identifier` (distinguishes unknown vs ambiguous → clean MCP
+  errors), forward then reverse; `GraphDirection::Path` is now constructed in
+  production. NL two-identifier parsing stays deliberately unimplemented
+  (comment updated). Wasm-safe
+  [mermaid.rs](crates/code-rag-engine/src/mermaid.rs) renders the hop chain
+  (positional node ids → arbitrary identifiers can't break syntax).
+- **Wiring**: `TopologyOpts.viz_dir` (default `<db parent>/viz`) +
+  `viz_path`/`graphml_path` helpers (shared sanitizer with `report_path`,
+  mirrored in the UI's `viz_data.rs`); stale-artifact deletes on empty
+  topology and in `purge`; `--viz-dir` on the topology subcommand; gh-pages
+  gains one strict `cp` staging step (viz JSONs → `static/viz/`; GraphML
+  stays offline).
+
+### Deviations from R.md
+
+`ExportGraphEdge` (§3 crate table) was never added — the per-project viz
+artifact supersedes an index.json edge slot and keeps the 33 MB first-paint
+bundle untouched (topology loads lazily on first tab open). Obsidian export
+skipped as planned.
+
+### Verification
+
+- 547 workspace tests green (30 → 56 in code-raptor; engine +9; MCP +5 —
+  shaping; store +1 ignored round-trip); `trunk build --features standalone`
+  + backend-mode check green; zero warnings.
+- **Byte determinism:** two full topology runs → 12/12 artifacts (6 viz JSON
+  + 6 GraphML) byte-identical; all 6 GraphML parse as valid XML (852-node
+  code-rag → 3100-node concurrens).
+- **Drift finds real divergences** on first run: code-rag mean purity 0.78;
+  `code-rag-store/src` (177 defs — the `vector_store.rs` monolith) splits
+  into 15 communities at 0.27 concentration; the MCP-centric community 0
+  spans 4 crates at 0.48 purity.
+- **MCP live exercise** (stdio JSON-RPC, all four tools): cycles finds the
+  known `ingestion/mod.rs ↔ reconcile.rs` cycle; central nodes lead with
+  `CodeChunk`/`new`/`VectorStore`; path traces `build_topology →
+  build_for_project → detect → partition → louvain` (4 hops) with a correct
+  Mermaid flowchart; unknown/ambiguous identifiers produce clean
+  invalid_params.
+- **Browser smoke** (headless Edge + Playwright against `trunk serve`): tab
+  strip renders, force graph draws community-clustered, tooltip on hover,
+  **click-a-node switched to Chat and auto-submitted** "What is the role of
+  `patcher_llm.py` in the architecture of this project?", project switch
+  re-inits cleanly, dark theme + live theme flip re-color the canvas, zero
+  console errors.
+
+---
+
 ## 2026-08-07: Rationale-scanner anchoring + relation provenance in the architecture report
 
 ### The Reranker bridge, explained

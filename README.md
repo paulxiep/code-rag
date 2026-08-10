@@ -7,7 +7,7 @@ A RAG chatbot that answers questions about code repositories. Ingests all siblin
 
 ## Use as MCP server with Claude Code
 
-The retrieval brain ships as `code-rag-mcp`, a single-binary MCP server you can drop into any of your own repos to give Claude Code intent-routed retrieval, call-graph traversal, and architecture overviews — no API keys, no cloud.
+The retrieval brain ships as `code-rag-mcp`, a single-binary MCP server you can drop into any of your own repos to give Claude Code intent-routed retrieval, call-graph traversal, architecture overviews, and topology insight — emergent-module maps with folder-drift comparison, "read these first" rankings, dependency-cycle detection, and call-path tracing with Mermaid output (nine tools). No API keys, no cloud.
 
 Install is three steps, no terminal commands once the exe is on disk:
 
@@ -76,6 +76,12 @@ To clean, run `sh clean_docker.sh`.
 | **A4** | 2026-04-18 | File-level embeddings — `FileChunk` (4-line template, 247 chunks) + stratified relationship retrieval (`recall@pool` metric introduced) |
 | **MCP** | 2026-04-24 | Claude Code MCP server (`code-rag-mcp`) — five tools (`search`, `graph`, `overview`, `neighbors`, `reindex`) on rmcp 1.5; bundled Skill; single-binary install (download → edit `code-rag-mcp.config.yaml` → run exe); subsumes `code-rag-ingest` via internal `ingest` subcommand; manually-triggered cross-platform release pipeline; agent-driven first ingest |
 | **Caravan** | 2026-05-21 | [Caravan](https://github.com/paulxiep/caravan) adoption (B0p → M5). Four `#[wagon]` seams (`Embedder` / `Reranker` / `VectorReader` / `LlmClient`); `RigGeminiImpl` extracted to `code-rag-llm`; chat-side core (`AppState`, `retrieve`) extracted to `code-rag-core` (MCP no longer transitively depends on chat binary); four mix-and-match `caravan.yaml` targets (`dev-monolith` / `dev-split-light` / `dev-split-mixed` / `dev-split-heavy`) exercise per-seam independent dispatch. caravan-rpc 0.1.0 published to crates.io |
+| **R0** | 2026-06-08 | Crate split — parser/ingester renamed `code-rag-ingest`; `code-raptor` reclaimed as the topology engine (Track R home) |
+| **R1** | 2026-06-08 | RelationGraph + typed relation edges (`graph_edges`: imports/re_exports/contains/implements/extends/embeds/references/rationale_for) with per-language anchored resolution. Hardened 2026-08: project-scoped identifier index (graph never links projects) + documented per-language import matching |
+| **R2** | 2026-06-10 | Emergent communities — deterministic Louvain (no RNG) + hub exclusion + cohesion scoring, persisted to additive `community_assignments` table; folder→file `contains` excluded from partition input by design |
+| **R3** | 2026-06-10 | ClusterChunk summaries (template tier, `cluster_chunks` table, retrieval arm) — arm **gated OFF by measurement** (displaced code/folder chunks on Overview; machinery stays wired for a slot-protection/LLM-tier revisit) |
+| **R4** | 2026-08-06 | Structural analytics + per-project architecture report — degree centrality (wasm-safe), Brandes edge-betweenness bridges, surprise ranking, import-cycle detection (Tarjan SCC + bounded canonical DFS), byte-deterministic markdown artifact |
+| **R5** | 2026-08-10 | Track R capstone — emergent-vs-folder **drift** comparison (report section), interactive **topology view** in the demo (d3-force, click-a-node → chat query), **GraphML + viz JSON** exports, four MCP topology tools (`communities` / `central_nodes` / `cycles` / `path` with Mermaid call-flow) via revived `find_path` |
 
 ## Purpose
 
@@ -171,7 +177,11 @@ See [caravan.yaml](caravan.yaml) for the full seam declarations and four mix-and
 - Docstrings extracted: `///` (Rust), `"""` (Python), `/** */` (TypeScript JSDoc), `//` (Go)
 - Declaration signatures extracted: functions + structs/enums/traits/interfaces/classes
 - **Hierarchy chunks (Track A)**: `FolderChunk` (1 per directory, 5-line template — folder/files+languages/key types/key functions/subfolders) and `FileChunk` (1 per source file, 4-line template — file/exports/imports/purpose). Built deterministically at ingest from existing CodeChunk metadata + C1 imports map — no LLM. Both render through pure `code-rag-engine::{folder,file}` functions, so server-embedded bytes and browser BM25 bytes are byte-identical
-- **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table (~3011 edges), 3-tier resolver (same-file → import-based → unique-global), AST scoped-identifier (`module::function()`) extraction
+- **Persistent call graph (Graph RAG)**: LanceDB scalar-only `call_edges` table, 3-tier resolver (same-file → import-based → unique-global), AST scoped-identifier (`module::function()`) extraction
+- **Typed relation topology (Track R)**: `graph_edges` table persists imports / re_exports / contains / implements / extends / embeds / references / rationale_for edges with per-language anchored resolution, project-scoped so the graph never links sibling projects (retrieval stays corpus-wide)
+- **Emergent communities (Code Raptor)**: deterministic Louvain (fixed order, no RNG — identical partition every run) over calls ∪ imports ∪ type relations ∪ file-level containment, with hub exclusion + cohesion scoring; persisted per-chunk in `community_assignments`. Folder→file edges are deliberately excluded from the partition input so the emergent-vs-folder comparison is earned, not self-fulfilling
+- **Architecture report + drift**: per-project byte-deterministic markdown artifact — "read these first" degree centrality, cross-community bridges (Brandes edge-betweenness) with relation provenance, surprising-connection ranking, import cycles (Tarjan SCC + bounded canonical DFS), and an **emergent-vs-folder drift** section (community purity vs directory layout — e.g. it flags the `vector_store.rs` monolith splitting into 15 communities)
+- **Topology exports**: per-project `graph_viz_<project>.json` (browser artifact, capped 5000 nodes / 15 000 edges) + full-graph GraphML for Gephi/yEd — both byte-deterministic across runs
 - **Test code exclusion at ingest** (3-level): directory `tests/`, filename `test_*.py` / `*.test.ts`, AST-walked `#[cfg(test)]` enclosing-mod detection (~24% chunk reduction)
 - Intent classification: cosine similarity against prototype query embeddings
 - Query routing: declarative routing table maps intent → retrieval limits across all six chunk types (code, folder, file, readme, crate, module_doc)
@@ -184,10 +194,10 @@ See [caravan.yaml](caravan.yaml) for the full seam declarations and four mix-and
 - Intent classifier: prototype cosine similarity + k-NN (k=3) weighted voting + Comparison keyword pre-filter with adversarial guards — **74% accuracy** (was 58%)
 - Retrieval traces: all 6 chunk types surfaced with relevance scores, sorted by relevance
 - Quality harness: 87-query test dataset (79 recall-scoreable), recall@K, **`recall@pool`** (introduced in A4 — recall over every chunk reaching `build_context`, no top-k truncation), MRR, intent accuracy, latency — dual-run mode
-- Post-A4 (fresh db, all hierarchy arms active, classifier routing, 79 scored): recall@5 = **0.72** aggregate · overview 0.82 · implementation 0.74 · relationship 0.59 · comparison 0.69 · recall@10 = 0.79 · recall@pool = **0.80** · MRR = 0.73
+- Current baseline (post_rationale_anchor, 2026-08-07, 6-project corpus, classifier routing): recall@5 = **0.60** aggregate · overview 0.70 · implementation 0.61 · relationship 0.47 · comparison 0.62 · recall@10 = 0.69 · recall@pool = **0.72**. *Not comparable to the earlier post-A4 0.72@5*: two projects were purged from the corpus (source repos deleted), the cross-project resolution leak was fixed (edges that once inflated recall were wrong answers), and the corpus now includes code-rag's own Track R code
 - Incremental ingestion: SHA256 file hashing, skips unchanged files
 - Shared `code-rag-engine` crate: pure algorithms compile to native + wasm32
-- GitHub Pages demo: `standalone` feature runs full RAG pipeline in-browser (LLM generation optional)
+- GitHub Pages demo: `standalone` feature runs the full RAG pipeline in-browser (LLM generation optional), plus an interactive **topology tab** — d3-force canvas of each project's emergent communities (community-colored, degree-sized, relation-dashed edges; theme-aware palette), click a node to run a code-rag query about it
 
 ## Known Limitations
 
@@ -209,7 +219,8 @@ See [project-vision.md](project-vision.md) and [development_plan.md](development
 - **LLM & RAG:** `RAG (Retrieval-Augmented Generation)` · `Graph RAG` · `Call Graph Augmentation` · `Graph-Augmented Retrieval` · `SOTA Routing (Reranker Bypass)` · `Soft Reserve` · `Comparison Query Decomposition` · `Per-Comparator RRF Fusion` · `Sub-Query Expansion` · `Vote-Based Project Filter` · `Max-of-Natural Rescoring` · `LLM Integration` · `Google Gemini API` · `rig-core` · `Semantic Search` · `Chatbot` · `Intent Classification (Cosine Similarity)` · `Prototype Query Embeddings` · `k-NN Prototype Voting` · `Keyword Pre-Filter (adversarial-guarded)` · `Intent-Aware Retrieval` · `Per-Intent Gating (ArmPolicy)` · `Two-Stage Retrieval` · `Cross-Encoder Reranking` · `Hybrid Search (BM25 + Dense)` · `RRF Fusion` · `Dual-Vector Schema` · `Declaration Signatures` · `searchable_text (IR field boosting)` · `camelCase Splitting (index-time)` · `Cross-Type Source Ranking` · `Distance-to-Relevance Scoring` · `Retrieval Transparency`
 - **Quality & Evaluation:** `Recall@K` · `MRR (Mean Reciprocal Rank)` · `Intent Accuracy` · `Latency Percentiles (p50/p95)` · `Dual-Run Evaluation (Classifier vs Ground-Truth)` · `Per-Intent Breakdown` · `Declarative Test Dataset` · `Substring File Matching` · `Dataset Freeze Policy` · `Baseline Regression Tracking` · `Space Search (per-intent ArmPolicy sweep)` · `Adversarial Test Cases` · `Held-out Classifier Eval`
 - **Vector Database:** `LanceDB` · `LanceDB FTS` · `Scalar-Only LanceDB Table (call_edges)` · `BM25` · `FastEmbed` · `BGE Embeddings` · `ms-marco-MiniLM-L-6-v2 (ONNX)`
-- **Code Analysis:** `Tree-sitter` · `AST Parsing` · `Code Chunking` · `Docstring Extraction` · `JSDoc Parsing` · `Multi-Language (Rust, Python, TypeScript)` · `Incremental Ingestion (SHA256)` · `Call Graph Extraction (AST-based)` · `Function Call Detection (Direct + Method)` · `Call Edge Resolution (3-tier)` · `Import-Based Symbol Resolution` · `Scoped Identifier Extraction` · `Test Code Exclusion (cfg(test) AST walk)`
+- **Code Analysis:** `Tree-sitter` · `AST Parsing` · `Code Chunking` · `Docstring Extraction` · `JSDoc Parsing` · `Multi-Language (Rust, Python, TypeScript, Go)` · `Incremental Ingestion (SHA256)` · `Call Graph Extraction (AST-based)` · `Function Call Detection (Direct + Method)` · `Call Edge Resolution (3-tier)` · `Import-Based Symbol Resolution` · `Scoped Identifier Extraction` · `Test Code Exclusion (cfg(test) AST walk)`
+- **Graph & Topology (Track R):** `Community Detection (Louvain)` · `Modularity Maximization` · `Cohesion Scoring` · `Edge Betweenness (Brandes)` · `Tarjan SCC` · `Dependency Cycle Detection` · `Emergent Architecture` · `Architecture Drift (Emergent vs Folder)` · `Typed Relation Edges` · `Degree Centrality` · `GraphML Export` · `Mermaid Call-Flow` · `Force-Directed Layout (d3-force)` · `Deterministic Graph Algorithms`
 - **Web Framework:** `Axum` · `Leptos (WASM CSR)` · `Tower HTTP` · `CORS`
 - **Async & Runtime:** `Tokio Runtime` · `Async Programming`
 - **DevOps:** `Docker` · `Docker Compose` · `GitHub Pages (WASM)` · `Google OAuth2 (GIS)`

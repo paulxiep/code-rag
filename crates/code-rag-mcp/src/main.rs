@@ -21,10 +21,13 @@ use clap::Subcommand;
 // the `code-rag-chat` binary crate.
 use code_rag_core::{AppState, build_sources, retriever};
 use code_rag_engine::{
-    graph::{CallGraph, GraphDirection},
+    graph::{CallGraph, GraphDirection, PathError, path_augment},
     intent,
     intent::QueryIntent,
+    mermaid,
 };
+
+mod topology_tools;
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -204,6 +207,45 @@ struct NeighborsParams {
     window: Option<usize>,
 }
 
+/// Parameters for `code_rag_communities`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CommunitiesParams {
+    /// Project to inspect. Optional — with several indexed projects, absent
+    /// means "all of them".
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Parameters for `code_rag_central_nodes`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CentralNodesParams {
+    /// Project to inspect. Optional — with several indexed projects, absent
+    /// means "all of them".
+    #[serde(default)]
+    project: Option<String>,
+    /// How many nodes to return per project. Default 10, max 50.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Parameters for `code_rag_cycles`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CyclesParams {
+    /// Project to inspect. Optional — with several indexed projects, absent
+    /// means "all of them".
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Parameters for `code_rag_path`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PathParams {
+    /// Identifier of the starting function (e.g. `handle_request`).
+    from: String,
+    /// Identifier of the destination function (e.g. `rerank`).
+    to: String,
+}
+
 #[derive(Debug, Serialize)]
 struct GraphEdgeView {
     chunk_id: String,
@@ -319,6 +361,37 @@ impl CodeRagServer {
         );
         graph.register_identifiers(id_pairs);
         Ok(graph)
+    }
+
+    /// R5: one project's persisted community assignments plus the member code
+    /// chunks they point at (keyed by chunk_id) — the shared input shape of
+    /// the `code-raptor::insights` functions.
+    async fn load_assignments_with_members(
+        &self,
+        project: &str,
+    ) -> Result<
+        (
+            Vec<code_rag_types::CommunityAssignment>,
+            std::collections::HashMap<String, code_rag_types::CodeChunk>,
+        ),
+        McpError,
+    > {
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let assignments = store
+            .get_community_assignments(project)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("get_community_assignments failed: {e}"), None)
+            })?;
+        let ids: Vec<String> = assignments.iter().map(|a| a.chunk_id.clone()).collect();
+        let members = store
+            .get_chunks_by_ids(&ids)
+            .await
+            .map_err(|e| McpError::internal_error(format!("get_chunks_by_ids failed: {e}"), None))?
+            .into_iter()
+            .map(|c| (c.chunk_id.clone(), c))
+            .collect();
+        Ok((assignments, members))
     }
 }
 
@@ -555,6 +628,191 @@ impl CodeRagServer {
         }))
         .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
 
+        Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
+    #[tool(
+        description = "List the emergent modules of the indexed repo: communities detected from the code's actual dependency structure (calls, imports, type relations), independent of the folder layout. Returns each community's size, cohesion, key functions/types and home directory, plus a drift comparison showing where the emergent architecture diverges from the directory tree. Use for 'what are the main subsystems?' and 'does the folder structure match reality?'."
+    )]
+    async fn code_rag_communities(
+        &self,
+        Parameters(params): Parameters<CommunitiesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let available = store
+            .list_projects()
+            .await
+            .map_err(|e| McpError::internal_error(format!("list_projects failed: {e}"), None))?;
+        let projects = topology_tools::resolve_projects(params.project.as_deref(), &available)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        let mut payloads = Vec::new();
+        for project in &projects {
+            let clusters = store.get_cluster_chunks(project).await.map_err(|e| {
+                McpError::internal_error(format!("get_cluster_chunks failed: {e}"), None)
+            })?;
+            let (assignments, members) = self.load_assignments_with_members(project).await?;
+            let drift = code_raptor::insights::drift(project, &assignments, &members);
+            payloads.push(topology_tools::communities_response(
+                project, &clusters, &drift,
+            ));
+        }
+
+        let body = serde_json::to_string_pretty(&topology_tools::per_project_body(payloads))
+            .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
+    #[tool(
+        description = "The most-connected definitions in the repo — the functions and types to read first when learning the codebase. Ranked by weighted degree over the full relation topology (calls + imports + type relations)."
+    )]
+    async fn code_rag_central_nodes(
+        &self,
+        Parameters(params): Parameters<CentralNodesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = params.limit.unwrap_or(10).clamp(1, 50);
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let available = store
+            .list_projects()
+            .await
+            .map_err(|e| McpError::internal_error(format!("list_projects failed: {e}"), None))?;
+        let projects = topology_tools::resolve_projects(params.project.as_deref(), &available)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        let mut payloads = Vec::new();
+        for project in &projects {
+            let call_edges = store.get_all_edges(project).await.map_err(|e| {
+                McpError::internal_error(format!("get_all_edges failed: {e}"), None)
+            })?;
+            let graph_edges = store.get_all_graph_edges(project).await.map_err(|e| {
+                McpError::internal_error(format!("get_all_graph_edges failed: {e}"), None)
+            })?;
+            let (assignments, members) = self.load_assignments_with_members(project).await?;
+            let entries = code_raptor::insights::central_nodes(
+                project,
+                &call_edges,
+                &graph_edges,
+                &assignments,
+                &members,
+                limit,
+            );
+            payloads.push(topology_tools::central_nodes_response(project, &entries));
+        }
+
+        let body = serde_json::to_string_pretty(&topology_tools::per_project_body(payloads))
+            .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
+    #[tool(
+        description = "Detect circular dependencies: elementary cycles in the file-level import graph. An empty result is a positive signal (the import graph is acyclic)."
+    )]
+    async fn code_rag_cycles(
+        &self,
+        Parameters(params): Parameters<CyclesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+        let available = store
+            .list_projects()
+            .await
+            .map_err(|e| McpError::internal_error(format!("list_projects failed: {e}"), None))?;
+        let projects = topology_tools::resolve_projects(params.project.as_deref(), &available)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        let mut payloads = Vec::new();
+        for project in &projects {
+            let graph_edges = store.get_all_graph_edges(project).await.map_err(|e| {
+                McpError::internal_error(format!("get_all_graph_edges failed: {e}"), None)
+            })?;
+            let cycles = code_raptor::insights::find_import_cycles(&graph_edges);
+            payloads.push(topology_tools::cycles_response(project, &cycles));
+        }
+
+        let body = serde_json::to_string_pretty(&topology_tools::per_project_body(payloads))
+            .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
+    #[tool(
+        description = "Trace the call chain from one function to another. Returns the shortest call path (identifier + file per hop) and a Mermaid flowchart snippet of the chain. Tries the reverse direction automatically when no forward path exists. Use for 'how does a request get from X to Y?'."
+    )]
+    async fn code_rag_path(
+        &self,
+        Parameters(params): Parameters<PathParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let from = params.from.trim();
+        let to = params.to.trim();
+        if from.is_empty() || to.is_empty() {
+            return Err(McpError::invalid_params(
+                "both `from` and `to` identifiers are required",
+                None,
+            ));
+        }
+
+        let graph = self.load_call_graph().await?;
+        let path_error = |e: PathError| match e {
+            PathError::UnknownIdentifier(id) => McpError::invalid_params(
+                format!("identifier '{id}' is not in the call graph — check spelling or reindex"),
+                None,
+            ),
+            PathError::AmbiguousIdentifier(id) => McpError::invalid_params(
+                format!("identifier '{id}' matches several definitions — too ambiguous to trace"),
+                None,
+            ),
+            PathError::NoPath => McpError::internal_error("unreachable: NoPath handled", None),
+        };
+        let (result, direction) = match path_augment(from, to, &graph) {
+            Ok(r) => (Some(r), "forward"),
+            Err(PathError::NoPath) => match path_augment(to, from, &graph) {
+                Ok(r) => (Some(r), "reverse"),
+                Err(PathError::NoPath) => (None, ""),
+                Err(e) => return Err(path_error(e)),
+            },
+            Err(e) => return Err(path_error(e)),
+        };
+
+        let body = match result {
+            Some(r) => {
+                // Label each hop from its code chunk; basenames keep the
+                // Mermaid nodes compact.
+                let store = caravan_rpc::client::<dyn code_rag_store::seams::VectorReader>();
+                let chunks = store
+                    .get_chunks_by_ids(&r.resolved_chunk_ids)
+                    .await
+                    .map_err(|e| {
+                        McpError::internal_error(format!("get_chunks_by_ids failed: {e}"), None)
+                    })?;
+                let by_id: std::collections::HashMap<&str, &code_rag_types::CodeChunk> =
+                    chunks.iter().map(|c| (c.chunk_id.as_str(), c)).collect();
+                let steps: Vec<mermaid::PathStep> = r
+                    .resolved_chunk_ids
+                    .iter()
+                    .map(|id| match by_id.get(id.as_str()) {
+                        Some(c) => mermaid::PathStep {
+                            id: id.clone(),
+                            label: c.identifier.clone(),
+                            file: c
+                                .file_path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&c.file_path)
+                                .to_string(),
+                        },
+                        None => mermaid::PathStep {
+                            id: id.clone(),
+                            label: id.clone(),
+                            file: String::new(),
+                        },
+                    })
+                    .collect();
+                let diagram = mermaid::render_call_path(&steps);
+                topology_tools::path_response(from, to, Some((&steps, direction)), &diagram)
+            }
+            None => topology_tools::path_response(from, to, None, ""),
+        };
+
+        let body = serde_json::to_string_pretty(&body)
+            .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 

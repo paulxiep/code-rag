@@ -627,8 +627,13 @@ pub async fn retrieve(
     // R3: emergent-cluster arm. Same short-circuit pattern as folder/file.
     // `cluster_vec` mirrors `folder_vec` (Overview-heavy, off for Relationship);
     // `cluster_limit` is per-intent. Missing `cluster_chunks` table → empty.
+    // The sweep override lets the harness force the arm past the policy gate
+    // (CLUSTER_LIMIT=N) — without it, a nonzero limit alone is a no-op because
+    // every intent ships `cluster_vec: false` since the R3 gating decision.
     let cluster_scored: Vec<ScoredChunk<code_rag_types::ClusterChunk>> =
-        if fetch_config.cluster_limit > 0 && policy.cluster_vec {
+        if fetch_config.cluster_limit > 0
+            && (policy.cluster_vec || engine_config.cluster_sweep_override)
+        {
             let raw = if use_hybrid {
                 store
                     .hybrid_search_clusters(query, query_embedding, fetch_config.cluster_limit)

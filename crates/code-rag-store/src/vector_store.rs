@@ -310,6 +310,39 @@ impl VectorStore {
         Ok(())
     }
 
+    /// R5: scalar read of one project's cluster chunks (no vector search) —
+    /// the MCP community tool lists emergent modules from these rows. Missing
+    /// table → empty (pre-topology index), same as `get_community_assignments`.
+    pub async fn get_cluster_chunks_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<ClusterChunk>, StoreError> {
+        let table = match self.conn.open_table(CLUSTER_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut out = Vec::new();
+        for batch in &results {
+            // No score column in a plain scan; the extractor defaults to 0.0.
+            out.extend(
+                extract_cluster_chunks_from_batch(batch, "_distance")?
+                    .into_iter()
+                    .map(|(chunk, _)| chunk),
+            );
+        }
+        // Scan order is storage order; sort for a stable API.
+        out.sort_by_key(|c| c.cluster_id);
+        Ok(out)
+    }
+
     // ========================================================================
     // Read operations (used by code-rag-chat)
     // ========================================================================
@@ -3377,6 +3410,20 @@ impl crate::seams::VectorReader for VectorStore {
     async fn get_all_graph_edges(&self, project_name: &str) -> Result<Vec<GraphEdge>, StoreError> {
         VectorStore::get_all_graph_edges(self, project_name).await
     }
+
+    async fn get_community_assignments(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<CommunityAssignment>, StoreError> {
+        VectorStore::get_community_assignments(self, project_name).await
+    }
+
+    async fn get_cluster_chunks(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<ClusterChunk>, StoreError> {
+        VectorStore::get_cluster_chunks_by_project(self, project_name).await
+    }
 }
 
 // `VectorWriter` (M5 split). Companion to `VectorReader`. Mirrors the same
@@ -3837,5 +3884,49 @@ mod tests {
         // Unknown ID returns empty
         let not_found = store.get_chunks_by_ids(&["unknown".into()]).await.unwrap();
         assert_eq!(not_found.len(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires filesystem, run with --ignored"]
+    async fn test_get_cluster_chunks_by_project() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.lance");
+        let store = VectorStore::new(db_path.to_str().unwrap(), 384)
+            .await
+            .unwrap();
+
+        // Missing table → empty, not an error.
+        let empty = store.get_cluster_chunks_by_project("p").await.unwrap();
+        assert!(empty.is_empty());
+
+        let mk = |cluster_id: u32, project: &str| ClusterChunk {
+            cluster_id,
+            project_name: project.into(),
+            path: "p/src".into(),
+            member_chunk_ids: vec!["a".into(), "b".into()],
+            files: vec!["p/src/x.rs".into()],
+            key_types: vec![],
+            key_functions: vec!["run".into()],
+            dominant_relation: "calls".into(),
+            cohesion: 0.4,
+            summary_text: format!("Cluster {cluster_id}"),
+            chunk_id: format!("cluster:{project}#{cluster_id}"),
+            content_hash: "h".into(),
+            embedding_model_version: "BGESmallENV15_384".into(),
+        };
+        let chunks = vec![mk(1, "p"), mk(0, "p"), mk(0, "other")];
+        let embeddings = vec![fake_embedding(384); 3];
+        store
+            .upsert_cluster_chunks(&chunks, embeddings)
+            .await
+            .unwrap();
+
+        // Project-filtered, sorted by cluster_id, list columns intact.
+        let got = store.get_cluster_chunks_by_project("p").await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].cluster_id, 0);
+        assert_eq!(got[1].cluster_id, 1);
+        assert_eq!(got[0].member_chunk_ids, vec!["a", "b"]);
+        assert!(got.iter().all(|c| c.project_name == "p"));
     }
 }

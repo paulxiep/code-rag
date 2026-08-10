@@ -29,6 +29,11 @@ caravan-rpc = { workspace = true }
 # code-rag-ingest's `ingest_repo` lib entrypoint — lets the MCP do everything
 # the standalone code-rag-ingest binary does without shipping a second binary.
 code-rag-ingest = { path = "../code-rag-ingest" }
+# R5: the topology engine's pure insights facade (central nodes, drift,
+# import cycles) backing the code_rag_communities / central_nodes / cycles
+# tools. Legal dependency direction: raptor depends only on store + types +
+# engine — no cycle.
+code-raptor = { path = "../code-raptor" }
 
 # Async runtime
 tokio = { version = "1.48", features = ["full"] }

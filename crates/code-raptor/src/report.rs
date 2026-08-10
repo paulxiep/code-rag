@@ -10,12 +10,14 @@
 use std::fmt::Write;
 
 use crate::analytics::{Bridge, CommunityLine, ProjectAnalytics};
+use crate::drift::{Divergence, DriftReport};
 
 /// Render the architecture report for one project.
 pub fn render_markdown(
     project: &str,
     analytics: &ProjectAnalytics,
     communities: &[CommunityLine],
+    drift: &DriftReport,
     suggested_questions: &[String],
 ) -> String {
     let mut s = String::new();
@@ -80,10 +82,95 @@ pub fn render_markdown(
     }
 
     let _ = writeln!(w);
+    let _ = writeln!(w, "## Emergent vs folder structure");
+    let _ = writeln!(w);
+    if drift.communities.is_empty() {
+        let _ = writeln!(w, "No communities to compare.");
+    } else {
+        let _ = writeln!(
+            w,
+            "Bottom-up communities compared against the top-down directory layout \
+             (folder edges are excluded from partitioning, so agreement here is \
+             earned, not assumed). Mean community purity (size-weighted): {:.2}.",
+            drift.mean_purity
+        );
+        if drift.divergences.is_empty() {
+            let _ = writeln!(w);
+            let _ = writeln!(
+                w,
+                "Communities align with the folder layout — no significant drift."
+            );
+        } else {
+            let scattered: Vec<_> = drift
+                .divergences
+                .iter()
+                .filter_map(|d| match d {
+                    Divergence::ScatteredCommunity(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            let fragmented: Vec<_> = drift
+                .divergences
+                .iter()
+                .filter_map(|d| match d {
+                    Divergence::FragmentedFolder(f) => Some(f),
+                    _ => None,
+                })
+                .collect();
+            if !scattered.is_empty() {
+                let _ = writeln!(w);
+                let _ = writeln!(w, "Communities whose members scatter across directories:");
+                let _ = writeln!(w);
+                let _ = writeln!(
+                    w,
+                    "| Community | Size | Dominant directory | Purity | Spans |"
+                );
+                let _ = writeln!(w, "|---|---|---|---|---|");
+                for c in scattered {
+                    let _ = writeln!(
+                        w,
+                        "| {} | {} | {} | {:.2} | {} |",
+                        c.community_id,
+                        c.size,
+                        text_or_dash(&c.dominant_dir),
+                        c.purity,
+                        listed(&c.dirs),
+                    );
+                }
+            }
+            if !fragmented.is_empty() {
+                let _ = writeln!(w);
+                let _ = writeln!(w, "Directories that split into multiple communities:");
+                let _ = writeln!(w);
+                let _ = writeln!(
+                    w,
+                    "| Directory | Members | Dominant community | Concentration | Communities |"
+                );
+                let _ = writeln!(w, "|---|---|---|---|---|");
+                for f in fragmented {
+                    let ids: Vec<String> = f.communities.iter().map(|id| id.to_string()).collect();
+                    let _ = writeln!(
+                        w,
+                        "| {} | {} | {} | {:.2} | {} |",
+                        text_or_dash(&f.dir),
+                        f.size,
+                        f.dominant_community,
+                        f.concentration,
+                        listed(&ids),
+                    );
+                }
+            }
+        }
+    }
+
+    let _ = writeln!(w);
     let _ = writeln!(w, "## Cross-module bridges");
     let _ = writeln!(w);
     if analytics.bridges.is_empty() {
-        let _ = writeln!(w, "No cross-community edges — communities are fully separated.");
+        let _ = writeln!(
+            w,
+            "No cross-community edges — communities are fully separated."
+        );
     } else {
         let _ = writeln!(
             w,
@@ -142,11 +229,27 @@ pub fn render_markdown(
     s
 }
 
+/// A capped comma list: first four entries, then `+N more`.
+fn listed(items: &[String]) -> String {
+    const SHOWN: usize = 4;
+    let mut out = items
+        .iter()
+        .take(SHOWN)
+        .map(|s| if s.is_empty() { "-" } else { s.as_str() })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if items.len() > SHOWN {
+        let _ = write!(out, " +{} more", items.len() - SHOWN);
+    }
+    out
+}
+
 /// Deterministic question templates instantiated from the data; templates
 /// whose source list is empty are skipped.
 pub fn suggested_questions(
     analytics: &ProjectAnalytics,
     communities: &[CommunityLine],
+    drift: &DriftReport,
 ) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(c) = analytics.central_nodes.first() {
@@ -155,7 +258,9 @@ pub fn suggested_questions(
             c.identifier
         ));
     }
-    if let Some(c) = communities.iter().max_by_key(|c| (c.size, std::cmp::Reverse(c.id)))
+    if let Some(c) = communities
+        .iter()
+        .max_by_key(|c| (c.size, std::cmp::Reverse(c.id)))
         && !c.central_member.is_empty()
     {
         out.push(format!(
@@ -176,6 +281,21 @@ pub fn suggested_questions(
             "What would it take to break the circular dependency {}?",
             c.files.join(" → ")
         ));
+    }
+    if let Some(d) = drift.divergences.first() {
+        out.push(match d {
+            Divergence::ScatteredCommunity(c) => format!(
+                "Why does community {} (around `{}`) span {} directories?",
+                c.community_id,
+                c.dominant_dir,
+                c.dirs.len()
+            ),
+            Divergence::FragmentedFolder(f) => format!(
+                "Why does `{}` split into {} separate communities?",
+                f.dir,
+                f.communities.len()
+            ),
+        });
     }
     out
 }
@@ -291,11 +411,13 @@ mod tests {
             .collect();
         let topo = Topology::build(&calls, &[]);
         let results = cluster::detect(&topo);
-        let ccs = crate::clusterchunk::build_cluster_chunks("p", &topo, &results, &members, &calls, &[]);
+        let ccs =
+            crate::clusterchunk::build_cluster_chunks("p", &topo, &results, &members, &calls, &[]);
         let analytics = compute("p", &topo, &results, &calls, &[], &members);
         let lines = crate::analytics::community_lines("p", &topo, &ccs, &members);
-        let questions = suggested_questions(&analytics, &lines);
-        render_markdown("p", &analytics, &lines, &questions)
+        let drift = crate::drift::compare("p", &results, &members);
+        let questions = suggested_questions(&analytics, &lines, &drift);
+        render_markdown("p", &analytics, &lines, &drift, &questions)
     }
 
     #[test]
@@ -305,6 +427,7 @@ mod tests {
             "# Architecture report: p",
             "## Read these first",
             "## Communities",
+            "## Emergent vs folder structure",
             "## Cross-module bridges",
             "## Surprising connections",
             "## Dependency cycles",
@@ -336,11 +459,13 @@ mod tests {
             &[],
             &HashMap::new(),
         );
-        let questions = suggested_questions(&analytics, &[]);
+        let drift = crate::drift::DriftReport::default();
+        let questions = suggested_questions(&analytics, &[], &drift);
         assert!(questions.is_empty());
-        let md = render_markdown("empty", &analytics, &[], &questions);
+        let md = render_markdown("empty", &analytics, &[], &drift, &questions);
         assert!(md.contains("No code nodes in the topology."));
         assert!(md.contains("No communities detected."));
+        assert!(md.contains("No communities to compare."));
         assert!(md.contains("None — the topology is empty."));
     }
 

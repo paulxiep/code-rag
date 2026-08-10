@@ -1,17 +1,17 @@
 ---
 name: code-rag
-description: Route code-navigation queries for this repository to the right tool — Grep/Read for exact identifiers and just-edited code, code-rag MCP tools for conceptual "how does X work", call-graph "what calls X", and architecture/onboarding questions. Activate when the user asks about this repository's code, structure, or relationships.
+description: Route code-navigation queries for this repository to the right tool — Grep/Read for exact identifiers and just-edited code, code-rag MCP tools for conceptual "how does X work", call-graph "what calls X", architecture/onboarding questions, and topology insight (emergent modules, drift vs folder layout, dependency cycles, call-path tracing). Activate when the user asks about this repository's code, structure, or relationships.
 ---
 
 # code-rag retrieval skill
 
-This repository is indexed by [code-rag](https://github.com/paulxiep/code-rag) — a local RAG pipeline with intent classification, hybrid BM25 + semantic search, cross-encoder reranking, and a persisted call graph. It exposes five MCP tools (all prefixed `code_rag_`). Use them to answer questions about this codebase faster than Grep-only allows — but reach for Grep first whenever an exact string match will do.
+This repository is indexed by [code-rag](https://github.com/paulxiep/code-rag) — a local RAG pipeline with intent classification, hybrid BM25 + semantic search, cross-encoder reranking, a persisted call graph, and an emergent-community topology. It exposes nine MCP tools (all prefixed `code_rag_`). Use them to answer questions about this codebase faster than Grep-only allows — but reach for Grep first whenever an exact string match will do.
 
 ## Prerequisite
 
 Before using any `code_rag_*` tool, check whether the index exists:
 
-- Default index path: `./.code-rag/index.lance`
+- Default index path: `./.code-rag-mcp/index.lance`
 - **First-time setup** — if the index is missing or empty (a `code_rag_search` returns `hits: []`), call `code_rag_reindex` with `mode: "full"` to perform the initial ingest. The MCP server starts cleanly against an empty index, so this works on a fresh repo where only the `.mcp.json` and skill have been deposited. Tens of seconds on a typical repo. No need to tell the user to run anything in their terminal.
 - **Live edits** — when the user has changed files this session and the index is stale, call `code_rag_reindex` with default args (incremental mode, single-digit seconds for a small edit). For one-off lookups in a single just-edited file, `Grep` / `Read` are still faster.
 
@@ -49,6 +49,26 @@ This is *structurally* better than Grep for call relationships — Grep gives yo
 
 Forces Overview intent — READMEs, folder summaries, module docs, and crate descriptions surface ahead of function-level code. Pass `topic` to focus ("retrieval pipeline", "storage layer"); omit for a general overview.
 
+### `code_rag_communities(project?)` — emergent modules + drift
+*"What are the main subsystems?" / "Does the folder structure match how the code actually hangs together?"*
+
+Lists the codebase's *emergent* modules — communities detected from the actual dependency structure (calls, imports, type relations), independent of the folder layout. Each community carries size, cohesion, key functions/types, and its home directory; the response ends with a **drift** comparison flagging communities that scatter across directories and directories that split into many communities. Use it when the user asks about subsystems, module boundaries, or whether the folder organization reflects reality.
+
+### `code_rag_central_nodes(project?, limit?)` — read these first
+*"Where should I start reading?" / "What are the most important functions here?"*
+
+The most-connected definitions in the repo, ranked by weighted degree over the full relation topology. A good first call when onboarding onto an unfamiliar codebase — pair it with `code_rag_neighbors` on the top hits.
+
+### `code_rag_cycles(project?)` — circular dependencies
+*"Are there any circular dependencies?" / "Is the import graph clean?"*
+
+Detects elementary cycles in the file-level import graph. An empty result is a positive signal (acyclic). Each cycle lists its member files in order — useful when the user asks about refactoring or untangling modules.
+
+### `code_rag_path(from, to)` — trace a call chain
+*"How does a request get from `handle_request` to `rerank`?" / "Trace the flow from X to Y."*
+
+Returns the shortest call path between two function identifiers (each hop with identifier + file) plus a ready-to-embed **Mermaid flowchart** of the chain — include the diagram in your answer when the user asks about flow. Tries the reverse direction automatically if no forward path exists. Both identifiers must be unambiguous; the error names which one failed if not.
+
 ### `code_rag_neighbors(chunk_id, window?)` — expand a hit
 *Follow-up to a `code_rag_search` or `code_rag_graph` result when the default excerpt isn't enough.*
 
@@ -74,6 +94,11 @@ Don't reindex after every small edit — for one-off lookups in a just-edited fi
 | `what does `handle_request` call?` | `code_rag_graph direction=callees` |
 | `give me a project tour` | `code_rag_overview` |
 | `high-level architecture?` | `code_rag_overview` |
+| `what are the main subsystems?` | `code_rag_communities` |
+| `does the folder layout match the real structure?` | `code_rag_communities` (read the `drift` object) |
+| `where should I start reading this codebase?` | `code_rag_central_nodes` |
+| `any circular dependencies?` | `code_rag_cycles` |
+| `how does a call get from X to Y?` | `code_rag_path from=X to=Y` (embed the Mermaid) |
 | `show me more of this result` | `code_rag_neighbors chunk_id=<from prior hit>` |
 | `I edited a bunch of files, re-check` | `code_rag_reindex` (incremental default) |
 | `first time using this on a new repo` | `code_rag_reindex mode=full` |
