@@ -40,11 +40,16 @@ pub fn build_classifier(index: &ChunkIndex) -> IntentClassifier {
 /// Run RAG retrieval only (no LLM) — works without auth.
 pub async fn send_chat_rag_only(
     query: &str,
+    anchor_chunk_id: Option<&str>,
     query_embedding: &[f32],
     index: &ChunkIndex,
     classifier: &IntentClassifier,
 ) -> Result<ChatResponse, String> {
-    let (result, classification) = run_retrieval(query, query_embedding, index, classifier).await;
+    let (mut result, classification) =
+        run_retrieval(query, query_embedding, index, classifier).await;
+    if let Some(id) = anchor_chunk_id {
+        anchor_chunk(&mut result, index, id);
+    }
     let sources = build_source_list(&result);
     let intent_str = format_intent(classification.intent);
 
@@ -64,12 +69,17 @@ pub async fn send_chat_rag_only(
 /// Run the full RAG pipeline in-browser and return a ChatResponse.
 pub async fn send_chat_standalone(
     query: &str,
+    anchor_chunk_id: Option<&str>,
     query_embedding: &[f32],
     index: &ChunkIndex,
     classifier: &IntentClassifier,
     auth: &AuthMethod,
 ) -> Result<ChatResponse, String> {
-    let (result, classification) = run_retrieval(query, query_embedding, index, classifier).await;
+    let (mut result, classification) =
+        run_retrieval(query, query_embedding, index, classifier).await;
+    if let Some(id) = anchor_chunk_id {
+        anchor_chunk(&mut result, index, id);
+    }
 
     let ctx = context::build_context(&result);
     let prompt = context::build_prompt(query, &ctx);
@@ -86,6 +96,33 @@ pub async fn send_chat_standalone(
 }
 
 // --- Internal helpers ---
+
+/// Relevance stamped on an anchored chunk: above the sigmoid range typical
+/// reranked chunks land in, matching the C2 tier-score treatment of
+/// graph-confirmed hits (the click IS structural confirmation).
+const ANCHOR_RELEVANCE: f32 = 0.9;
+
+/// R5: guarantee the topology-clicked chunk reaches the context. The click
+/// carries the exact `chunk_id`, so no identifier resolution is involved —
+/// generic names (`Player` in two projects) defeat resolution-based
+/// augmentation, but the clicked definition is ground truth by construction.
+fn anchor_chunk(result: &mut RetrievalResult, index: &ChunkIndex, chunk_id: &str) {
+    let Some(&i) = index.chunk_id_index.get(chunk_id) else {
+        return; // stale artifact vs newer index — degrade to plain retrieval
+    };
+    let chunk = index.code_chunks[i].chunk.clone();
+    // Dedupe: if retrieval already found it, promote rather than duplicate.
+    result
+        .code_chunks
+        .retain(|sc| sc.chunk.chunk_id != chunk_id);
+    result.code_chunks.insert(
+        0,
+        ScoredChunk {
+            chunk,
+            score: ANCHOR_RELEVANCE,
+        },
+    );
+}
 
 async fn run_retrieval(
     query: &str,

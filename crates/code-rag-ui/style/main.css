@@ -417,15 +417,33 @@ pre > code {
 	display: flex;
 	gap: 0.4em;
 	flex-wrap: wrap;
-	padding: 0.25em 0;
+	padding: 0.15em 0;
 }
 
+/* Rendered as a <span> in backend mode (informational) and as a <button>
+   in standalone mode, where the bar is the topology project selector. */
 .project-tag {
+	font-family: inherit;
+	border: none;
 	background: rgb(var(--gray-light));
 	color: rgb(var(--gray-dark));
 	padding: 0.15em 0.5em;
 	border-radius: 4px;
 	font-size: 0.75em;
+}
+
+button.project-tag {
+	cursor: pointer;
+}
+
+button.project-tag:hover {
+	background: rgb(var(--gray));
+	color: rgb(var(--surface));
+}
+
+.project-tag.active {
+	background: var(--accent);
+	color: rgb(var(--surface));
 }
 
 /* Tabs (R5: chat / topology) */
@@ -503,7 +521,10 @@ pre > code {
 
 .viz-canvas-wrap {
 	flex: 1;
-	min-height: 320px;
+	min-height: 280px;
+	/* Cap growth so the whole view (header → legend) fits typical iframe
+	   heights; the canvas re-measures on resize either way. */
+	max-height: 480px;
 	position: relative;
 	border: 1px solid rgb(var(--gray-light));
 	border-radius: 8px;
@@ -539,10 +560,18 @@ pre > code {
 }
 
 .viz-legend {
+	/* One wrapping flow: community and edge chips share lines, saving a
+	   row or two of iframe height. */
 	display: flex;
-	flex-direction: column;
-	gap: 0.3em;
-	font-size: 0.75em;
+	flex-wrap: wrap;
+	row-gap: 0.25em;
+	column-gap: 0.6em;
+	font-size: 0.72em;
+}
+
+.viz-legend-communities,
+.viz-legend-edges {
+	display: contents;
 }
 
 .viz-legend-communities,

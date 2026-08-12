@@ -41,7 +41,25 @@ pub enum ActiveTab {
 /// with another `RwSignal<Option<String>>`.
 #[cfg(feature = "standalone")]
 #[derive(Clone, Copy)]
-pub struct PendingQuery(pub RwSignal<Option<String>>);
+pub struct PendingQuery(pub RwSignal<Option<PendingChat>>);
+
+/// A chat request queued by another view (topology click-a-node). Carries the
+/// clicked chunk's id so retrieval can guarantee that exact chunk reaches the
+/// context — identifier resolution alone is unreliable for generic names that
+/// exist in several projects (`Player`, `Config`, …).
+#[cfg(feature = "standalone")]
+#[derive(Clone)]
+pub struct PendingChat {
+    pub query: String,
+    pub anchor_chunk_id: Option<String>,
+}
+
+/// R5: the selected project, shared app-wide. The top projects bar is the
+/// single selector (visible on both tabs); today only the topology view
+/// consumes the selection — chat searches the whole corpus regardless.
+#[cfg(feature = "standalone")]
+#[derive(Clone, Copy)]
+pub struct SelectedProject(pub RwSignal<Option<String>>);
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -116,6 +134,9 @@ fn standalone_app() -> impl IntoView {
     let tab: RwSignal<ActiveTab> = RwSignal::new(ActiveTab::Chat);
     provide_context(tab);
     provide_context(PendingQuery(RwSignal::new(None)));
+    // One selection, one bar: the top projects bar drives the topology view.
+    let selected_project = SelectedProject(RwSignal::new(None));
+    provide_context(selected_project);
     // Latches true on first activation so users who never open the topology
     // tab never pay its artifact fetch / simulation cost.
     let topology_opened = RwSignal::new(false);
@@ -129,6 +150,10 @@ fn standalone_app() -> impl IntoView {
         match data::load_index("static/index.json").await {
             Ok(index) => {
                 set_projects.set(index.projects.clone());
+                // Default selection: first indexed project.
+                if let Some(first) = index.projects.first().cloned() {
+                    selected_project.0.set(Some(first));
+                }
                 let classifier = standalone_api::build_classifier(&index);
                 classifier_signal.set(Some(Arc::new(classifier)));
                 index_signal.set(Some(Arc::new(index)));
@@ -180,6 +205,8 @@ fn standalone_app() -> impl IntoView {
                 </div>
             </Show>
 
+            // The single project bar: shown on both tabs, drives the
+            // topology view's selection (chat searches all projects).
             <Show when=move || !projects.get().is_empty()>
                 <div class="projects-bar">
                     <For
@@ -187,7 +214,27 @@ fn standalone_app() -> impl IntoView {
                         key=|p| p.clone()
                         let:project
                     >
-                        <span class="project-tag">{project}</span>
+                        {
+                            let name = project.clone();
+                            let is_active = {
+                                let name = name.clone();
+                                move || {
+                                    selected_project.0.get().as_deref()
+                                        == Some(name.as_str())
+                                }
+                            };
+                            view! {
+                                <button
+                                    class="project-tag"
+                                    class:active=is_active
+                                    on:click=move |_| {
+                                        selected_project.0.set(Some(name.clone()))
+                                    }
+                                >
+                                    {project.clone()}
+                                </button>
+                            }
+                        }
                     </For>
                 </div>
             </Show>

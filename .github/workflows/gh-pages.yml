@@ -66,6 +66,10 @@ jobs:
         run: |
           git clone https://github.com/paulxiep/portfolio.git /tmp/targets/portfolio
           cargo run --release -p code-rag-ingest -- ingest /tmp/targets/portfolio --db-path /tmp/demo.lance
+          # The umbrella repo's root-level files land as a stray `portfolio`
+          # project, and `certificates` is not a code project — purge both
+          # (removes chunks, edges, communities, clusters, report + viz).
+          cargo run --release -p code-rag-ingest -- purge portfolio certificates --db-path /tmp/demo.lance
 
       - name: Export to static JSON
         run: cargo run --release -p code-rag-ingest -- export --db-path /tmp/demo.lance --output crates/code-rag-ui/static/index.json

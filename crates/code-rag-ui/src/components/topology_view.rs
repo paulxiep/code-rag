@@ -3,7 +3,6 @@
 //! time, with click-a-node → run a code-rag query.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use leptos::html::Canvas;
 use leptos::prelude::*;
@@ -11,9 +10,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::data::ChunkIndex;
 use crate::viz_data::{self, VizFetchError, VizMeta, VizNodeClick};
-use crate::{ActiveTab, PendingQuery, graph_bridge};
+use crate::{ActiveTab, PendingChat, PendingQuery, SelectedProject, graph_bridge};
 
 /// Fixed palette slots; community ids past the last slot render as "Other".
 /// Never wraps — two communities must never share a hue (an honest legend).
@@ -40,22 +38,32 @@ fn community_color(id: u32) -> String {
 
 /// The chat query a node click produces. Phrasing steers the intent
 /// classifier toward the arm that fits the node: definitions → the
-/// relationship/call-graph arm (which resolves the clicked identifier),
-/// containers → the overview arm (folder/file chunks).
+/// relationship/call-graph arm, containers → the overview arm (folder/file
+/// chunks). Naming the project disambiguates generic identifiers (`Player`
+/// exists in several projects) for both the reranker and the LLM; the exact
+/// clicked chunk additionally rides along as the retrieval anchor.
 fn node_query(node: &VizNodeClick) -> String {
     let name = if node.label.is_empty() {
         node.id.as_str()
     } else {
         node.label.as_str()
     };
+    // File paths are project-prefixed (`7_wonders/elements.py`).
+    let project = node.file.split('/').next().unwrap_or("");
     if node.kind == "file" {
-        format!("What is the role of `{name}` in the architecture of this project?")
+        if project.is_empty() {
+            format!("What is the role of `{name}` in the architecture of this project?")
+        } else {
+            format!("What is the role of `{name}` in the architecture of the `{project}` project?")
+        }
     } else {
         let basename = node.file.rsplit('/').next().unwrap_or(&node.file);
-        if basename.is_empty() {
+        if basename.is_empty() || project.is_empty() {
             format!("What does `{name}` do and what depends on it?")
         } else {
-            format!("What does `{name}` in `{basename}` do and what depends on it?")
+            format!(
+                "What does `{name}` in `{basename}` (`{project}` project) do and what depends on it?"
+            )
         }
     }
 }
@@ -64,12 +72,13 @@ fn node_query(node: &VizNodeClick) -> String {
 /// then kept alive across tab switches so the layout survives.
 #[component]
 pub fn TopologyView() -> impl IntoView {
-    let index_signal =
-        use_context::<RwSignal<Option<Arc<ChunkIndex>>>>().expect("index context missing");
     let tab = use_context::<RwSignal<ActiveTab>>().expect("ActiveTab context missing");
     let pending = use_context::<PendingQuery>().expect("PendingQuery context missing");
-
-    let selected: RwSignal<Option<String>> = RwSignal::new(None);
+    // Selection lives app-wide: the top projects bar (main.rs) is the single
+    // selector, visible on both tabs.
+    let selected = use_context::<SelectedProject>()
+        .expect("SelectedProject context missing")
+        .0;
     let state: RwSignal<VizState> = RwSignal::new(VizState::Idle);
     let meta: RwSignal<Option<VizMeta>> = RwSignal::new(None);
     // Raw artifact JSON per project — fetched once per session, handed to
@@ -81,22 +90,6 @@ pub fn TopologyView() -> impl IntoView {
     // → local storage.
     let click_closure: StoredValue<Option<Closure<dyn Fn(String)>>, LocalStorage> =
         StoredValue::new_local(None);
-
-    let projects = move || {
-        index_signal
-            .get()
-            .map(|i| i.projects.clone())
-            .unwrap_or_default()
-    };
-
-    // Default selection: first indexed project.
-    Effect::new(move |_| {
-        if selected.get_untracked().is_none()
-            && let Some(first) = projects().first().cloned()
-        {
-            selected.set(Some(first));
-        }
-    });
 
     // Fetch (or serve cached) on selection change.
     Effect::new(move |_| {
@@ -143,7 +136,12 @@ pub fn TopologyView() -> impl IntoView {
 
         let closure = Closure::wrap(Box::new(move |node_json: String| {
             if let Ok(node) = serde_json::from_str::<VizNodeClick>(&node_json) {
-                pending.0.set(Some(node_query(&node)));
+                pending.0.set(Some(PendingChat {
+                    query: node_query(&node),
+                    // The clicked chunk itself — guaranteed into the context,
+                    // no identifier-resolution lottery.
+                    anchor_chunk_id: Some(node.id.clone()),
+                }));
                 tab.set(ActiveTab::Chat);
             }
         }) as Box<dyn Fn(String)>);
@@ -289,26 +287,6 @@ pub fn TopologyView() -> impl IntoView {
 
     view! {
         <div class="topology-view">
-            <div class="viz-project-row">
-                <For each=projects key=|p| p.clone() let:project>
-                    {
-                        let name = project.clone();
-                        let is_active = {
-                            let name = name.clone();
-                            move || selected.get().as_deref() == Some(name.as_str())
-                        };
-                        view! {
-                            <button
-                                class="viz-project-btn"
-                                class:active=is_active
-                                on:click=move |_| selected.set(Some(name.clone()))
-                            >
-                                {project.clone()}
-                            </button>
-                        }
-                    }
-                </For>
-            </div>
             {status_line}
             <div class="viz-canvas-wrap" class:hidden=move || state.get() != VizState::Ready>
                 <canvas class="viz-canvas" node_ref=canvas_ref></canvas>
