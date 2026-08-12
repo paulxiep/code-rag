@@ -27,10 +27,11 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        # No toolchain action: it would set RUSTUP_TOOLCHAIN and override the
+        # repo's rust-toolchain.toml pin. `rustup show` makes the preinstalled
+        # rustup install the pinned channel + targets from the file.
+        run: rustup show
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4

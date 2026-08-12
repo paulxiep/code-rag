@@ -15,10 +15,9 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        # See gh-pages.yml — the repo's rust-toolchain.toml is the single pin.
+        run: rustup show
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
