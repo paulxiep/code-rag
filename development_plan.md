@@ -10,7 +10,7 @@ Refer to [project vision](project-vision.md) for full improvement ideas and [arc
 
 **Build vertically, not horizontally.**
 
-Each iteration delivers a thin slice through the workspace crates (code-raptor, code-rag-chat, code-rag-engine, code-rag-ui). Every version produces something *runnable* and *demonstrable*.
+Each iteration delivers a thin slice through the workspace crates (code-rag-ingest, code-raptor, code-rag-chat, code-rag-engine, code-rag-ui). Every version produces something *runnable* and *demonstrable*.
 
 **Value proposition: Decouple knowledge from reasoning.**
 
@@ -27,8 +27,8 @@ Every implementation decision should be evaluated against these three principles
 | Principle | Meaning | Example |
 |-----------|---------|---------|
 | **Declarative** | Describe *what*, not *how*. Config over code. Data-driven behavior. | Chunk types declare their schema; retrieval strategies defined by config, not hardcoded. Intent routing rules are data, not if-else chains. |
-| **Modular** | Components are self-contained, swappable, and independently testable. | code-raptor and code-rag-chat share no code, only LanceDB schema. code-rag-engine compiles to both native and wasm32. Swap HDBSCAN for hierarchical clustering without touching summarization. |
-| **SoC** (Separation of Concerns) | Each module has ONE job. No god objects. Clear boundaries. | code-raptor = indexing. code-rag-chat = querying. code-rag-engine = algorithms. code-rag-ui = frontend. Types live in code-rag-types. No crate does two things. |
+| **Modular** | Components are self-contained, swappable, and independently testable. | The indexer (`code-rag-ingest`) and code-rag-chat share no code, only LanceDB schema. code-rag-engine compiles to both native and wasm32. Swap HDBSCAN for hierarchical clustering without touching summarization. |
+| **SoC** (Separation of Concerns) | Each module has ONE job. No god objects. Clear boundaries. | code-rag-ingest = indexing. code-raptor = topology (Track R). code-rag-chat = querying. code-rag-engine = algorithms. code-rag-ui = frontend. Types live in code-rag-types. No crate does two things. (The `code-raptor` name moves from the indexer to the topology engine at Track R R0.) |
 
 **Before writing code, ask:**
 1. Am I describing behavior or implementing mechanics? (Declarative)
@@ -41,7 +41,7 @@ Every implementation decision should be evaluated against these three principles
 
 | Principle | Meaning | Example |
 |-----------|---------|---------|
-| **Research vs Production** | Experimental features get dedicated versions with evaluation criteria | RAPTOR clustering is time-boxed research, not bundled with stable features |
+| **Research vs Production** | Experimental features get dedicated versions with evaluation criteria | Track R's recursive abstraction is time-boxed research, not bundled with stable features |
 | **Incremental Value** | Each version improves user-facing capability | V1 enables query routing, not just "indexing works" |
 
 ---
@@ -49,10 +49,11 @@ Every implementation decision should be evaluated against these three principles
 ## Architecture Overview
 
 ```
-code-raptor (producer)          code-rag-chat (consumer)
-    │                                   │
-    │ writes chunks                     │ reads chunks
-    ▼                                   ▼
+code-rag-ingest (producer)      code-rag-chat (consumer)
+  + code-raptor (topology, R)        │
+    │                                │
+    │ writes chunks + edges          │ reads chunks
+    ▼                                ▼
               [LanceDB Schema]
               - CodeChunk (function-level)
               - ReadmeChunk, CrateChunk, ModuleDocChunk
@@ -60,6 +61,7 @@ code-raptor (producer)          code-rag-chat (consumer)
               - FileChunk (A, future)
               - ClusterChunk (R, future)
               - CallEdge (C1, future)
+              - GraphEdge (R, future)
 
 code-rag-engine (shared pure algorithms, no I/O)
     ▲ used by code-rag-chat (native)
@@ -74,12 +76,11 @@ code-rag-ui (Leptos WASM frontend)
 
 ## Dependency Graph
 
-### code-raptor (Indexing) Dependencies
+### code-rag-ingest (Indexing) Dependencies
 
 ```
 Fix docstring extraction
     └──► Docstring generation (Track D) [must extract before generate]
-            └──► RAPTOR clustering (Track R) [clusters on generated summaries]
 
 Inline call context
     └──► Same-file call edges
@@ -95,8 +96,9 @@ LanguageHandler refactor ─────── V1.2 (pure refactor, unblocks V1.
     ├──► TypeScript support (V1.4)
     └──► Docstring extraction (V1.5, wires extract_docstring for all handlers)
 
-RAPTOR clustering (Track R) ───── needs Track D enrichment + Track A hierarchy
-    └──► Architecture comparison [requires Track A hierarchy]
+Code Raptor topology (Track R) ── R0 crate split (code-raptor → topology; parser → code-rag-ingest)
+    └──► R1 richer edges extend the C1 call graph → R2 communities → R3 cluster chunks → R4 analytics
+            └──► R5 architecture comparison [requires Track A hierarchy]
 ```
 
 ### code-rag-chat + code-rag-engine (Query) Dependencies
@@ -117,7 +119,7 @@ Graph query interface ─────────── requires call graph data
 | Can run in parallel | Rationale |
 |---------------------|-----------|
 | Track A + Track B + Track C + Track D | Independent after V3 |
-| Track R after Track D | R clusters on D-generated summaries |
+| Track R after C1 (call graph) | R1 richer edges extend the graph; no longer needs Track D |
 | A + B1 + C1 + D1 | All can start after V3 completes |
 | V2.2 + V2.3 | All code-rag-chat, no dependencies |
 | Folder/File embeddings + Hybrid search | Indexing vs query |
@@ -150,11 +152,11 @@ V3 (Quality Harness) ─── quantitative testing infrastructure
  ├──► Track D: Enrichment Pipeline
  │       D1: Docstring Generation → D2: Type Inference
  │
- └──► Track R: RAPTOR Research (time-boxed, after Track D)
-         R1 → R2 → R3 → R4 → R5
+ └──► Track R: Code Raptor — Emergent Code Topology (after C1)
+         R0 → R1 → R2 → R3 → R4 → R5
 ```
 
-V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3. Track R starts after Track D. Prioritize based on user needs.
+V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3. Track R (Code Raptor) starts with R0 (crate split: parser → `code-rag-ingest`, topology → `code-raptor`), builds on Track C's call graph (R1 adds richer edges) and no longer waits on Track D. Prioritize based on user needs.
 
 ### Effort Summary
 
@@ -167,7 +169,7 @@ V1 → V2 → V3 are sequential. Tracks A, B, C, D can run in parallel after V3.
 | **Track B** (B1→B2→B3→B4→B5) | 3-4 weeks | — |
 | **Track C** (C1→C2→C3) | 2-3 weeks | — |
 | **Track D** (D1→D2) | 1-1.5 weeks | — |
-| **Track R** (R1→R5, after D) | 2 weeks | — |
+| **Track R** (R0→R5) | ~1.0-1.3 eng-months | — |
 
 **If running Tracks in parallel:** V1+V2+V3 (~4 weeks) + longest Track (~5 weeks) = **~9-10 weeks to full feature set**
 
@@ -184,13 +186,13 @@ For portfolio demonstrations, hirers ask architecture questions first:
 | **B2 (Hybrid search)** | High | Precision for exact identifier queries |
 | **D1 (Docstring Gen)** | Medium | Helps with undocumented code |
 | **C1 (Same-file edges)** | Medium | Basic relationship queries |
-| **R (RAPTOR)** | Research | Impressive if successful, time-boxed |
+| **R (Code Raptor topology)** | Research | Emergent architecture + topology analytics (communities, cohesion, dependency cycles, surprising coupling); core deterministic, recursive abstraction time-boxed |
 
 ---
 
 ## V1: Indexing Foundation [COMPLETE]
 
-**Goal:** Enable fast iteration, clean language abstraction, and fix docstring extraction. All code-raptor + code-rag-store work.
+**Goal:** Enable fast iteration, clean language abstraction, and fix docstring extraction. All code-rag-ingest + code-rag-store work.
 
 | Item | Status | Notes |
 |------|--------|-------|
@@ -229,7 +231,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - Migrate all callers: `analyze_content()`, `extract_module_docs()`, `process_code_file()`
 - Remove `SupportedLanguage` enum entirely
 
-**Crate:** code-raptor
+**Crate:** code-rag-ingest
 
 ### V1.3: Incremental Ingestion
 
@@ -254,7 +256,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - `--full` flag for complete re-index, `--dry-run` for preview
 - Insert-before-delete ordering (safer on crash)
 - **Essential:** Enables fast iteration for all subsequent work
-- **Crates:** code-rag-types, code-rag-store, code-raptor
+- **Crates:** code-rag-types, code-rag-store, code-rag-ingest
 
 ### V1.4: TypeScript Support
 
@@ -266,7 +268,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - Query patterns for: `function_declaration`, `arrow_function`, `method_definition`, `class_declaration`, `interface_declaration`, `type_alias_declaration`, `enum_declaration`
 - Register in `languages/mod.rs` handler list
 - Note: `extract_docstring` is implemented but remains unwired in parser.rs until V1.5
-- **Crate:** code-raptor
+- **Crate:** code-rag-ingest
 
 ### V1.5: Docstring Extraction [COMPLETE]
 
@@ -285,12 +287,12 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 **Testing:** 97 tests pass (0 failures, 0 warnings). Unit tests per handler, cross-language pipeline tests in parser.rs, context display test.
 
-**Crate:** code-raptor, code-rag-chat
+**Crate:** code-rag-ingest, code-rag-chat
 
 **Deliverable:** Fast re-ingestion. Clean language abstraction. Docstrings in search results. TypeScript support with docstrings from day one. V1 milestone complete.
 
 ### V1 Hero Queries (Testing Checkpoint — Ready to Validate)
-- "What is code-raptor?" → Explains ingestion pipeline with docstrings visible
+- "What is code-rag-ingest?" → Explains ingestion pipeline with docstrings visible
 - "How does the retriever work?" → Returns `retriever.rs` (self-reference verification)
 
 ---
@@ -301,7 +303,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 | Item | Status | Notes |
 |------|--------|-------|
-| V2.1 Inline Call Context | Done | Ephemeral call extraction via tree-sitter, enriches embedding text (code-raptor) |
+| V2.1 Inline Call Context | Done | Ephemeral call extraction via tree-sitter, enriches embedding text (code-rag-ingest) |
 | V2.2 Intent Classification + Query Routing | Done | Cosine similarity classification, `QueryIntent` enum, `RoutingTable` HashMap (code-rag-engine) |
 | V2.3 Retrieval Traces | Done | `ScoredChunk<T>`, all chunk types as sources, relevance scores (code-rag-engine, code-rag-store) |
 | V2.4 Leptos Migration | Done | Leptos WASM SPA replaces htmx/Askama (code-rag-ui) |
@@ -342,9 +344,9 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 **Breaking change:** `analyze_with_handler` return type changes from `Vec<CodeChunk>` to `Vec<(CodeChunk, Vec<String>)>`, requiring ~30 tests to add mechanical destructuring.
 
-**Deployment:** Requires `code-raptor ingest <repo> --full` after deployment. `content_hash` is SHA256 of source file, not embedding text — incremental mode won't re-embed unchanged files.
+**Deployment:** Requires `code-rag-ingest ingest <repo> --full` after deployment. `content_hash` is SHA256 of source file, not embedding text — incremental mode won't re-embed unchanged files.
 
-**Crates affected:** code-raptor (`language.rs`, `languages/*.rs`, `parser.rs`, `mod.rs`, `main.rs`), code-rag-store (`embedder.rs`)
+**Crates affected:** code-rag-ingest (`language.rs`, `languages/*.rs`, `parser.rs`, `mod.rs`, `main.rs`), code-rag-store (`embedder.rs`)
 
 ### V2.2: Intent Classification + Query Routing [COMPLETE]
 - Embedding-based classification: cosine similarity against pre-computed prototype query embeddings
@@ -372,7 +374,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 ### V2 Hero Queries (Testing Checkpoint)
 - "How does the chat endpoint work?" → intent: implementation, sources include handlers.rs with relevance %
-- "What is code-raptor?" → intent: overview, sources show README + CrateChunks ranking higher
+- "What is code-rag-ingest?" → intent: overview, sources show README + CrateChunks ranking higher
 - Overview vs implementation queries produce visibly different source distributions
 
 ### V2.4: Leptos Migration [COMPLETE]
@@ -405,7 +407,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - `auth.rs`: OAuth2 PKCE flow, API key input, localStorage persistence
 - `embedder.rs`: wasm-bindgen bridge to transformers.js via `window.__codeRagEmbedQuery()`
 
-**New subcommand: `code-raptor export`**
+**New subcommand: `code-rag-ingest export`**
 - Reads all 4 chunk types + embeddings from LanceDB
 - Pre-computes intent prototype embeddings
 - Outputs `ChunkIndex` JSON for standalone WASM demo
@@ -415,7 +417,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 - Builds with `--features standalone`, deploys to GitHub Pages
 
 **Test Results:** 135 tests pass (up from 132)
-- **Crates:** code-rag-engine (new), code-rag-ui (standalone feature), code-raptor (export), code-rag-chat (re-exports)
+- **Crates:** code-rag-engine (new), code-rag-ui (standalone feature), code-rag-ingest (export), code-rag-chat (re-exports)
 
 ---
 
@@ -482,7 +484,7 @@ For portfolio demonstrations, hirers ask architecture questions first:
 
 **Embedding granularity mismatch:** Mitigated by (1) embedding summaries not raw content (~100-300 tokens, comparable to CodeChunk's ~200-500), and (2) per-type search + RRF fusion (rank-based, never compares scores across types). Monitor recall@K per chunk type post-A.
 
-**WASM compatibility:** All summaries are template-based (deterministic, no LLM). Generated at CI ingestion time by code-raptor. Exported to index.json alongside existing chunks. No new CI secrets or dependencies.
+**WASM compatibility:** All summaries are template-based (deterministic, no LLM). Generated at CI ingestion time by code-rag-ingest. Exported to index.json alongside existing chunks. No new CI secrets or dependencies.
 
 **Hierarchy levels:**
 ```
@@ -495,13 +497,13 @@ Repo Summary  (CrateChunk / ReadmeChunk — already exist)
 ### A1: Text Module Consolidation
 - Create `code-rag-engine::text` module (pure, no I/O, compiles to WASM + native)
 - Move into it:
-  - `tokenize()` — from code-rag-ui/text_search.rs and code-raptor/export.rs (3 copies → 1)
-  - `IdfTable` struct + `idf()` + `build()` — from code-rag-ui/text_search.rs and code-raptor/export.rs
+  - `tokenize()` — from code-rag-ui/text_search.rs and code-rag-ingest/export.rs (3 copies → 1)
+  - `IdfTable` struct + `idf()` + `build()` — from code-rag-ui/text_search.rs and code-rag-ingest/export.rs
   - `BM25 scoring` algorithm — from code-rag-ui/text_search.rs
   - `build_searchable_text()` + `split_camel_case()` — from code-rag-store/vector_store.rs
-  - Intent prototype texts — from code-raptor/export.rs (duplicated from intent.rs)
+  - Intent prototype texts — from code-rag-ingest/export.rs (duplicated from intent.rs)
 - Remove dead `build_searchable_text()` copy from code-rag-ui/data.rs
-- Update imports in code-rag-ui, code-raptor, code-rag-store
+- Update imports in code-rag-ui, code-rag-ingest, code-rag-store
 - **Crate:** code-rag-engine (new text module), updates to all consumers
 - **Testable:** Existing harness + unit tests must pass unchanged (pure refactor, no behavior change)
 - **Benefit:** A2+ folder/file searchable text and BM25 go into code-rag-engine from day one — zero new duplication
@@ -517,7 +519,7 @@ Repo Summary  (CrateChunk / ReadmeChunk — already exist)
   Subfolders: {subfolder list}
   ```
 - Embed template text (~100-200 tokens)
-- **Crate:** code-raptor (types in code-rag-types)
+- **Crate:** code-rag-ingest (types in code-rag-types)
 - **Testable:** Unit tests for template correctness, ingestion roundtrip, export includes folder_chunks
 
 ### A3: Collapsed-Tree Routing
@@ -555,7 +557,7 @@ Repo Summary  (CrateChunk / ReadmeChunk — already exist)
   ```
 - Embed template text (~100-200 tokens)
 - **Shared with C1:** `extract_file_imports` on `LanguageHandler` trait is needed by both A1.4 (FileChunk "Imports" template field) and C1 (cross-file call resolution). Whichever track runs first builds it; the other reuses.
-- **Crate:** code-raptor (types in code-rag-types)
+- **Crate:** code-rag-ingest (types in code-rag-types)
 - **Testable immediately (routing already in place):**
   - Add ~5 file-level test queries to test_queries.json
   - Harness run: file queries hit FileChunks; folder queries still work; code queries unaffected
@@ -572,7 +574,7 @@ A5 retired. The 3 measurement queries kept in `data/test_queries.json` as regres
 After A1 consolidation, new Track A logic lives in `code-rag-engine` (shared). Platform layers are thin wrappers:
 - `code-rag-store`: wraps engine text/search logic with LanceDB queries (native)
 - `code-rag-ui`: wraps engine text/search logic with brute-force vectors (WASM)
-- `code-raptor export`: uses engine for IDF + searchable text, adds folder/file tables to JSON
+- `code-rag-ingest export`: uses engine for IDF + searchable text, adds folder/file tables to JSON
 
 **WASM changes distributed across steps (not a separate block):**
 - A2: `ChunkIndex` gains `folder_chunks`, `search_folder_arm()` uses engine's BM25
@@ -668,7 +670,7 @@ Independent track. Can run in parallel with Tracks A, C, and D.
 - FTS index retargeted from `code_content` to `searchable_text`
 - Hybrid search re-enabled (was disabled after B2 regression)
 - Per-intent empirical gating via 4×4 space search
-- **Crates:** code-rag-types, code-raptor, code-rag-store, code-rag-engine, code-rag-ui
+- **Crates:** code-rag-types, code-rag-ingest, code-rag-store, code-rag-engine, code-rag-ui
 
 See `development_log.md` for results and per-intent gating rationale.
 
@@ -721,7 +723,7 @@ End-to-end call graph: extract edges (same-file + cross-file), persist in LanceD
 - Relationship intent augments vector search with graph traversal (hybrid, graceful degradation)
 - Export edges in `index.json` for GitHub Pages standalone demo
 - Accept 80% cross-file accuracy. Skip: trait dispatch, duck typing, macros, closures-in-variables
-- **Crates:** code-rag-types, code-rag-store, code-raptor, code-rag-engine, code-rag-chat, code-rag-ui
+- **Crates:** code-rag-types, code-rag-store, code-rag-ingest, code-rag-engine, code-rag-chat, code-rag-ui
 
 **Hero Queries:**
 - "What calls the retrieve function?" → Returns accurate callers via graph traversal
@@ -778,10 +780,10 @@ Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is
 - Content-hash caching (regenerate `source: generated` only on code changes)
 - Tiered models: Haiku for bulk, better model for central functions
 - Store separately (never modify source)
-- **Crate:** code-raptor
+- **Crate:** code-rag-ingest
 
 **Contextual Preamble (Anthropic's Contextual Retrieval technique):**
-- For each CodeChunk, generate a 50-100 token preamble situating it in the codebase: "This function is part of the ingestion pipeline in code-raptor. It handles..."
+- For each CodeChunk, generate a 50-100 token preamble situating it in the codebase: "This function is part of the ingestion pipeline in code-rag-ingest. It handles..."
 - Preamble prepended to embedding text in `format_code_for_embedding()`, NOT stored on the chunk struct (ephemeral, like V2.1 calls)
 - Same LLM call pattern as docstring generation (Haiku for bulk, batch together)
 - Reduces failed retrievals by up to 49% (67% combined with B1 reranking)
@@ -791,7 +793,7 @@ Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is
 - LLM-infer types for untyped Python functions
 - Same pattern as docstring generation
 - Store with `source: generated` flag
-- **Crate:** code-raptor
+- **Crate:** code-rag-ingest
 
 **Deliverable:** Undocumented third-party code returns useful search results.
 
@@ -803,103 +805,104 @@ Independent track. Can run in parallel with Tracks A, B, C. Only prerequisite is
 
 ---
 
-# Track R: RAPTOR Research (Bottom-Up Architecture)
+# Track R: Code Raptor — Emergent Code Topology (Bottom-Up Architecture)
 
-Research track. Starts after Track D completes (needs D-generated summaries for clustering input). Track A hierarchy needed only for R5 architecture comparison.
+**Code Raptor** discovers the *real* modules a codebase forms — bottom-up — and compares them to the folder layout. Research-leaning, but the core is deterministic enough to productize. **Detailed design: [R.md](R.md).**
 
-**Goal:** Validate emergent architecture discovery via clustering. Time-boxed research sprint.
+**Revised approach (vs the original embedding-clustering sketch):** instead of clustering on embedding density (HDBSCAN/spectral over summaries), build an explicit **relation topology** from typed edges and derive structure by **community detection** on it. Clusters then reflect code structure (who depends on whom), are deterministic, and the same topology also yields structural analytics, dependency cycles and an interactive architecture view. ("Graph" = the topology's shape; the identity is Code Raptor.)
 
-**Estimated effort:** 2 weeks (TIME-BOXED)
+**Consequence:** the original hard dependency on Track D is **removed** — template cluster summaries need no LLM (LLM summaries become an optional upgrade). Track A hierarchy is still needed only for R5 (architecture comparison).
 
-| Item | Effort | Notes |
-|------|--------|-------|
-| R1 Clustering Experiments | 3-4 days | Algorithm comparison, parameter tuning |
-| R2 Cross-Cutting Handling | 2-3 days | Strategy evaluation |
-| R3 Cluster Summarization | 2-3 days | LLM summarization, ClusterChunk type |
-| R4 Recursive Abstraction | 2-3 days | Only if R1-R3 succeed |
-| R5 Architecture Comparison | 2 days | Query routing to both views |
+**Crate move (R0):** the marquee `code-raptor` name moves to the topology engine; today's `code-raptor` (parser/ingester) is renamed `code-rag-ingest`. Ingestion *writes* edges; the new `code-raptor` *reads* them to build the topology. See [R.md §3](R.md).
 
-**Risk:** High variance. May conclude "doesn't work for code" - that's a valid outcome.
+**Estimated effort (neutral sizing, not a schedule; ~22 working days ≈ 1 eng-month):**
 
-**Prerequisites:**
-- Track D (Enrichment) for clustering on generated summaries instead of raw code
-- Track A (Hierarchy) for architecture comparison (R5 only)
+| Item | Effort (days) | Eng-months | Notes |
+|------|--------|--------|-------|
+| R0 Crate split | 2-3 | ~0.1 | rename parser → `code-rag-ingest`; scaffold `code-raptor` topology crate; rewire orchestrator + MCP |
+| R1 RelationGraph + richer edges | 6-8 | ~0.3 | imports (have) + contains (derived) + implements/extends/embeds (new tree-sitter) + `References` context tags + re-exports; `RationaleFor` optional; also lifts relationship recall |
+| R2 Community detection + cohesion | 4-5 | ~0.2 | deterministic Louvain (Leiden deferred); hub exclusion for cross-cutting utilities; per-community cohesion score |
+| R3 ClusterChunk | 3-4 | ~0.15 | template summaries → `cluster_chunks` table → Overview/architecture retrieval arm; optional LLM tier |
+| R4 Structural analytics + report | 3-4 | ~0.15 | centrality "read-first" nodes, cross-module bridges, surprising-connection ranking, dependency cycles (Johnson), suggested questions; markdown report |
+| R5 Visualization + comparison + exports | 4-6 | ~0.25 | interactive community-colored topology + Mermaid + GraphML (Obsidian optional); emergent modules vs Track A hierarchy (drift) |
+| **Total** | **~22-30** | **~1.0-1.3** | up from ~2.5-3 weeks due to the crate split + added analytics/exports |
 
-### R1: Clustering Experiments
-- Cluster on D-generated summaries (not raw code embeddings)
-- Experiment with algorithms:
-  - HDBSCAN (handles varying density, noise)
-  - Hierarchical clustering
-  - Spectral clustering
-- Evaluate cluster coherence
-- **Crate:** code-raptor
+**Order:** R0 → R1 → R2 → R3 (quality: relationship + overview recall) → R4 → R5 (features / insight). R0 (crate split) and R1 are the only hard prerequisites; R5 needs Track A.
 
-### R2: Cross-Cutting Concern Handling
-- **Problem:** Logging, error handling cluster together but aren't a "module"
-- Strategies:
-  - Exclude common patterns
-  - Separate cluster type for cross-cutting
-  - Accept as emergent insight
-- Document findings
+### R0: Crate split (prep)
+- Rename today's `code-raptor` (parser/ingester) → `code-rag-ingest` (same modules; SoC: source → chunks + raw relation edges); scaffold a new `code-raptor` topology crate (native, depends on code-rag-store + code-rag-types + petgraph).
+- Rewire `use code_raptor::` references (notably `code-rag-mcp` + the ingestion orchestrator); keep the CLI/binary name + MCP `ingest` behavior stable; expose a cluster-only topology stage that re-runs without re-parsing.
+- **Crates:** code-rag-ingest (rename), code-raptor (new), code-rag-mcp
 
-### R3: Cluster Summarization
-- LLM-summarize each cluster
-- "These N functions handle authentication..."
-- New `ClusterChunk` type
-- **Crate:** code-raptor (types in code-rag-types)
+### R1: RelationGraph + richer relationship edges
+- New `GraphEdge` + `EdgeRelation { Calls, Imports, Contains, Implements, Extends, References, Embeds, ReExports, RationaleFor }` + `EdgeContext { ParameterType, ReturnType, GenericArg, FieldType, Attribute, None }` in code-rag-types; `graph_edges` scalar LanceDB table (no vectors, mirrors `call_edges`).
+- code-rag-ingest: promote already-resolved imports → edges (+ re-exports); derive `contains` from the chunk hierarchy; add `implements`/`extends`/`embeds` via a new `extract_type_relations` on `LanguageHandler` (Rust `impl`/bounds/field composition, Python base classes, TS implements/extends; skip Go structural); tag `References` with `EdgeContext`. **Optional/deferrable:** `RationaleFor` edges from inline `NOTE:/WHY:/HACK:` comments (modest payoff, ship structural relations first).
+- code-rag-engine: pure, wasm-safe `RelationGraph` beside `CallGraph`; relation cues in `detect_direction`/`extract_target_term`.
+- **Crates:** code-rag-types, code-rag-ingest, code-rag-engine, code-rag-store
 
-### R4: Recursive Abstraction (If Phase 1 Succeeds)
-- Embed cluster summaries
-- Cluster again, summarize
-- Repeat until convergence or max depth
-- Result: emergent architectural tree
+### R2: Community detection + cohesion (emergent modules)
+- **Deterministic Louvain** (Blondel et al. 2008) over one undirected graph; **Leiden (Traag et al. 2019) deferred** to an optional later refinement pass (Rust has no Leiden library, and Louvain is "deterministic enough to ship"; revisit only if communities are internally disconnected). Communities ordered by size with a min-chunk-id tie-break.
+- **Node set / edges (resolved):** partition over `calls∪imports∪implements/extends/embeds/references∪`**`file→function contains`** at equal weight; **folder→file `contains` is excluded** from the partition input (high-level folders are often non-cohesive — feeding them in would make communities recover the folder tree and make R5's emergent-vs-folder comparison self-fulfilling). Folder edges stay stored for retrieval + R5.
+- Cross-cutting handling: hub exclusion (utility super-hubs — and high-fan-out file hubs — reattached by majority vote), oversized-community split (>25%), low-cohesion re-split (≥50 nodes, <0.05). Degree-based exclusion is what makes keeping file-level `contains` safe.
+- Per-community **cohesion score** (intra-edges / max possible) persisted with each community; drives re-splitting and feeds the R4 report.
+- Native, ingestion-time (heavy → not wasm); **per-project** scope (corpus-wide union deferred). Determinism: sort nodes/edges + seeded RNG + stable size-desc re-index. Community id + cohesion persisted per chunk in an **additive `community_assignments` side table** (no `code_chunks` schema migration).
+- **Crate:** code-raptor (+ code-rag-types, code-rag-store)
 
-### R5: Architecture Comparison
-- **Requires:** Track A hierarchy (FolderChunk, FileChunk)
-- Query routing to both views
-- "What's the architecture?" → top-down (A) + bottom-up (R)
-- Highlight discrepancies (architectural drift detection)
-- **Crate:** code-rag-chat
+### R3: ClusterChunk (summaries + retrieval)
+- New `ClusterChunk` type; deterministic **template summaries** (mirrors `FolderChunk`, includes cohesion); `cluster_chunks` table; Overview/architecture collapsed-tree retrieval arm.
+- Optional LLM-summary tier (Track D upgrade, not a blocker).
+- **Crates:** code-rag-types, code-raptor, code-rag-store, code-rag-engine, code-rag-ui
 
-### Research Questions
-- Best clustering algorithm for code semantics?
-- Optimal cluster size / recursion depth?
-- How to evaluate quality of emergent structure?
-- How to handle cross-cutting concerns?
+### R4: Structural analytics + architecture report
+- Degree-centrality "read-first" nodes (wasm-cheap), edge-betweenness cross-module bridges (native), **surprising-connection ranking** (bridges by unexpectedness, not raw betweenness), **dependency-cycle detection** (Johnson's algorithm over the import/contains subgraph), cohesion scores, suggested questions → a markdown architecture report at ingest. Optional Overview central-node context injection.
+- **Crates:** code-rag-engine (degree), code-raptor (betweenness + cycles + report)
 
-**Deliverable:** Validated clustering approach with evaluation results, OR documented learnings on why it doesn't work.
+### R5: Architecture comparison + visualization + exports
+- **Requires:** Track A hierarchy (FolderChunk, FileChunk).
+- Compare emergent communities (bottom-up) vs folder/file hierarchy (top-down); highlight divergence (architectural drift); route "What's the architecture?" to both views.
+- Interactive community-colored topology in the demo (`graph_viz.json`, force layout, click-to-query) + optional Mermaid call-flow export.
+- **Export formats:** GraphML (primary added format, Gephi/yEd); Obsidian/wiki export optional (lower-value for a browser demo).
+- **Crates:** code-rag-ui, code-raptor, code-rag-chat/engine
+
+### Research vs production
+Community detection + cohesion (R2) + template ClusterChunks (R3) + analytics (R4: centrality, betweenness, surprising connections, dependency cycles) are deterministic enough to ship. **Recursive abstraction** (cluster the cluster summaries into a multi-level tree) stays time-boxed research, attempted only if R2/R3 land and a multi-level view demonstrably helps.
 
 **Maps to Vision:** Improvement #14 (Code Topology / RAPTOR)
 
 **Success Criteria:**
-- Clusters are semantically coherent (human evaluation + cluster purity vs folder structure)
-- Emergent structure reveals non-obvious groupings
-- Comparison with folder structure provides insight
+- Communities are coherent (cluster purity vs folders + cohesion scores + spot check) and reveal at least one non-obvious grouping.
+- Overview recall improves with cluster chunks active; relationship recall improves with richer edges (R1); no intent regresses vs the V3.3 baseline.
+- The architecture report surfaces dependency cycles and surprising cross-module connections that match intuition on a known repo.
+- The demo renders an interactive, community-colored topology with click-to-query; GraphML export loads in a graph tool.
+
+**Key references:** RAPTOR (ICLR 2024); Leiden (Traag, Waltman & van Eck, 2019); Louvain (Blondel et al., 2008); edge-betweenness community structure (Girvan–Newman, 2002); elementary circuits (Johnson, 1975).
 
 ---
 
 ## Crate Mapping
 
+> **Crate-name note (Track R R0):** the parser/ingester is renamed `code-raptor` → `code-rag-ingest`, and the `code-raptor` name moves to the new topology engine. Rows below already use the post-R0 names: `code-rag-ingest` = parsing/extraction (all the ingestion work historically done in `code-raptor`); `code-raptor` = topology.
+
 | Improvement | Crate |
 |-------------|-------|
 | Schema foundation (V1.1) | code-rag-types, code-rag-store |
-| LanguageHandler refactor (V1.2) | code-raptor |
-| Incremental ingestion (V1.3) | code-rag-types, code-rag-store, code-raptor |
-| TypeScript support (V1.4) | code-raptor |
-| Docstring extraction (V1.5) | code-raptor |
-| Inline call context (V2.1) | code-raptor |
+| LanguageHandler refactor (V1.2) | code-rag-ingest |
+| Incremental ingestion (V1.3) | code-rag-types, code-rag-store, code-rag-ingest |
+| TypeScript support (V1.4) | code-rag-ingest |
+| Docstring extraction (V1.5) | code-rag-ingest |
+| Inline call context (V2.1) | code-rag-ingest |
 | Intent classification + query routing (V2.2) | code-rag-engine, code-rag-chat |
 | Retrieval traces (V2.3) | code-rag-engine, code-rag-chat, code-rag-store |
 | Leptos migration (V2.4) | code-rag-ui, code-rag-chat |
-| GitHub Pages demo + engine extraction (V2.5) | code-rag-engine, code-rag-ui, code-raptor |
+| GitHub Pages demo + engine extraction (V2.5) | code-rag-engine, code-rag-ui, code-rag-ingest |
 | Quality harness (V3) | code-rag-chat |
-| Docstring generation | code-raptor |
-| Hierarchical embeddings | code-raptor |
-| Graph RAG (C1) | code-rag-types, code-rag-store, code-raptor, code-rag-engine, code-rag-chat, code-rag-ui |
+| Docstring generation | code-rag-ingest |
+| Hierarchical embeddings | code-rag-ingest |
+| Graph RAG (C1) | code-rag-types, code-rag-store, code-rag-ingest, code-rag-engine, code-rag-chat, code-rag-ui |
 | Graph result protection (C2) | code-rag-engine, code-rag-chat, code-rag-ui |
 | Comparison query decomposition (C3) | code-rag-engine |
-| Type generation | code-raptor |
-| RAPTOR clustering | code-raptor |
+| Type generation | code-rag-ingest |
+| Code Raptor topology (Track R) | code-rag-types, code-rag-ingest (extraction), code-raptor (topology), code-rag-engine, code-rag-store, code-rag-ui |
 | Cross-encoder reranking (B1) | code-rag-engine, code-rag-chat |
 | Hybrid search | code-rag-chat |
 | Graph query interface | code-rag-chat |
@@ -919,7 +922,7 @@ Research track. Starts after Track D completes (needs D-generated summaries for 
 | V3.4 | Code embedding model evaluated; decision documented |
 | A | "What does engine/ do?" returns coherent answer |
 | D | Undocumented code has generated descriptions in search |
-| R | Clustering produces meaningful emergent structure (or documented why not) |
+| R | Community detection yields coherent modules; richer edges (R1) lift relationship recall; cluster chunks lift overview recall; no regression vs baseline |
 | B1 | Reranking improves recall@5 by >10% over baseline |
 | B2-B3 | "Show me UserService" finds exact match |
 | C1+C2 | "What calls X?" returns accurate results via graph traversal + slot routing |

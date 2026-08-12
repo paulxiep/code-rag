@@ -1,4 +1,6 @@
-use code_rag_types::{CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk};
+use code_rag_types::{
+    ClusterChunk, CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+};
 
 use super::intent::QueryIntent;
 
@@ -105,6 +107,13 @@ impl RerankText for FileChunk {
     }
 }
 
+impl RerankText for ClusterChunk {
+    fn rerank_text(&self) -> String {
+        // R3: same pattern as FolderChunk/FileChunk — reuse summary_text verbatim.
+        self.summary_text.clone()
+    }
+}
+
 /// Convert cross-encoder logit to 0-1 relevance score.
 pub fn sigmoid(logit: f32) -> f32 {
     1.0 / (1.0 + (-logit).exp())
@@ -129,6 +138,8 @@ pub struct RetrievalResult {
     pub folder_chunks: Vec<ScoredChunk<FolderChunk>>,
     /// A4: file-level summary chunks. Empty when `file_limit == 0`.
     pub file_chunks: Vec<ScoredChunk<FileChunk>>,
+    /// R3: emergent-cluster summary chunks. Empty when `cluster_limit == 0`.
+    pub cluster_chunks: Vec<ScoredChunk<ClusterChunk>>,
     pub intent: QueryIntent,
 }
 
@@ -177,6 +188,7 @@ pub fn to_retrieval_result(
         module_doc_chunks: to_scored(module_doc_raw),
         folder_chunks: Vec::new(),
         file_chunks: Vec::new(),
+        cluster_chunks: Vec::new(),
         intent,
     }
 }
@@ -248,6 +260,22 @@ impl RetrievalResult {
             chunk_type: "file".into(),
             chunk_id: s.chunk.chunk_id.clone(),
             file_path: s.chunk.file_path.clone(),
+            identifier: None,
+            project: s.chunk.project_name.clone(),
+            relevance: s.score,
+            line: None,
+        }));
+        items.extend(self.cluster_chunks.iter().map(|s| FlatChunk {
+            chunk_type: "cluster".into(),
+            chunk_id: s.chunk.chunk_id.clone(),
+            // The cluster's representative subsystem directory — creditable like
+            // a FolderChunk path. Falls back to a synthetic label if a pre-path
+            // bundle ever lacks it.
+            file_path: if s.chunk.path.is_empty() {
+                format!("{}#cluster{}", s.chunk.project_name, s.chunk.cluster_id)
+            } else {
+                s.chunk.path.clone()
+            },
             identifier: None,
             project: s.chunk.project_name.clone(),
             relevance: s.score,
@@ -401,6 +429,7 @@ mod tests {
             }],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -430,6 +459,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -450,6 +480,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Implementation,
         };
 
@@ -475,6 +506,7 @@ mod tests {
             }],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -630,6 +662,7 @@ mod tests {
             module_doc_chunks: vec![],
             folder_chunks: vec![],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
 
@@ -659,6 +692,7 @@ mod tests {
                 score: 0.42,
             }],
             file_chunks: vec![],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let flat = result.flatten();
@@ -694,6 +728,7 @@ mod tests {
                 ),
                 score: 0.42,
             }],
+            cluster_chunks: vec![],
             intent: QueryIntent::Overview,
         };
         let flat = result.flatten();
@@ -703,6 +738,56 @@ mod tests {
             flat[0].file_path,
             "code-rag/crates/code-rag-engine/src/retriever.rs"
         );
+        assert!(flat[0].line.is_none());
+    }
+
+    fn make_cluster_chunk(cluster_id: u32, project: &str) -> code_rag_types::ClusterChunk {
+        code_rag_types::ClusterChunk {
+            cluster_id,
+            project_name: project.to_string(),
+            path: "code-rag/crates/code-rag-engine/src".into(),
+            member_chunk_ids: vec!["a".into(), "b".into()],
+            files: vec!["retriever.rs".into()],
+            key_types: vec![],
+            key_functions: vec!["retrieve".into()],
+            dominant_relation: "calls".into(),
+            cohesion: 0.5,
+            summary_text: format!(
+                "Cluster {cluster_id}: a module/subsystem spanning 1 files (2 definitions).\nKey types: none\nKey functions: retrieve\nFiles: retriever.rs\nDominant relation: calls\nCohesion: 0.50\nLikely concern: retrieve"
+            ),
+            chunk_id: "cluster-id".to_string(),
+            content_hash: "h".to_string(),
+            embedding_model_version: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_rerank_text_cluster_chunk_is_summary_text() {
+        let chunk = make_cluster_chunk(0, "code-rag");
+        let text = chunk.rerank_text();
+        assert_eq!(text, chunk.summary_text);
+        assert!(text.contains("module/subsystem"));
+    }
+
+    #[test]
+    fn test_flatten_includes_cluster_chunks() {
+        let result = RetrievalResult {
+            code_chunks: vec![],
+            readme_chunks: vec![],
+            crate_chunks: vec![],
+            module_doc_chunks: vec![],
+            folder_chunks: vec![],
+            file_chunks: vec![],
+            cluster_chunks: vec![ScoredChunk {
+                chunk: make_cluster_chunk(3, "code-rag"),
+                score: 0.42,
+            }],
+            intent: QueryIntent::Overview,
+        };
+        let flat = result.flatten();
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].chunk_type, "cluster");
+        assert_eq!(flat[0].file_path, "code-rag/crates/code-rag-engine/src");
         assert!(flat[0].line.is_none());
     }
 }

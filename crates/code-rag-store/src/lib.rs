@@ -1,7 +1,7 @@
 //! coderag-store: Shared vector storage and embedding for code RAG
 //!
 //! This crate provides LanceDB-backed vector storage and embedding utilities
-//! shared between code-raptor (writes) and code-rag-chat (reads).
+//! shared between code-rag-ingest (writes) and code-rag-chat (reads).
 
 pub mod embedder;
 pub mod reranker;

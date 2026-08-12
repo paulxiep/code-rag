@@ -1,0 +1,9 @@
+# Single source of truth for the toolchain, local dev and CI alike (rustup
+# honors this file automatically; the CI workflows deliberately install no
+# toolchain of their own so this pin is authoritative there too).
+# Pinned so deploys are reproducible — bump deliberately, together with any
+# Cargo.lock updates newer std requires (e.g. ethnum ≥1.5.3 for the
+# TryFromIntError size change at 1.96+).
+[toolchain]
+channel = "1.97.1"
+targets = ["wasm32-unknown-unknown"]

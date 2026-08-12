@@ -1,12 +1,25 @@
 /target
 /data/*
+
+# Historical per-milestone design docs (tracks A/B/C, shipped 2026-04..05);
+# kept local-only — R.md is the pattern for tracked milestone specs.
+/A[1-5].md
+/B[1-5].md
+/C[1-5].md
 !/data/reports/
 /data/reports/*.json
+# Architecture reports are regenerated on every ingest/topology run
+/data/reports/architecture_*.md
 /cache
 .env
 /.fastembed_cache
 /dist
 /crates/code-rag-ui/dist
+# R5 topology viz artifacts staged for the demo (CI-generated; local copies
+# come from data/viz for dev)
+/crates/code-rag-ui/static/viz/
+# Demo index bundle (CI-generated; local copies from `code-rag-ingest export`)
+/crates/code-rag-ui/static/index.json
 /models
 /.code-rag
 

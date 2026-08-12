@@ -1572,6 +1572,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-rag-ingest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-buffer",
+ "caravan-rpc",
+ "clap",
+ "code-rag-engine",
+ "code-rag-store",
+ "code-rag-types",
+ "code-raptor",
+ "futures",
+ "lancedb",
+ "serde",
+ "serde_json",
+ "streaming-iterator",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "walkdir",
+]
+
+[[package]]
 name = "code-rag-llm"
 version = "0.1.0"
 dependencies = [
@@ -1591,6 +1623,7 @@ dependencies = [
  "clap",
  "code-rag-core",
  "code-rag-engine",
+ "code-rag-ingest",
  "code-rag-store",
  "code-rag-types",
  "code-raptor",
@@ -1665,30 +1698,15 @@ name = "code-raptor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow-array",
- "arrow-buffer",
- "caravan-rpc",
- "clap",
  "code-rag-engine",
  "code-rag-store",
  "code-rag-types",
- "futures",
- "lancedb",
  "serde",
  "serde_json",
- "streaming-iterator",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
- "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-go",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "walkdir",
 ]
 
 [[package]]
@@ -3060,9 +3078,9 @@ checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
 
 [[package]]
 name = "ethnum"
-version = "1.5.2"
+version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca81e6b4777c89fd810c25a4be2b1bd93ea034fbe58e6a75216a34c6b82c539b"
+checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 
 [[package]]
 name = "event-listener"

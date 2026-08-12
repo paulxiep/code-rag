@@ -1,5 +1,5 @@
 use arrow_array::{
-    Array, Float32Array, RecordBatch, RecordBatchIterator, StringArray, UInt64Array,
+    Array, Float32Array, RecordBatch, RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use futures::TryStreamExt;
 use lancedb::{
@@ -14,7 +14,8 @@ use tracing::warn;
 
 use code_rag_engine::text::build_searchable_text;
 use code_rag_types::{
-    CallEdge, CodeChunk, CrateChunk, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+    CallEdge, ClusterChunk, CodeChunk, CommunityAssignment, CrateChunk, EdgeConfidence,
+    EdgeContext, EdgeRelation, FileChunk, FolderChunk, GraphEdge, ModuleDocChunk, ReadmeChunk,
 };
 
 #[derive(Error, Debug, serde::Serialize, serde::Deserialize)]
@@ -51,16 +52,22 @@ const README_TABLE: &str = "readme_chunks";
 const CRATE_TABLE: &str = "crate_chunks";
 const MODULE_DOC_TABLE: &str = "module_doc_chunks";
 const CALL_EDGES_TABLE: &str = "call_edges";
+/// Track R (R1): typed structural relation edges (imports/contains/implements/…).
+const GRAPH_EDGES_TABLE: &str = "graph_edges";
 /// A2: folder-level summary chunks.
 pub const FOLDER_TABLE: &str = "folder_chunks";
 /// A4: file-level summary chunks.
 pub const FILE_TABLE: &str = "file_chunks";
+/// Track R (R2): per-chunk community assignments (deterministic Louvain).
+const COMMUNITY_TABLE: &str = "community_assignments";
+/// Track R (R3): emergent-cluster summary chunks (vector + FTS).
+pub const CLUSTER_TABLE: &str = "cluster_chunks";
 
 /// Bump when the Arrow schema of any persisted table changes (column added,
 /// removed, renamed, or retyped). The bump invalidates existing indexes —
 /// `VectorStore::new()` refuses to open a DB whose `_schema_version` sidecar
 /// disagrees with this constant. Recovery is `rm -rf <db_path>` followed by
-/// a fresh `code-raptor ingest --full`.
+/// a fresh `code-rag-ingest ingest --full`.
 ///
 /// Distinct from `code_rag_types::DERIVATION_VERSION`: derivation governs
 /// chunk-content hashing (forces re-embed of unchanged source), schema
@@ -117,7 +124,7 @@ fn check_schema_version_compat(db_path: &std::path::Path) -> Result<(), StoreErr
         Some(v) if v == SCHEMA_VERSION => Ok(()),
         Some(v) => Err(StoreError::SchemaMismatch(format!(
             "schema v{} on disk at {}, this binary expects v{}. Recover with: \
-             rm -rf {} && code-raptor ingest <repo> --db-path {} --single-repo --full",
+             rm -rf {} && code-rag-ingest ingest <repo> --db-path {} --single-repo --full",
             v,
             db_path.display(),
             SCHEMA_VERSION,
@@ -160,7 +167,7 @@ impl VectorStore {
     }
 
     // ========================================================================
-    // Write operations (used by code-raptor)
+    // Write operations (used by code-rag-ingest)
     // ========================================================================
 
     /// Insert code chunks with their embeddings. Creates table if needed.
@@ -273,6 +280,69 @@ impl VectorStore {
         Ok(count)
     }
 
+    /// R3: insert emergent-cluster summary chunks with their embeddings.
+    /// Creates the `cluster_chunks` table if needed.
+    pub async fn upsert_cluster_chunks(
+        &self,
+        chunks: &[ClusterChunk],
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<usize, StoreError> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
+        let batch = cluster_chunks_to_batch(chunks, embeddings, self.dimension)?;
+        let count = batch.num_rows();
+        self.upsert_batch(CLUSTER_TABLE, "chunk_id", batch).await?;
+        Ok(count)
+    }
+
+    /// R3: delete all cluster chunks for a project (before re-clustering).
+    pub async fn delete_cluster_chunks_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(CLUSTER_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
+
+    /// R5: scalar read of one project's cluster chunks (no vector search) —
+    /// the MCP community tool lists emergent modules from these rows. Missing
+    /// table → empty (pre-topology index), same as `get_community_assignments`.
+    pub async fn get_cluster_chunks_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<ClusterChunk>, StoreError> {
+        let table = match self.conn.open_table(CLUSTER_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut out = Vec::new();
+        for batch in &results {
+            // No score column in a plain scan; the extractor defaults to 0.0.
+            out.extend(
+                extract_cluster_chunks_from_batch(batch, "_distance")?
+                    .into_iter()
+                    .map(|(chunk, _)| chunk),
+            );
+        }
+        // Scan order is storage order; sort for a stable API.
+        out.sort_by_key(|c| c.cluster_id);
+        Ok(out)
+    }
+
     // ========================================================================
     // Read operations (used by code-rag-chat)
     // ========================================================================
@@ -347,6 +417,24 @@ impl VectorStore {
             .await?;
 
         batches_to_file_chunks(results).await
+    }
+
+    /// R3: search emergent-cluster summary chunks by vector similarity.
+    pub async fn search_clusters(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        let table = self.get_table(CLUSTER_TABLE).await?;
+
+        let results = table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .limit(limit)
+            .execute()
+            .await?;
+
+        batches_to_cluster_chunks(results).await
     }
 
     /// Search code chunks by vector similarity. Returns (chunk, distance) pairs.
@@ -464,6 +552,8 @@ impl VectorStore {
             (FOLDER_TABLE, "summary_text"),
             // A4: FTS over the file's rendered summary text.
             (FILE_TABLE, "summary_text"),
+            // R3: FTS over the cluster's rendered summary text.
+            (CLUSTER_TABLE, "summary_text"),
         ];
 
         for (table_name, column) in &tables_and_columns {
@@ -648,6 +738,40 @@ impl VectorStore {
                     e
                 );
                 let results = self.search_files(query_embedding, limit).await?;
+                Ok(results
+                    .into_iter()
+                    .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                    .collect())
+            }
+        }
+    }
+
+    /// R3: hybrid search emergent-cluster summary chunks (vector + FTS, LanceDB RRF).
+    /// Falls back to vector-only if the FTS index is missing.
+    pub async fn hybrid_search_clusters(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        let table = self.get_table(CLUSTER_TABLE).await?;
+
+        match table
+            .vector_search(query_embedding.to_vec())?
+            .distance_type(DistanceType::L2)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .limit(limit)
+            .execute()
+            .await
+        {
+            Ok(results) => batches_to_cluster_chunks_hybrid(results).await,
+            Err(e) => {
+                tracing::warn!(
+                    "Hybrid search failed for {}, falling back to vector-only: {}",
+                    CLUSTER_TABLE,
+                    e
+                );
+                let results = self.search_clusters(query_embedding, limit).await?;
                 Ok(results
                     .into_iter()
                     .map(|(c, d)| (c, 1.0 / (1.0 + d)))
@@ -1164,6 +1288,128 @@ impl VectorStore {
         }
         Ok(all_chunks)
     }
+
+    // ========================================================================
+    // Track R (R1): graph_edges — typed structural relation edges.
+    // Pure scalar table (no vector), mirroring call_edges. relation/context/
+    // confidence are stored as their string tags.
+    // ========================================================================
+
+    /// Insert typed relation edges. Creates the graph_edges table if needed.
+    pub async fn upsert_graph_edges(&self, edges: &[GraphEdge]) -> Result<usize, StoreError> {
+        if edges.is_empty() {
+            return Ok(0);
+        }
+        let batch = graph_edges_to_batch(edges)?;
+        let count = batch.num_rows();
+        self.upsert_batch(GRAPH_EDGES_TABLE, "edge_id", batch)
+            .await?;
+        Ok(count)
+    }
+
+    /// Get all relation edges for a project (for building a RelationGraph).
+    pub async fn get_all_graph_edges(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<GraphEdge>, StoreError> {
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        self.query_graph_edges(&filter).await
+    }
+
+    /// Delete all relation edges for a project (before re-resolving).
+    pub async fn delete_graph_edges_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(GRAPH_EDGES_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
+
+    /// Helper: query graph_edges table with a filter predicate.
+    async fn query_graph_edges(&self, filter: &str) -> Result<Vec<GraphEdge>, StoreError> {
+        let table = match self.conn.open_table(GRAPH_EDGES_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()), // Table doesn't exist yet
+        };
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut edges = Vec::new();
+        for batch in &results {
+            edges.extend(extract_graph_edges_from_batch(batch)?);
+        }
+        Ok(edges)
+    }
+
+    // ========================================================================
+    // Track R (R2): community_assignments — per-chunk community ids + cohesion.
+    // Additive scalar table (no vector, no code_chunks migration). Written by
+    // the code-raptor topology engine; read by R3 (ClusterChunk) / R4 (report).
+    // ========================================================================
+
+    /// Insert community assignments. Creates the table if needed. Merge key is
+    /// `chunk_id` (one assignment per chunk); callers delete-by-project first so
+    /// stale assignments from a previous partition don't linger.
+    pub async fn upsert_community_assignments(
+        &self,
+        assignments: &[CommunityAssignment],
+    ) -> Result<usize, StoreError> {
+        if assignments.is_empty() {
+            return Ok(0);
+        }
+        let batch = community_assignments_to_batch(assignments)?;
+        let count = batch.num_rows();
+        self.upsert_batch(COMMUNITY_TABLE, "chunk_id", batch)
+            .await?;
+        Ok(count)
+    }
+
+    /// Get all community assignments for a project.
+    pub async fn get_community_assignments(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<CommunityAssignment>, StoreError> {
+        let filter = format!("project_name = '{}'", project_name.replace("'", "''"));
+        let table = match self.conn.open_table(COMMUNITY_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()), // Table doesn't exist yet
+        };
+        let results: Vec<RecordBatch> = table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut out = Vec::new();
+        for batch in &results {
+            out.extend(extract_community_assignments_from_batch(batch)?);
+        }
+        Ok(out)
+    }
+
+    /// Delete all community assignments for a project (before re-partitioning).
+    pub async fn delete_community_assignments_by_project(
+        &self,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
+        let table = match self.conn.open_table(COMMUNITY_TABLE).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // Table doesn't exist, nothing to delete
+        };
+        let predicate = format!("project_name = '{}'", project_name.replace("'", "''"));
+        table.delete(&predicate).await?;
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1264,6 +1510,165 @@ fn extract_call_edges_from_batch(batch: &RecordBatch) -> Result<Vec<CallEdge>, S
         .collect();
 
     Ok(edges)
+}
+
+/// Track R (R1): GraphEdge → Arrow. All-Utf8 scalar table; relation/context/
+/// confidence persisted via their stable string tags.
+fn graph_edges_to_batch(edges: &[GraphEdge]) -> Result<RecordBatch, StoreError> {
+    let s = |f: &dyn Fn(&GraphEdge) -> &str| -> StringArray {
+        edges.iter().map(|e| Some(f(e))).collect()
+    };
+
+    let edge_ids = s(&|e| e.edge_id.as_str());
+    let source_chunk_ids = s(&|e| e.source_chunk_id.as_str());
+    let target_chunk_ids = s(&|e| e.target_chunk_id.as_str());
+    let source_identifiers = s(&|e| e.source_identifier.as_str());
+    let target_identifiers = s(&|e| e.target_identifier.as_str());
+    let source_files = s(&|e| e.source_file.as_str());
+    let target_files = s(&|e| e.target_file.as_str());
+    let project_names = s(&|e| e.project_name.as_str());
+    let relations = s(&|e| e.relation.as_str());
+    let contexts = s(&|e| e.context.as_str());
+    let confidences = s(&|e| e.confidence.as_str());
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("edge_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("source_chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("target_chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("source_identifier", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("target_identifier", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("source_file", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("target_file", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("relation", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("context", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("confidence", arrow_schema::DataType::Utf8, false),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(edge_ids),
+            Arc::new(source_chunk_ids),
+            Arc::new(target_chunk_ids),
+            Arc::new(source_identifiers),
+            Arc::new(target_identifiers),
+            Arc::new(source_files),
+            Arc::new(target_files),
+            Arc::new(project_names),
+            Arc::new(relations),
+            Arc::new(contexts),
+            Arc::new(confidences),
+        ],
+    )?)
+}
+
+fn extract_graph_edges_from_batch(batch: &RecordBatch) -> Result<Vec<GraphEdge>, StoreError> {
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let edge_ids = col("edge_id")?;
+    let source_chunk_ids = col("source_chunk_id")?;
+    let target_chunk_ids = col("target_chunk_id")?;
+    let source_identifiers = col("source_identifier")?;
+    let target_identifiers = col("target_identifier")?;
+    let source_files = col("source_file")?;
+    let target_files = col("target_file")?;
+    let project_names = col("project_name")?;
+    let relations = col("relation")?;
+    let contexts = col("context")?;
+    let confidences = col("confidence")?;
+
+    let edges = (0..batch.num_rows())
+        .map(|i| GraphEdge {
+            edge_id: edge_ids.value(i).to_string(),
+            source_chunk_id: source_chunk_ids.value(i).to_string(),
+            target_chunk_id: target_chunk_ids.value(i).to_string(),
+            source_identifier: source_identifiers.value(i).to_string(),
+            target_identifier: target_identifiers.value(i).to_string(),
+            source_file: source_files.value(i).to_string(),
+            target_file: target_files.value(i).to_string(),
+            project_name: project_names.value(i).to_string(),
+            // Unknown tags fall back to sensible defaults rather than failing the
+            // whole batch — forward-compatible with future relation/context variants.
+            relation: EdgeRelation::from_tag(relations.value(i))
+                .unwrap_or(EdgeRelation::References),
+            context: EdgeContext::from_tag(contexts.value(i)).unwrap_or(EdgeContext::None),
+            confidence: EdgeConfidence::from_tag(confidences.value(i))
+                .unwrap_or(EdgeConfidence::Inferred),
+        })
+        .collect();
+
+    Ok(edges)
+}
+
+/// Track R (R2): CommunityAssignment → Arrow. Scalar table: two Utf8 keys, a
+/// UInt32 community id, and a Float32 cohesion.
+fn community_assignments_to_batch(
+    assignments: &[CommunityAssignment],
+) -> Result<RecordBatch, StoreError> {
+    let project_names: StringArray = assignments
+        .iter()
+        .map(|a| Some(a.project_name.as_str()))
+        .collect();
+    let chunk_ids: StringArray = assignments
+        .iter()
+        .map(|a| Some(a.chunk_id.as_str()))
+        .collect();
+    let community_ids: UInt32Array = assignments.iter().map(|a| Some(a.community_id)).collect();
+    let cohesions: Float32Array = assignments.iter().map(|a| Some(a.cohesion)).collect();
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("community_id", arrow_schema::DataType::UInt32, false),
+        arrow_schema::Field::new("cohesion", arrow_schema::DataType::Float32, false),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(project_names),
+            Arc::new(chunk_ids),
+            Arc::new(community_ids),
+            Arc::new(cohesions),
+        ],
+    )?)
+}
+
+fn extract_community_assignments_from_batch(
+    batch: &RecordBatch,
+) -> Result<Vec<CommunityAssignment>, StoreError> {
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+    let project_names = col("project_name")?;
+    let chunk_ids = col("chunk_id")?;
+    let community_ids = batch
+        .column_by_name("community_id")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("community_id".into()))?;
+    let cohesions = batch
+        .column_by_name("cohesion")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("cohesion".into()))?;
+
+    let out = (0..batch.num_rows())
+        .map(|i| CommunityAssignment {
+            project_name: project_names.value(i).to_string(),
+            chunk_id: chunk_ids.value(i).to_string(),
+            community_id: community_ids.value(i),
+            cohesion: cohesions.value(i),
+        })
+        .collect();
+    Ok(out)
 }
 
 /// Extract CodeChunks from a RecordBatch without requiring a distance/score column.
@@ -1976,6 +2381,256 @@ fn extract_folder_chunks_from_batch(
     Ok(rows)
 }
 
+// ---- Track R (R3): cluster_chunks Arrow conversion ----
+
+fn cluster_chunks_to_batch(
+    chunks: &[ClusterChunk],
+    embeddings: Vec<Vec<f32>>,
+    dim: usize,
+) -> Result<RecordBatch, StoreError> {
+    use arrow_array::builder::FixedSizeListBuilder;
+    use arrow_array::{ArrayRef, ListArray};
+    use arrow_buffer::OffsetBuffer;
+
+    let cluster_ids: UInt32Array = chunks.iter().map(|c| Some(c.cluster_id)).collect();
+    let project_names: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.project_name.as_str()))
+        .collect();
+    let paths: StringArray = chunks.iter().map(|c| Some(c.path.as_str())).collect();
+    let dominant_relations: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.dominant_relation.as_str()))
+        .collect();
+    let cohesions: Float32Array = chunks.iter().map(|c| Some(c.cohesion)).collect();
+    let summary_texts: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.summary_text.as_str()))
+        .collect();
+    let chunk_ids: StringArray = chunks.iter().map(|c| Some(c.chunk_id.as_str())).collect();
+    let content_hashes: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.content_hash.as_str()))
+        .collect();
+    let model_versions: StringArray = chunks
+        .iter()
+        .map(|c| Some(c.embedding_model_version.as_str()))
+        .collect();
+
+    fn list_of_strings(per_row: impl Iterator<Item = Vec<String>>) -> ListArray {
+        let mut offsets = vec![0i32];
+        let mut values: Vec<String> = Vec::new();
+        for row in per_row {
+            values.extend(row);
+            offsets.push(values.len() as i32);
+        }
+        let refs: Vec<Option<&str>> = values.iter().map(|s| Some(s.as_str())).collect();
+        let values_array: StringArray = refs.into_iter().collect();
+        ListArray::new(
+            Arc::new(arrow_schema::Field::new(
+                "item",
+                arrow_schema::DataType::Utf8,
+                true,
+            )),
+            OffsetBuffer::new(offsets.into()),
+            Arc::new(values_array),
+            None,
+        )
+    }
+
+    let member_chunk_ids = list_of_strings(chunks.iter().map(|c| c.member_chunk_ids.clone()));
+    let files = list_of_strings(chunks.iter().map(|c| c.files.clone()));
+    let key_types = list_of_strings(chunks.iter().map(|c| c.key_types.clone()));
+    let key_functions = list_of_strings(chunks.iter().map(|c| c.key_functions.clone()));
+
+    let mut vector_builder =
+        FixedSizeListBuilder::new(arrow_array::builder::Float32Builder::new(), dim as i32);
+    for emb in &embeddings {
+        vector_builder.values().append_slice(emb);
+        vector_builder.append(true);
+    }
+    let vectors = vector_builder.finish();
+
+    let list_field = || {
+        arrow_schema::DataType::List(Arc::new(arrow_schema::Field::new(
+            "item",
+            arrow_schema::DataType::Utf8,
+            true,
+        )))
+    };
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("cluster_id", arrow_schema::DataType::UInt32, false),
+        arrow_schema::Field::new("project_name", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("path", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("member_chunk_ids", list_field(), true),
+        arrow_schema::Field::new("files", list_field(), true),
+        arrow_schema::Field::new("key_types", list_field(), true),
+        arrow_schema::Field::new("key_functions", list_field(), true),
+        arrow_schema::Field::new("dominant_relation", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("cohesion", arrow_schema::DataType::Float32, false),
+        arrow_schema::Field::new("summary_text", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("chunk_id", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("content_hash", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new(
+            "embedding_model_version",
+            arrow_schema::DataType::Utf8,
+            false,
+        ),
+        arrow_schema::Field::new(
+            "vector",
+            arrow_schema::DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new(
+                    "item",
+                    arrow_schema::DataType::Float32,
+                    true,
+                )),
+                dim as i32,
+            ),
+            false,
+        ),
+    ]));
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(cluster_ids),
+            Arc::new(project_names),
+            Arc::new(paths),
+            Arc::new(member_chunk_ids) as ArrayRef,
+            Arc::new(files) as ArrayRef,
+            Arc::new(key_types) as ArrayRef,
+            Arc::new(key_functions) as ArrayRef,
+            Arc::new(dominant_relations),
+            Arc::new(cohesions),
+            Arc::new(summary_texts),
+            Arc::new(chunk_ids),
+            Arc::new(content_hashes),
+            Arc::new(model_versions),
+            Arc::new(vectors),
+        ],
+    )?)
+}
+
+async fn batches_to_cluster_chunks(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_cluster_chunks_from_batch(&batch, "_distance")?);
+            Ok(acc)
+        })
+        .await
+}
+
+async fn batches_to_cluster_chunks_hybrid(
+    stream: impl futures::Stream<Item = Result<RecordBatch, lancedb::Error>> + Unpin,
+) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+    use futures::TryStreamExt;
+    stream
+        .map_err(StoreError::from)
+        .try_fold(Vec::new(), |mut acc, batch| async move {
+            acc.extend(extract_cluster_chunks_from_batch(
+                &batch,
+                "_relevance_score",
+            )?);
+            Ok(acc)
+        })
+        .await
+}
+
+fn extract_cluster_chunks_from_batch(
+    batch: &RecordBatch,
+    score_column: &str,
+) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+    use arrow_array::ListArray;
+
+    let col = |name: &str| -> Result<&StringArray, StoreError> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| StoreError::SchemaMismatch(name.into()))
+    };
+
+    let project_names = col("project_name")?;
+    let paths = col("path")?;
+    let dominant_relations = col("dominant_relation")?;
+    let summary_texts = col("summary_text")?;
+    let chunk_ids = col("chunk_id")?;
+    let content_hashes = col("content_hash")?;
+    let model_versions = col("embedding_model_version")?;
+
+    let cluster_ids = batch
+        .column_by_name("cluster_id")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("cluster_id".into()))?;
+    let cohesions = batch
+        .column_by_name("cohesion")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| StoreError::SchemaMismatch("cohesion".into()))?;
+
+    let list = |name: &str| -> Option<&ListArray> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+    };
+    let members_list = list("member_chunk_ids");
+    let files_list = list("files");
+    let key_types_list = list("key_types");
+    let key_functions_list = list("key_functions");
+
+    let scores = batch
+        .column_by_name(score_column)
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+    let extract_list = |arr: Option<&ListArray>, i: usize| -> Vec<String> {
+        arr.filter(|a| !a.is_null(i))
+            .map(|a| {
+                let v = a.value(i);
+                v.as_any()
+                    .downcast_ref::<StringArray>()
+                    .map(|sa| {
+                        (0..sa.len())
+                            .filter_map(|j| {
+                                if sa.is_null(j) {
+                                    None
+                                } else {
+                                    Some(sa.value(j).to_string())
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    };
+
+    let rows = (0..batch.num_rows())
+        .map(|i| {
+            let chunk = ClusterChunk {
+                cluster_id: cluster_ids.value(i),
+                project_name: project_names.value(i).to_string(),
+                path: paths.value(i).to_string(),
+                member_chunk_ids: extract_list(members_list, i),
+                files: extract_list(files_list, i),
+                key_types: extract_list(key_types_list, i),
+                key_functions: extract_list(key_functions_list, i),
+                dominant_relation: dominant_relations.value(i).to_string(),
+                cohesion: cohesions.value(i),
+                summary_text: summary_texts.value(i).to_string(),
+                chunk_id: chunk_ids.value(i).to_string(),
+                content_hash: content_hashes.value(i).to_string(),
+                embedding_model_version: model_versions.value(i).to_string(),
+            };
+            let score = scores.map(|d| d.value(i)).unwrap_or(0.0);
+            (chunk, score)
+        })
+        .collect();
+    Ok(rows)
+}
+
 fn file_chunks_to_batch(
     chunks: &[FileChunk],
     embeddings: Vec<Vec<f32>>,
@@ -2592,7 +3247,7 @@ fn extract_module_doc_chunks_from_batch_with_score(
 //
 // Writes (`upsert_*`, `delete_*`, `create_fts_indices`,
 // `get_embedding_model_version`) are NOT part of the trait — they stay on the
-// concrete `VectorStore` because code-raptor's ingest path doesn't dispatch
+// concrete `VectorStore` because code-rag-ingest's ingest path doesn't dispatch
 // them as RPC.
 
 #[async_trait::async_trait]
@@ -2707,6 +3362,23 @@ impl crate::seams::VectorReader for VectorStore {
         VectorStore::hybrid_search_files(self, query_text, query_embedding, limit).await
     }
 
+    async fn search_clusters(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        VectorStore::search_clusters(self, query_embedding, limit).await
+    }
+
+    async fn hybrid_search_clusters(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(ClusterChunk, f32)>, StoreError> {
+        VectorStore::hybrid_search_clusters(self, query_text, query_embedding, limit).await
+    }
+
     async fn list_projects(&self) -> Result<Vec<String>, StoreError> {
         VectorStore::list_projects(self).await
     }
@@ -2734,12 +3406,30 @@ impl crate::seams::VectorReader for VectorStore {
     ) -> Result<Vec<CallEdge>, StoreError> {
         VectorStore::get_callees(self, caller_chunk_id, project).await
     }
+
+    async fn get_all_graph_edges(&self, project_name: &str) -> Result<Vec<GraphEdge>, StoreError> {
+        VectorStore::get_all_graph_edges(self, project_name).await
+    }
+
+    async fn get_community_assignments(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<CommunityAssignment>, StoreError> {
+        VectorStore::get_community_assignments(self, project_name).await
+    }
+
+    async fn get_cluster_chunks(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<ClusterChunk>, StoreError> {
+        VectorStore::get_cluster_chunks_by_project(self, project_name).await
+    }
 }
 
 // `VectorWriter` (M5 split). Companion to `VectorReader`. Mirrors the same
 // UFCS delegation pattern — each trait method forwards to the matching
 // inherent method. `#[wagon(identity)]` on the trait declaration keeps
-// writes inproc-only; code-raptor's ingest path holds the concrete
+// writes inproc-only; code-rag-ingest's ingest path holds the concrete
 // `VectorStore` and never goes through this trait at Phase 1. The trait
 // exists so future ingest workers can opt into trait-typed wiring without
 // another shape change.
@@ -3194,5 +3884,49 @@ mod tests {
         // Unknown ID returns empty
         let not_found = store.get_chunks_by_ids(&["unknown".into()]).await.unwrap();
         assert_eq!(not_found.len(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires filesystem, run with --ignored"]
+    async fn test_get_cluster_chunks_by_project() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.lance");
+        let store = VectorStore::new(db_path.to_str().unwrap(), 384)
+            .await
+            .unwrap();
+
+        // Missing table → empty, not an error.
+        let empty = store.get_cluster_chunks_by_project("p").await.unwrap();
+        assert!(empty.is_empty());
+
+        let mk = |cluster_id: u32, project: &str| ClusterChunk {
+            cluster_id,
+            project_name: project.into(),
+            path: "p/src".into(),
+            member_chunk_ids: vec!["a".into(), "b".into()],
+            files: vec!["p/src/x.rs".into()],
+            key_types: vec![],
+            key_functions: vec!["run".into()],
+            dominant_relation: "calls".into(),
+            cohesion: 0.4,
+            summary_text: format!("Cluster {cluster_id}"),
+            chunk_id: format!("cluster:{project}#{cluster_id}"),
+            content_hash: "h".into(),
+            embedding_model_version: "BGESmallENV15_384".into(),
+        };
+        let chunks = vec![mk(1, "p"), mk(0, "p"), mk(0, "other")];
+        let embeddings = vec![fake_embedding(384); 3];
+        store
+            .upsert_cluster_chunks(&chunks, embeddings)
+            .await
+            .unwrap();
+
+        // Project-filtered, sorted by cluster_id, list columns intact.
+        let got = store.get_cluster_chunks_by_project("p").await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].cluster_id, 0);
+        assert_eq!(got[1].cluster_id, 1);
+        assert_eq!(got[0].member_chunk_ids, vec!["a", "b"]);
+        assert!(got.iter().all(|c| c.project_name == "p"));
     }
 }

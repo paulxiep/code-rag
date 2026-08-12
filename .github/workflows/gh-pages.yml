@@ -27,10 +27,11 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        # No toolchain action: it would set RUSTUP_TOOLCHAIN and override the
+        # repo's rust-toolchain.toml pin. `rustup show` makes the preinstalled
+        # rustup install the pinned channel + targets from the file.
+        run: rustup show
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -58,16 +59,29 @@ jobs:
             name=$(echo "$entry" | jq -r '.name')
             dir="/tmp/targets/$name"
             git clone "$repo" "$dir"
-            cargo run --release -p code-raptor -- ingest "$dir" --db-path /tmp/demo.lance --project-name "$name"
+            cargo run --release -p code-rag-ingest -- ingest "$dir" --db-path /tmp/demo.lance --project-name "$name"
           done
 
       - name: Ingest old portfolio projects
         run: |
           git clone https://github.com/paulxiep/portfolio.git /tmp/targets/portfolio
-          cargo run --release -p code-raptor -- ingest /tmp/targets/portfolio --db-path /tmp/demo.lance
+          cargo run --release -p code-rag-ingest -- ingest /tmp/targets/portfolio --db-path /tmp/demo.lance
+          # The umbrella repo's root-level files land as a stray `portfolio`
+          # project, and `certificates` is not a code project — purge both
+          # (removes chunks, edges, communities, clusters, report + viz).
+          cargo run --release -p code-rag-ingest -- purge portfolio certificates --db-path /tmp/demo.lance
 
       - name: Export to static JSON
-        run: cargo run --release -p code-raptor -- export --db-path /tmp/demo.lance --output crates/code-rag-ui/static/index.json
+        run: cargo run --release -p code-rag-ingest -- export --db-path /tmp/demo.lance --output crates/code-rag-ui/static/index.json
+
+      # Topology runs inline during ingest, writing per-project viz artifacts
+      # to <db parent>/viz. Strict cp: a missing artifact is a native
+      # regression, not something to silence.
+      - name: Stage topology viz artifacts
+        run: |
+          mkdir -p crates/code-rag-ui/static/viz
+          cp /tmp/viz/graph_viz_*.json crates/code-rag-ui/static/viz/
+          ls -la crates/code-rag-ui/static/viz/
 
       - name: Build WASM (standalone mode)
         env:

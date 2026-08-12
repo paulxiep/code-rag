@@ -7,6 +7,12 @@ pub struct EngineConfig {
     pub rerank: RerankConfig,
     pub hybrid: HybridConfig,
     pub dual_embedding: DualEmbeddingConfig,
+    /// Harness-only sweep knob: forces the R3 cluster arm past the
+    /// `ArmPolicy.cluster_vec` gate so `CLUSTER_LIMIT=N` sweeps can measure
+    /// the arm without recompiling. Production keeps the dual gate
+    /// (`cluster_limit > 0 && cluster_vec`) — both currently OFF per the R3
+    /// empirical result; this override exists so the revisit can re-measure.
+    pub cluster_sweep_override: bool,
 }
 
 /// Hybrid search (BM25 + semantic) configuration.
@@ -54,6 +60,10 @@ pub struct RetrievalConfig {
     /// per-intent values. Instantiating RetrievalConfig by hand gets a
     /// zero-risk fallback (arm short-circuits on limit==0).
     pub file_limit: usize,
+    /// R3: emergent-cluster summary chunks. Default 0 — the RoutingTable
+    /// supplies per-intent values (Overview-heavy, like folder). Arm
+    /// short-circuits on limit==0, so a missing `cluster_chunks` table is a no-op.
+    pub cluster_limit: usize,
 }
 
 impl Default for RetrievalConfig {
@@ -65,6 +75,7 @@ impl Default for RetrievalConfig {
             module_doc_limit: 3,
             folder_limit: 0,
             file_limit: 0,
+            cluster_limit: 0,
         }
     }
 }
@@ -82,6 +93,8 @@ pub struct RerankConfig {
     pub folder_fetch_multiplier: usize,
     /// A4: multiplier for file-level chunks.
     pub file_fetch_multiplier: usize,
+    /// R3: multiplier for emergent-cluster chunks.
+    pub cluster_fetch_multiplier: usize,
 }
 
 impl Default for RerankConfig {
@@ -94,6 +107,7 @@ impl Default for RerankConfig {
             module_doc_fetch_multiplier: 2,
             folder_fetch_multiplier: 2,
             file_fetch_multiplier: 2,
+            cluster_fetch_multiplier: 2,
         }
     }
 }
@@ -110,6 +124,7 @@ pub fn fetch_limits(final_config: &RetrievalConfig, rerank: &RerankConfig) -> Re
         module_doc_limit: final_config.module_doc_limit * rerank.module_doc_fetch_multiplier,
         folder_limit: final_config.folder_limit * rerank.folder_fetch_multiplier,
         file_limit: final_config.file_limit * rerank.file_fetch_multiplier,
+        cluster_limit: final_config.cluster_limit * rerank.cluster_fetch_multiplier,
     }
 }
 
@@ -126,6 +141,7 @@ mod tests {
             module_doc_limit: 3,
             folder_limit: 3,
             file_limit: 2,
+            cluster_limit: 3,
         };
         let rerank = RerankConfig {
             enabled: true,
@@ -135,6 +151,7 @@ mod tests {
             module_doc_fetch_multiplier: 2,
             folder_fetch_multiplier: 2,
             file_fetch_multiplier: 2,
+            cluster_fetch_multiplier: 2,
         };
         let fetched = fetch_limits(&config, &rerank);
         assert_eq!(fetched.code_limit, 20);
@@ -143,6 +160,7 @@ mod tests {
         assert_eq!(fetched.module_doc_limit, 6);
         assert_eq!(fetched.folder_limit, 6);
         assert_eq!(fetched.file_limit, 4);
+        assert_eq!(fetched.cluster_limit, 6);
     }
 
     #[test]
@@ -154,6 +172,7 @@ mod tests {
             module_doc_limit: 3,
             folder_limit: 0,
             file_limit: 0,
+            cluster_limit: 0,
         };
         let rerank = RerankConfig {
             enabled: false,

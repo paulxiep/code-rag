@@ -15,7 +15,7 @@
 //! * `Embedder` + `Reranker` are sync (fastembed is sync; the inner `!Sync`
 //!   model state moves into the impl via `std::sync::Mutex`).
 //! * `VectorReader` is async (LanceDB is async). It carries READS only —
-//!   writes stay on the concrete `VectorStore` because code-raptor's ingest
+//!   writes stay on the concrete `VectorStore` because code-rag-ingest's ingest
 //!   path doesn't dispatch them as RPC.
 //! * `LlmClient` is async; its trait returns `LlmError` rather than the
 //!   chat-crate `EngineError` so it can live next to the other seams.
@@ -99,7 +99,7 @@ pub trait Reranker: Send + Sync {
 
 /// Read-side over the LanceDB-backed vector store. Writes (`upsert_*`,
 /// `delete_*`, `create_fts_indices`) stay on the concrete `VectorStore` —
-/// they're only exercised by code-raptor's ingest path, which doesn't go
+/// they're only exercised by code-rag-ingest's ingest path, which doesn't go
 /// through the RPC seam.
 ///
 /// At M5 the dev plan splits the call-edges graph (`get_all_edges`) out of
@@ -151,6 +151,13 @@ pub trait VectorReader: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(code_rag_types::FileChunk, f32)>, StoreError>;
 
+    // R3: emergent-cluster summary chunks.
+    async fn search_clusters(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(code_rag_types::ClusterChunk, f32)>, StoreError>;
+
     // ---- hybrid (vector + FTS) search ----
     async fn hybrid_search_code(
         &self,
@@ -194,6 +201,14 @@ pub trait VectorReader: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(code_rag_types::FileChunk, f32)>, StoreError>;
 
+    // R3: hybrid (vector + FTS) search over emergent-cluster summary chunks.
+    async fn hybrid_search_clusters(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(code_rag_types::ClusterChunk, f32)>, StoreError>;
+
     // ---- catalog ----
     async fn list_projects(&self) -> Result<Vec<String>, StoreError>;
 
@@ -220,6 +235,23 @@ pub trait VectorReader: Send + Sync {
         caller_chunk_id: &str,
         project: Option<&str>,
     ) -> Result<Vec<code_rag_types::CallEdge>, StoreError>;
+
+    // ---- Track R (R1): typed relation edges for the RelationGraph ----
+    async fn get_all_graph_edges(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<code_rag_types::GraphEdge>, StoreError>;
+
+    // ---- Track R (R5): topology reads for the MCP topology tools ----
+    async fn get_community_assignments(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<code_rag_types::CommunityAssignment>, StoreError>;
+
+    async fn get_cluster_chunks(
+        &self,
+        project_name: &str,
+    ) -> Result<Vec<code_rag_types::ClusterChunk>, StoreError>;
 }
 
 // ---------- VectorWriter ----------
@@ -229,7 +261,7 @@ pub trait VectorReader: Send + Sync {
 /// stay on `VectorReader`. The concrete `VectorStore` implements both.
 ///
 /// `#[wagon(identity)]` because writes are inproc-only by design — the
-/// dev plan keeps ingest (code-raptor) running as a one-shot batch on
+/// dev plan keeps ingest (code-rag-ingest) running as a one-shot batch on
 /// the same node as the store. Promoting to full HTTP codegen is M4-cloud
 /// / Phase 2 work (cloud-managed vector DB). Identity-marked traits don't
 /// honor mode flips, which is the intended Phase 1 behavior here.

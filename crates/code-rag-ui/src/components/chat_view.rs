@@ -37,6 +37,11 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
     let (input, set_input) = signal(String::new());
     let (loading, set_loading) = signal(false);
     let textarea_ref = NodeRef::<Textarea>::new();
+    // R5: one-shot anchor chunk_id for the NEXT submit — set by the topology
+    // click-a-node path, consumed (and cleared) by `on_submit`. Manual
+    // submissions never see a stale anchor.
+    #[cfg(feature = "standalone")]
+    let pending_anchor: StoredValue<Option<String>> = StoredValue::new(None);
 
     // Standalone mode: grab context signals set up by main.rs
     #[cfg(feature = "standalone")]
@@ -72,10 +77,14 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
             let _index = index_signal;
             let _classifier = classifier_signal;
             let _auth = auth_signal;
+            // Take (and clear) the one-shot anchor queued by a topology click.
+            let anchor = pending_anchor.get_value();
+            pending_anchor.set_value(None);
             spawn_local(async move {
                 // Yield so the browser paints "Thinking" before sync retrieval blocks the event loop.
                 gloo_timers::future::TimeoutFuture::new(0).await;
-                let result = standalone_chat(&query, _index, _classifier, _auth).await;
+                let result =
+                    standalone_chat(&query, anchor.as_deref(), _index, _classifier, _auth).await;
                 match result {
                     Ok(response) => {
                         set_messages.update(|msgs| {
@@ -112,6 +121,25 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
             });
         }
     };
+
+    // R5: submit queries queued by the topology view (click-a-node). Waits out
+    // an in-flight query — the effect re-runs when `loading` flips false.
+    #[cfg(feature = "standalone")]
+    {
+        let pending = use_context::<crate::PendingQuery>().expect("PendingQuery context missing");
+        Effect::new(move |_| {
+            if pending.0.get().is_none() || loading.get() {
+                return;
+            }
+            let Some(chat) = pending.0.get_untracked() else {
+                return;
+            };
+            pending.0.set(None);
+            pending_anchor.set_value(chat.anchor_chunk_id);
+            set_input.set(chat.query);
+            on_submit();
+        });
+    }
 
     view! {
         <div class="chat-container">
@@ -240,6 +268,7 @@ pub fn ChatView(#[allow(unused_variables)] api_base: String) -> impl IntoView {
 #[cfg(feature = "standalone")]
 async fn standalone_chat(
     query: &str,
+    anchor_chunk_id: Option<&str>,
     index_signal: RwSignal<Option<std::sync::Arc<crate::data::ChunkIndex>>>,
     classifier_signal: RwSignal<Option<std::sync::Arc<code_rag_engine::intent::IntentClassifier>>>,
     auth_signal: RwSignal<Option<crate::auth::AuthMethod>>,
@@ -253,11 +282,25 @@ async fn standalone_chat(
 
     match auth_signal.get_untracked() {
         Some(ref a) if a.is_valid() => {
-            crate::standalone_api::send_chat_standalone(query, &embedding, &index, &classifier, a)
-                .await
+            crate::standalone_api::send_chat_standalone(
+                query,
+                anchor_chunk_id,
+                &embedding,
+                &index,
+                &classifier,
+                a,
+            )
+            .await
         }
         _ => {
-            crate::standalone_api::send_chat_rag_only(query, &embedding, &index, &classifier).await
+            crate::standalone_api::send_chat_rag_only(
+                query,
+                anchor_chunk_id,
+                &embedding,
+                &index,
+                &classifier,
+            )
+            .await
         }
     }
 }

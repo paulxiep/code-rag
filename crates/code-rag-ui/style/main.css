@@ -12,6 +12,18 @@
 		0 2px 6px rgba(var(--gray), 25%),
 		0 8px 24px rgba(var(--gray), 33%),
 		0 16px 32px rgba(var(--gray), 33%);
+	/* R5 topology viz: 8 fixed community slots + neutral "other" + edge color.
+	   graph.js reads these at init/theme-change; the legend uses them directly. */
+	--viz-c1: #2a78d6;
+	--viz-c2: #eb6834;
+	--viz-c3: #1baf7a;
+	--viz-c4: #eda100;
+	--viz-c5: #e87ba4;
+	--viz-c6: #008300;
+	--viz-c7: #4a3aa7;
+	--viz-c8: #e34948;
+	--viz-other: rgb(var(--gray));
+	--viz-edge: #60739f;
 }
 :root[data-theme="dark"] {
 	--accent: #7B8EFF;
@@ -26,6 +38,16 @@
 		0 2px 6px rgba(0, 0, 0, 40%),
 		0 8px 24px rgba(0, 0, 0, 50%),
 		0 16px 32px rgba(0, 0, 0, 50%);
+	--viz-c1: #3987e5;
+	--viz-c2: #d95926;
+	--viz-c3: #199e70;
+	--viz-c4: #c98500;
+	--viz-c5: #d55181;
+	--viz-c6: #008300;
+	--viz-c7: #9085e9;
+	--viz-c8: #e66767;
+	--viz-other: rgb(var(--gray));
+	--viz-edge: #8892a8;
 }
 
 @font-face {
@@ -395,15 +417,214 @@ pre > code {
 	display: flex;
 	gap: 0.4em;
 	flex-wrap: wrap;
-	padding: 0.25em 0;
+	padding: 0.15em 0;
 }
 
+/* Rendered as a <span> in backend mode (informational) and as a <button>
+   in standalone mode, where the bar is the topology project selector. */
 .project-tag {
+	font-family: inherit;
+	border: none;
 	background: rgb(var(--gray-light));
 	color: rgb(var(--gray-dark));
 	padding: 0.15em 0.5em;
 	border-radius: 4px;
 	font-size: 0.75em;
+}
+
+button.project-tag {
+	cursor: pointer;
+}
+
+button.project-tag:hover {
+	background: rgb(var(--gray));
+	color: rgb(var(--surface));
+}
+
+.project-tag.active {
+	background: var(--accent);
+	color: rgb(var(--surface));
+}
+
+/* Tabs (R5: chat / topology) */
+.tab-strip {
+	display: flex;
+	gap: 0.25em;
+	border-bottom: 1px solid rgb(var(--gray-light));
+	margin-bottom: 0.5em;
+}
+
+.tab-btn {
+	font-family: inherit;
+	font-size: 0.85em;
+	font-weight: 700;
+	color: rgb(var(--gray));
+	background: none;
+	border: none;
+	border-bottom: 2px solid transparent;
+	padding: 0.3em 0.9em;
+	cursor: pointer;
+}
+
+.tab-btn:hover {
+	color: rgb(var(--black));
+}
+
+.tab-btn.active {
+	color: var(--accent);
+	border-bottom-color: var(--accent);
+}
+
+/* Panels stay mounted; tabs only toggle visibility so chat history and the
+   graph layout survive switches. */
+.tab-panel {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.tab-panel.hidden {
+	display: none;
+}
+
+/* Topology view (R5) */
+.topology-view {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	gap: 0.5em;
+}
+
+.viz-project-row {
+	display: flex;
+	gap: 0.4em;
+	flex-wrap: wrap;
+}
+
+.viz-project-btn {
+	font-family: inherit;
+	font-size: 0.75em;
+	background: rgb(var(--gray-light));
+	color: rgb(var(--gray-dark));
+	border: none;
+	padding: 0.15em 0.5em;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.viz-project-btn.active {
+	background: var(--accent);
+	color: rgb(var(--surface));
+}
+
+.viz-canvas-wrap {
+	flex: 1;
+	min-height: 280px;
+	/* Cap growth so the whole view (header → legend) fits typical iframe
+	   heights; the canvas re-measures on resize either way. */
+	max-height: 480px;
+	position: relative;
+	border: 1px solid rgb(var(--gray-light));
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+.viz-canvas-wrap.hidden {
+	display: none;
+}
+
+.viz-canvas {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	cursor: grab;
+}
+
+.viz-canvas:active {
+	cursor: grabbing;
+}
+
+.viz-missing {
+	color: rgb(var(--gray));
+	font-size: 0.85em;
+	font-style: italic;
+}
+
+.viz-note {
+	color: rgb(var(--gray));
+	font-size: 0.75em;
+	margin: 0;
+}
+
+.viz-legend {
+	/* One wrapping flow: community and edge chips share lines, saving a
+	   row or two of iframe height. */
+	display: flex;
+	flex-wrap: wrap;
+	row-gap: 0.25em;
+	column-gap: 0.6em;
+	font-size: 0.72em;
+}
+
+.viz-legend-communities,
+.viz-legend-edges {
+	display: contents;
+}
+
+.viz-legend-communities,
+.viz-legend-edges {
+	display: flex;
+	gap: 0.5em;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.viz-legend-edges {
+	color: var(--viz-edge);
+}
+
+.viz-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3em;
+	color: rgb(var(--gray-dark));
+}
+
+.viz-chip-note {
+	color: rgb(var(--gray));
+	font-style: italic;
+}
+
+.viz-swatch {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+}
+
+/* Hover tooltip owned by graph.js (appended to body) */
+.graph-tooltip {
+	position: fixed;
+	pointer-events: none;
+	z-index: 30;
+	background: rgb(var(--surface));
+	color: rgb(var(--gray-dark));
+	border: 1px solid rgb(var(--gray-light));
+	border-radius: 6px;
+	box-shadow: 0 2px 6px rgba(var(--gray), 25%);
+	padding: 0.35em 0.6em;
+	font-size: 0.7em;
+	line-height: 1.4;
+	max-width: 340px;
+	display: none;
+}
+
+.graph-tooltip .tt-title {
+	font-weight: 700;
+	color: rgb(var(--black));
 }
 
 /* Empty state */

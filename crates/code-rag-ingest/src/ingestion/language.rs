@@ -1,0 +1,351 @@
+use code_rag_types::{EdgeContext, EdgeRelation};
+use tree_sitter::{Language, Node};
+
+/// An import found in a source file. Used for tier-2 (import-based) edge resolution.
+/// Local to code-rag-ingest; not stored in LanceDB.
+#[derive(Debug, Clone, Default)]
+pub struct ImportInfo {
+    /// The imported symbol name, e.g. "normalize_path"
+    pub imported_name: String,
+    /// The source module path, e.g. "crate::ingestion::mod" or "./utils"
+    pub source_path: String,
+    /// Track R (R1): true when this is a *re-export* (`pub use` / `export … from`)
+    /// rather than a private import — drives `ReExports` vs `Imports` graph edges.
+    pub is_reexport: bool,
+}
+
+impl ImportInfo {
+    /// Private import (`is_reexport = false`).
+    pub fn import(imported_name: impl Into<String>, source_path: impl Into<String>) -> Self {
+        Self {
+            imported_name: imported_name.into(),
+            source_path: source_path.into(),
+            is_reexport: false,
+        }
+    }
+}
+
+/// Track R (R1): a raw type relation extracted from a definition node, before
+/// target resolution. `target_name` is the referenced type/trait identifier; the
+/// orchestrator resolves it to a chunk id (reusing call-edge resolution) and emits
+/// a `GraphEdge`. `relation` is one of `Implements` / `Extends` / `Embeds` /
+/// `References`; `context` is meaningful only for `References`. Local to
+/// code-rag-ingest; not stored in LanceDB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeRelation {
+    pub target_name: String,
+    pub relation: EdgeRelation,
+    pub context: EdgeContext,
+}
+
+impl TypeRelation {
+    pub fn new(
+        target_name: impl Into<String>,
+        relation: EdgeRelation,
+        context: EdgeContext,
+    ) -> Self {
+        Self {
+            target_name: target_name.into(),
+            relation,
+            context,
+        }
+    }
+}
+
+/// Trait for language-specific parsing behavior.
+///
+/// Implement this trait to add support for a new programming language.
+/// Each implementation handles grammar loading and query patterns for its language.
+/// Docstring extraction (V1.5) overrides the default `None` return per handler.
+pub trait LanguageHandler: Send + Sync {
+    /// Language identifier (e.g., "rust", "python")
+    fn name(&self) -> &'static str;
+
+    /// File extensions this handler supports (e.g., &["rs"] for Rust)
+    fn extensions(&self) -> &'static [&'static str];
+
+    /// Get the tree-sitter grammar for this language
+    fn grammar(&self) -> Language;
+
+    /// Tree-sitter S-expression query for extracting code elements.
+    ///
+    /// Must capture:
+    /// - `@name` - the identifier of the element
+    /// - `@body` - the full element node
+    fn query_string(&self) -> &'static str;
+
+    /// Extract docstring from a code element.
+    ///
+    /// Default returns None. Per-language implementations added in V1.5.
+    fn extract_docstring(
+        &self,
+        _source: &str,
+        _node: &Node,
+        _source_bytes: &[u8],
+    ) -> Option<String> {
+        None
+    }
+
+    /// Extract function/method call identifiers from a code element's body.
+    ///
+    /// Walks the AST subtree of the body node to find call expressions.
+    /// Returns deduplicated, sorted identifiers. Default returns empty vec.
+    fn extract_calls(&self, _source: &str, _node: &Node, _source_bytes: &[u8]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Extract import declarations from the file's root AST node (C1).
+    ///
+    /// Returns imported symbol names with their source module paths.
+    /// Used for tier-2 (import-based) call edge resolution.
+    /// Default returns empty vec.
+    fn extract_file_imports(
+        &self,
+        _source: &str,
+        _root: &Node,
+        _source_bytes: &[u8],
+    ) -> Vec<ImportInfo> {
+        Vec::new()
+    }
+
+    /// Extract declaration signature from a code element (B3).
+    ///
+    /// For functions: "pub async fn retrieve(query: &str) -> Result<Vec<CodeChunk>>"
+    /// For structs/enums/traits: "pub struct VectorStore", "pub trait Foo: Send + Sync"
+    /// Default returns None.
+    fn extract_signature(
+        &self,
+        _source: &str,
+        _node: &Node,
+        _source_bytes: &[u8],
+    ) -> Option<String> {
+        None
+    }
+
+    /// Track R (R1): extract typed structural relations from a definition node.
+    ///
+    /// `node` is the `@body` capture (the full definition: impl/trait/struct/class/
+    /// function/…). Returns raw `(target_name, relation, context)` triples that the
+    /// orchestrator resolves to chunk ids. Mirrors how `extract_calls` /
+    /// `extract_file_imports` were added — default returns empty so a language opts
+    /// in by overriding. Per-language coverage:
+    /// - Rust: `impl Trait for T` → Implements; trait supertrait bounds → Extends;
+    ///   struct field types → Embeds; fn param/return/generic types → References.
+    /// - Python: base classes → Extends; annotations → References.
+    /// - TypeScript: `implements` → Implements; `extends` → Extends; annotations →
+    ///   References.
+    /// - Go: struct embedding → Embeds; param/return/field types → References
+    ///   (interface satisfaction is structural/implicit → no Implements).
+    fn extract_type_relations(
+        &self,
+        _source: &str,
+        _node: &Node,
+        _source_bytes: &[u8],
+    ) -> Vec<TypeRelation> {
+        Vec::new()
+    }
+}
+
+/// Shared helper: collect type-identifier names from a type node, distinguishing
+/// the head type from generic arguments. Returns `(name, is_generic_arg)` pairs.
+/// Used by per-language `extract_type_relations` to turn `Vec<CodeChunk>` into
+/// `[(Vec, false), (CodeChunk, true)]`. Walks the subtree collecting any node whose
+/// kind is in `ident_kinds` (e.g. `type_identifier` for Rust/TS).
+pub(crate) fn collect_type_idents(
+    node: &Node,
+    source_bytes: &[u8],
+    ident_kinds: &[&str],
+    generic_kinds: &[&str],
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    collect_type_idents_inner(
+        node,
+        source_bytes,
+        ident_kinds,
+        generic_kinds,
+        false,
+        &mut out,
+    );
+    out
+}
+
+/// Track R (R1): scan the comment lines immediately preceding a definition for
+/// rationale markers (the `NOTE` / `WHY` / `HACK` words, colon-suffixed),
+/// returning identifier-like tokens mentioned *after* the marker.
+///
+/// **Anchored:** a marker only counts when it begins the comment's text —
+/// comment leader stripped, then the marker must be the first thing on the
+/// line. A marker quoted mid-sentence (prose, or a doc example describing the
+/// convention) never fires; an earlier version matched anywhere in the line
+/// and famously linked this very function to `Reranker` by scanning its own
+/// doc example when code-rag ingested itself.
+///
+/// High-precision: only CamelCase or snake_case tokens (len ≥ 4) after the
+/// marker qualify, and target resolution further drops any that aren't
+/// project symbols. Language-agnostic: keys off the marker, not comment syntax.
+pub(crate) fn extract_rationale_targets(source: &str, def_start_row: usize) -> Vec<String> {
+    if def_start_row == 0 {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    let mut found = Vec::new();
+    let mut i = def_start_row; // 0-based row of the definition's first line
+    while i > 0 {
+        i -= 1;
+        let line = lines.get(i).map(|l| l.trim()).unwrap_or("");
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment_text) = strip_comment_leader(line) else {
+            break; // hit code — stop scanning the comment block
+        };
+        if let Some(rationale) = strip_rationale_marker(comment_text) {
+            for tok in rationale.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                let is_identifier_like = tok.len() >= 4
+                    && tok
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && (tok.contains('_') || tok.chars().any(|c| c.is_uppercase()));
+                if is_identifier_like {
+                    found.push(tok.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Strip a comment leader (`///`, `//!`, `//`, `#`, `*`, `/*`) and following
+/// whitespace; None if the line isn't a comment.
+fn strip_comment_leader(line: &str) -> Option<&str> {
+    for leader in ["///", "//!", "//", "/*", "#", "*"] {
+        if let Some(rest) = line.strip_prefix(leader) {
+            return Some(rest.trim_start());
+        }
+    }
+    None
+}
+
+/// If the comment text *starts* with a rationale marker (case-insensitive
+/// `NOTE:` / `WHY:` / `HACK:`), return the text after the marker.
+fn strip_rationale_marker(text: &str) -> Option<&str> {
+    for marker in ["NOTE:", "WHY:", "HACK:"] {
+        if let Some(head) = text.get(..marker.len())
+            && head.eq_ignore_ascii_case(marker)
+        {
+            return Some(&text[marker.len()..]);
+        }
+    }
+    None
+}
+
+/// Shared helper: collect all descendant nodes whose kind is in `kinds` (the node
+/// itself is not matched). Used to find heritage clauses that may be nested under a
+/// wrapper node (e.g. TS `class_heritage`).
+pub(crate) fn collect_nodes_by_kind<'a>(node: &Node<'a>, kinds: &[&str]) -> Vec<Node<'a>> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if kinds.contains(&child.kind()) {
+            out.push(child);
+        }
+        out.extend(collect_nodes_by_kind(&child, kinds));
+    }
+    out
+}
+
+#[cfg(test)]
+mod rationale_tests {
+    use super::extract_rationale_targets;
+
+    fn targets(source: &str) -> Vec<String> {
+        // Definition is always the last line of the fixture.
+        let def_row = source.lines().count() - 1;
+        extract_rationale_targets(source, def_row)
+    }
+
+    #[test]
+    fn anchored_marker_yields_identifiers_after_it() {
+        let src = "// WHY: needed because FooBar stalls\nfn f() {}";
+        assert_eq!(targets(src), vec!["FooBar"]);
+        let src = "# NOTE: uses snake_case_thing internally\ndef f():";
+        assert_eq!(targets(src), vec!["snake_case_thing"]);
+    }
+
+    #[test]
+    fn mid_line_marker_does_not_fire() {
+        // The self-trigger reproduction: a doc line *quoting* a marker example
+        // must not create rationale targets (this exact shape once linked the
+        // scanner to `Reranker` when code-rag ingested itself).
+        let src =
+            "/// so a comment like `// WHY: needed because Reranker stalls` yields it\nfn f() {}";
+        assert!(targets(src).is_empty());
+    }
+
+    #[test]
+    fn marker_must_start_the_comment_text() {
+        // A marker preceded by prose does not anchor, so nothing on the line
+        // is scanned — not even identifier-like tokens after the colon.
+        let src = "// prose mentioning HACK: SomeType here\nfn f() {}";
+        assert!(targets(src).is_empty());
+    }
+
+    #[test]
+    fn only_anchored_lines_in_block_contribute() {
+        let src = "\
+// WHY: FirstTarget explains this
+// plain description line mentioning OtherType
+// NOTE: SecondTarget also relevant
+fn f() {}";
+        let mut got = targets(src);
+        got.sort();
+        assert_eq!(got, vec!["FirstTarget", "SecondTarget"]);
+    }
+
+    #[test]
+    fn scan_stops_at_code() {
+        let src = "\
+// WHY: UpperTarget unrelated
+let x = 1;
+// no marker here
+fn f() {}";
+        assert!(targets(src).is_empty());
+    }
+
+    #[test]
+    fn lowercase_prose_tokens_ignored() {
+        let src = "// NOTE: needed because the cache stalls sometimes\nfn f() {}";
+        assert!(targets(src).is_empty());
+    }
+}
+
+fn collect_type_idents_inner(
+    node: &Node,
+    source_bytes: &[u8],
+    ident_kinds: &[&str],
+    generic_kinds: &[&str],
+    in_generic: bool,
+    out: &mut Vec<(String, bool)>,
+) {
+    // Check the node itself first, so a bare type node (e.g. `VectorStore`, which
+    // *is* a `type_identifier` with no relevant children) is captured.
+    if ident_kinds.contains(&node.kind())
+        && let Ok(name) = node.utf8_text(source_bytes)
+    {
+        out.push((name.to_string(), in_generic));
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Once inside a generic-argument node, mark descendants as generic args.
+        let child_in_generic = in_generic || generic_kinds.contains(&child.kind());
+        collect_type_idents_inner(
+            &child,
+            source_bytes,
+            ident_kinds,
+            generic_kinds,
+            child_in_generic,
+            out,
+        );
+    }
+}

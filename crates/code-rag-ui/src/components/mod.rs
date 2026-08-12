@@ -4,6 +4,8 @@ mod sources_panel;
 
 #[cfg(feature = "standalone")]
 mod auth_panel;
+#[cfg(feature = "standalone")]
+mod topology_view;
 
 pub use chat_view::ChatView;
 pub use intent_badge::IntentBadge;
@@ -11,3 +13,5 @@ pub use sources_panel::SourcesPanel;
 
 #[cfg(feature = "standalone")]
 pub use auth_panel::AuthPanel;
+#[cfg(feature = "standalone")]
+pub use topology_view::TopologyView;

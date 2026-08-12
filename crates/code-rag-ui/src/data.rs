@@ -5,7 +5,8 @@ use gloo_net::http::Request;
 use serde::Deserialize;
 
 use code_rag_types::{
-    CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk, ReadmeChunk,
+    ClusterChunk, CodeChunk, CrateChunk, ExportEdge, FileChunk, FolderChunk, ModuleDocChunk,
+    ReadmeChunk,
 };
 
 /// A chunk paired with its pre-computed embedding vector.
@@ -35,6 +36,9 @@ pub struct ChunkIndex {
     /// A4: file summary chunks. Pre-A4 bundle → empty Vec.
     #[serde(default)]
     pub file_chunks: Vec<EmbeddedChunk<FileChunk>>,
+    /// R3: emergent-cluster summary chunks. Pre-R3 bundle → empty Vec.
+    #[serde(default)]
+    pub cluster_chunks: Vec<EmbeddedChunk<ClusterChunk>>,
     /// Pre-computed prototype embeddings for intent classification.
     /// Keys: "overview", "implementation", "relationship", "comparison"
     pub intent_prototypes: std::collections::HashMap<String, Vec<Vec<f32>>>,
@@ -54,6 +58,9 @@ pub struct ChunkIndex {
     /// A4: IDF over file summary_text.
     #[serde(default)]
     pub file_idf: Option<super::text_search::IdfTable>,
+    /// R3: IDF over cluster summary_text.
+    #[serde(default)]
+    pub cluster_idf: Option<super::text_search::IdfTable>,
 
     /// C1: Call graph edges for browser-side graph traversal.
     #[serde(default)]

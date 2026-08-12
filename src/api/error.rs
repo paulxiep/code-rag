@@ -51,7 +51,7 @@ impl From<crate::engine::EngineError> for ApiError {
                 // Table not found usually means no data ingested
                 if e.to_string().contains("not found") {
                     ApiError::Unavailable(
-                        "No data ingested yet. Run code-raptor to ingest first.".into(),
+                        "No data ingested yet. Run code-rag-ingest to ingest first.".into(),
                     )
                 } else {
                     ApiError::Internal(e.to_string())
@@ -76,7 +76,9 @@ impl From<code_rag_store::EmbedError> for ApiError {
 impl From<crate::store::StoreError> for ApiError {
     fn from(err: crate::store::StoreError) -> Self {
         if err.to_string().contains("not found") {
-            ApiError::Unavailable("No data ingested yet. Run code-raptor to ingest first.".into())
+            ApiError::Unavailable(
+                "No data ingested yet. Run code-rag-ingest to ingest first.".into(),
+            )
         } else {
             ApiError::Internal(err.to_string())
         }

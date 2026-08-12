@@ -165,6 +165,85 @@ async fn augment_with_graph(
     graph::merge_graph_chunks(code_scored, graph_scored)
 }
 
+/// Track R (R1): augment Relationship results from the typed RelationGraph.
+///
+/// Loads the project's `graph_edges` (implements/extends/embeds/references),
+/// builds a `RelationGraph`, and—if the query is a structural-relation question
+/// like "what implements `Embedder`?"—merges the related chunks into the code
+/// results, unioning their ids into `graph_ids` for `reserve_graph_slots`
+/// protection. Returns inputs unchanged when there are no relation edges or the
+/// query has no relation target, so it is a strict no-op on the pre-R1 baseline.
+async fn augment_with_relations(
+    query: &str,
+    code_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    prior_graph_ids: std::collections::HashSet<String>,
+    store: &dyn VectorReader,
+) -> (
+    Vec<ScoredChunk<code_rag_types::CodeChunk>>,
+    std::collections::HashSet<String>,
+) {
+    let candidates: Vec<(String, String)> = code_scored
+        .iter()
+        .take(5)
+        .map(|sc| (sc.chunk.chunk_id.clone(), sc.chunk.identifier.clone()))
+        .collect();
+    if candidates.is_empty() {
+        return (code_scored, prior_graph_ids);
+    }
+
+    let project = &code_scored[0].chunk.project_name;
+    let edges = match store.get_all_graph_edges(project).await {
+        Ok(e) => e,
+        Err(_) => return (code_scored, prior_graph_ids),
+    };
+    if edges.is_empty() {
+        return (code_scored, prior_graph_ids);
+    }
+
+    let id_pairs: Vec<(String, String)> = edges
+        .iter()
+        .flat_map(|e| {
+            vec![
+                (e.source_identifier.clone(), e.source_chunk_id.clone()),
+                (e.target_identifier.clone(), e.target_chunk_id.clone()),
+            ]
+        })
+        .collect();
+    let mut relation_graph = graph::RelationGraph::from_edges(edges.iter().map(|e| {
+        (
+            e.source_chunk_id.clone(),
+            e.target_chunk_id.clone(),
+            e.relation,
+        )
+    }));
+    relation_graph.register_identifiers(id_pairs);
+
+    let resolved_ids = match graph::relation_augment(query, &candidates, &relation_graph) {
+        Some((_, ids)) => ids,
+        None => return (code_scored, prior_graph_ids),
+    };
+
+    let chunks = match store.get_chunks_by_ids(&resolved_ids).await {
+        Ok(c) => c,
+        Err(_) => return (code_scored, prior_graph_ids),
+    };
+
+    // Relation-resolved chunks carry structural proof; prime them at the
+    // import-tier prior (the reranker reorders, reserve_graph_slots protects).
+    let relation_scored: Vec<ScoredChunk<code_rag_types::CodeChunk>> = chunks
+        .into_iter()
+        .map(|chunk| ScoredChunk {
+            chunk,
+            score: graph::tier_score(2),
+        })
+        .collect();
+
+    let (merged, new_ids) = graph::merge_graph_chunks(code_scored, relation_scored);
+    let mut all_ids = prior_graph_ids;
+    all_ids.extend(new_ids);
+    (merged, all_ids)
+}
+
 /// Rerank a vec of scored chunks using the cross-encoder.
 /// Returns chunks re-sorted by sigmoid-normalized cross-encoder score, truncated to limit.
 fn rerank_chunks<T: RerankText + Clone>(
@@ -224,6 +303,11 @@ fn rerank_all(
     } else {
         0
     };
+    let cluster_limit = if config.cluster_limit > 0 {
+        config.cluster_limit
+    } else {
+        0
+    };
     Ok(RetrievalResult {
         code_chunks: rerank_chunks(query, bundle.code_chunks, reranker, code_limit)?,
         readme_chunks: rerank_chunks(query, bundle.readme_chunks, reranker, config.readme_limit)?,
@@ -236,6 +320,7 @@ fn rerank_all(
         )?,
         folder_chunks: rerank_chunks(query, bundle.folder_chunks, reranker, folder_limit)?,
         file_chunks: rerank_chunks(query, bundle.file_chunks, reranker, file_limit)?,
+        cluster_chunks: rerank_chunks(query, bundle.cluster_chunks, reranker, cluster_limit)?,
         intent: bundle.intent,
     })
 }
@@ -450,6 +535,19 @@ pub async fn retrieve(
             (code_scored, std::collections::HashSet::new())
         };
 
+    // Track R (R1): also consult the typed RelationGraph (implements/extends/
+    // embeds) and merge its hits. Runs for Relationship + Implementation because
+    // "what implements X?" is frequently misclassified as Implementation. This is
+    // a strict no-op unless the query carries an implement/extend/embed cue AND
+    // relation edges match — so typical Implementation queries ("how does X work")
+    // and the pre-R1 baseline are unaffected.
+    let (code_scored, graph_ids) =
+        if intent == QueryIntent::Relationship || intent == QueryIntent::Implementation {
+            augment_with_relations(query, code_scored, graph_ids, store).await
+        } else {
+            (code_scored, graph_ids)
+        };
+
     // Non-code tables are untouched by B5 — they follow the hybrid toggle only.
     let (readme_scored, crate_scored, module_doc_scored) = if use_hybrid {
         let (readme_raw, crate_raw, module_doc_raw) = tokio::try_join!(
@@ -513,6 +611,37 @@ pub async fn retrieve(
             } else {
                 store
                     .search_files(query_embedding, fetch_config.file_limit)
+                    .await
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|(c, d)| (c, 1.0 / (1.0 + d)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            to_scored_relevance(raw)
+        } else {
+            Vec::new()
+        };
+
+    // R3: emergent-cluster arm. Same short-circuit pattern as folder/file.
+    // `cluster_vec` mirrors `folder_vec` (Overview-heavy, off for Relationship);
+    // `cluster_limit` is per-intent. Missing `cluster_chunks` table → empty.
+    // The sweep override lets the harness force the arm past the policy gate
+    // (CLUSTER_LIMIT=N) — without it, a nonzero limit alone is a no-op because
+    // every intent ships `cluster_vec: false` since the R3 gating decision.
+    let cluster_scored: Vec<ScoredChunk<code_rag_types::ClusterChunk>> =
+        if fetch_config.cluster_limit > 0
+            && (policy.cluster_vec || engine_config.cluster_sweep_override)
+        {
+            let raw = if use_hybrid {
+                store
+                    .hybrid_search_clusters(query, query_embedding, fetch_config.cluster_limit)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                store
+                    .search_clusters(query_embedding, fetch_config.cluster_limit)
                     .await
                     .map(|v| {
                         v.into_iter()
@@ -597,6 +726,7 @@ pub async fn retrieve(
                 module_doc_chunks: module_doc_scored,
                 folder_chunks: folder_scored.clone(),
                 file_chunks: file_scored.clone(),
+                cluster_chunks: cluster_scored.clone(),
                 intent,
             };
             match rerank_all(query, bundle, reranker, config, code_keep_override) {
@@ -653,6 +783,7 @@ pub async fn retrieve(
                         module_doc_chunks: module_doc_raw,
                         folder_chunks: folder_scored.clone(),
                         file_chunks: file_scored.clone(),
+                        cluster_chunks: cluster_scored.clone(),
                         intent,
                     }
                 }
@@ -666,6 +797,7 @@ pub async fn retrieve(
                 module_doc_chunks: module_doc_scored,
                 folder_chunks: folder_scored,
                 file_chunks: file_scored,
+                cluster_chunks: cluster_scored,
                 intent,
             }
         }
@@ -677,6 +809,7 @@ pub async fn retrieve(
             module_doc_chunks: module_doc_scored,
             folder_chunks: folder_scored,
             file_chunks: file_scored,
+            cluster_chunks: cluster_scored,
             intent,
         }
     };

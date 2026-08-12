@@ -40,11 +40,16 @@ pub fn build_classifier(index: &ChunkIndex) -> IntentClassifier {
 /// Run RAG retrieval only (no LLM) — works without auth.
 pub async fn send_chat_rag_only(
     query: &str,
+    anchor_chunk_id: Option<&str>,
     query_embedding: &[f32],
     index: &ChunkIndex,
     classifier: &IntentClassifier,
 ) -> Result<ChatResponse, String> {
-    let (result, classification) = run_retrieval(query, query_embedding, index, classifier).await;
+    let (mut result, classification) =
+        run_retrieval(query, query_embedding, index, classifier).await;
+    if let Some(id) = anchor_chunk_id {
+        anchor_chunk(&mut result, index, id);
+    }
     let sources = build_source_list(&result);
     let intent_str = format_intent(classification.intent);
 
@@ -64,12 +69,17 @@ pub async fn send_chat_rag_only(
 /// Run the full RAG pipeline in-browser and return a ChatResponse.
 pub async fn send_chat_standalone(
     query: &str,
+    anchor_chunk_id: Option<&str>,
     query_embedding: &[f32],
     index: &ChunkIndex,
     classifier: &IntentClassifier,
     auth: &AuthMethod,
 ) -> Result<ChatResponse, String> {
-    let (result, classification) = run_retrieval(query, query_embedding, index, classifier).await;
+    let (mut result, classification) =
+        run_retrieval(query, query_embedding, index, classifier).await;
+    if let Some(id) = anchor_chunk_id {
+        anchor_chunk(&mut result, index, id);
+    }
 
     let ctx = context::build_context(&result);
     let prompt = context::build_prompt(query, &ctx);
@@ -86,6 +96,33 @@ pub async fn send_chat_standalone(
 }
 
 // --- Internal helpers ---
+
+/// Relevance stamped on an anchored chunk: above the sigmoid range typical
+/// reranked chunks land in, matching the C2 tier-score treatment of
+/// graph-confirmed hits (the click IS structural confirmation).
+const ANCHOR_RELEVANCE: f32 = 0.9;
+
+/// R5: guarantee the topology-clicked chunk reaches the context. The click
+/// carries the exact `chunk_id`, so no identifier resolution is involved —
+/// generic names (`Player` in two projects) defeat resolution-based
+/// augmentation, but the clicked definition is ground truth by construction.
+fn anchor_chunk(result: &mut RetrievalResult, index: &ChunkIndex, chunk_id: &str) {
+    let Some(&i) = index.chunk_id_index.get(chunk_id) else {
+        return; // stale artifact vs newer index — degrade to plain retrieval
+    };
+    let chunk = index.code_chunks[i].chunk.clone();
+    // Dedupe: if retrieval already found it, promote rather than duplicate.
+    result
+        .code_chunks
+        .retain(|sc| sc.chunk.chunk_id != chunk_id);
+    result.code_chunks.insert(
+        0,
+        ScoredChunk {
+            chunk,
+            score: ANCHOR_RELEVANCE,
+        },
+    );
+}
 
 async fn run_retrieval(
     query: &str,
@@ -243,12 +280,13 @@ async fn run_retrieval(
     } else {
         search::brute_force_non_code(query_embedding, index, &search_config)
     };
-    let (readme_raw, crate_raw, module_doc_raw, folder_raw, file_raw) = (
+    let (readme_raw, crate_raw, module_doc_raw, folder_raw, file_raw, cluster_raw) = (
         non_code.readme,
         non_code.crates,
         non_code.module_docs,
         non_code.folders,
         non_code.files,
+        non_code.clusters,
     );
 
     // Normalize all four arms to ScoredChunk. Code uses relevance or distance
@@ -272,14 +310,21 @@ async fn run_retrieval(
         (code_scored, std::collections::HashSet::new())
     };
 
-    let (readme_scored, crate_scored, module_doc_scored, folder_scored, file_scored) = if use_hybrid
-    {
+    let (
+        readme_scored,
+        crate_scored,
+        module_doc_scored,
+        folder_scored,
+        file_scored,
+        cluster_scored,
+    ) = if use_hybrid {
         (
             retriever::to_scored_relevance(readme_raw),
             retriever::to_scored_relevance(crate_raw),
             retriever::to_scored_relevance(module_doc_raw),
             retriever::to_scored_relevance(folder_raw),
             retriever::to_scored_relevance(file_raw),
+            retriever::to_scored_relevance(cluster_raw),
         )
     } else {
         (
@@ -288,6 +333,7 @@ async fn run_retrieval(
             retriever::to_scored(module_doc_raw),
             retriever::to_scored(folder_raw),
             retriever::to_scored(file_raw),
+            retriever::to_scored(cluster_raw),
         )
     };
 
@@ -340,6 +386,7 @@ async fn run_retrieval(
             module_doc_chunks: module_doc_scored.clone(),
             folder_chunks: folder_scored.clone(),
             file_chunks: file_scored.clone(),
+            cluster_chunks: cluster_scored.clone(),
             intent: classification.intent,
         };
         match rerank_all(query, bundle, &final_config, code_keep_override).await {
@@ -375,6 +422,7 @@ async fn run_retrieval(
                         module_doc_chunks: retriever::to_scored_relevance(nc.module_docs),
                         folder_chunks: retriever::to_scored_relevance(nc.folders),
                         file_chunks: retriever::to_scored_relevance(nc.files),
+                        cluster_chunks: retriever::to_scored_relevance(nc.clusters),
                         intent: classification.intent,
                     }
                 } else {
@@ -385,6 +433,7 @@ async fn run_retrieval(
                         module_doc_chunks: retriever::to_scored(nc.module_docs),
                         folder_chunks: retriever::to_scored(nc.folders),
                         file_chunks: retriever::to_scored(nc.files),
+                        cluster_chunks: retriever::to_scored(nc.clusters),
                         intent: classification.intent,
                     }
                 }
@@ -398,6 +447,7 @@ async fn run_retrieval(
             module_doc_chunks: module_doc_scored,
             folder_chunks: folder_scored,
             file_chunks: file_scored,
+            cluster_chunks: cluster_scored,
             intent: classification.intent,
         }
     };
@@ -542,6 +592,8 @@ async fn rerank_all(
             .await?,
         folder_chunks: rerank_chunks(query, bundle.folder_chunks, config.folder_limit).await?,
         file_chunks: rerank_chunks(query, bundle.file_chunks, config.file_limit).await?,
+        // R3: standalone demo carries no cluster chunks yet (see above).
+        cluster_chunks: rerank_chunks(query, bundle.cluster_chunks, config.cluster_limit).await?,
         intent: bundle.intent,
     })
 }
@@ -611,6 +663,16 @@ fn build_source_list(result: &RetrievalResult) -> Vec<SourceInfo> {
         chunk_id: s.chunk.chunk_id.clone(),
         path: s.chunk.file_path.clone(),
         label: basename(&s.chunk.file_path),
+        project: s.chunk.project_name.clone(),
+        relevance: s.score,
+        relevance_pct: (s.score * 100.0).round() as u8,
+        line: 0,
+    }));
+    sources.extend(result.cluster_chunks.iter().map(|s| SourceInfo {
+        chunk_type: "cluster".into(),
+        chunk_id: s.chunk.chunk_id.clone(),
+        path: s.chunk.path.clone(),
+        label: format!("cluster {}", s.chunk.cluster_id),
         project: s.chunk.project_name.clone(),
         relevance: s.score,
         relevance_pct: (s.score * 100.0).round() as u8,

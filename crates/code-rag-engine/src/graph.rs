@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use code_rag_types::CodeChunk;
+use code_rag_types::{CodeChunk, EdgeRelation};
 
 use super::retriever::ScoredChunk;
 
@@ -62,6 +62,16 @@ impl CallGraph {
             .get(&identifier.to_lowercase())
             .filter(|ids| ids.len() == 1)
             .map(|ids| ids[0].as_str())
+    }
+
+    /// All chunk IDs registered for an identifier (case-insensitive); empty if
+    /// unknown. Lets callers distinguish "not found" from "ambiguous" where
+    /// `unique_chunk_for_identifier` collapses both to `None`.
+    pub fn chunks_for_identifier(&self, identifier: &str) -> &[String] {
+        self.id_to_chunk
+            .get(&identifier.to_lowercase())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Direct callers of the given chunk.
@@ -201,15 +211,16 @@ pub fn detect_direction(query: &str) -> GraphDirection {
         return GraphDirection::Callees;
     }
 
-    // "path between" / "flow" / "trace" → need two endpoints (handled by caller)
+    // "path between" / "flow" / "trace" → need two endpoints. Parsing two
+    // identifiers out of natural language is deliberately NOT implemented
+    // (fragile); two-endpoint queries are served by the explicit-params route
+    // instead — `path_augment` / the MCP `code_rag_path` tool (R5).
     if q.contains("path between")
         || q.contains("path from")
         || q.contains("flow")
         || q.contains("trace")
         || q.contains("chain")
     {
-        // Path needs two identifiers; caller must parse them.
-        // Fall through to Both for now; graph_augment will upgrade if it finds two.
         return GraphDirection::Both;
     }
 
@@ -393,6 +404,48 @@ pub fn graph_augment(
     })
 }
 
+/// Why an explicit path query produced no result (R5).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathError {
+    /// The identifier matched no chunk in the graph index.
+    UnknownIdentifier(String),
+    /// The identifier matched several chunks — too ambiguous to trace.
+    AmbiguousIdentifier(String),
+    /// Both endpoints resolved but no call chain connects them (forward).
+    NoPath,
+}
+
+/// Trace the shortest call chain between two explicitly named identifiers.
+///
+/// The explicit two-endpoint route that `detect_direction` deliberately does
+/// not attempt from natural language: identifiers arrive as parameters (MCP
+/// `code_rag_path`, or a UI selection), each resolves via the graph's
+/// identifier index, and the resulting `GraphAugmentResult` carries
+/// `GraphDirection::Path` with the full hop chain in `resolved_chunk_ids`
+/// (both endpoints included).
+pub fn path_augment(
+    from_identifier: &str,
+    to_identifier: &str,
+    graph: &CallGraph,
+) -> Result<GraphAugmentResult, PathError> {
+    let resolve = |identifier: &str| -> Result<String, PathError> {
+        match graph.chunks_for_identifier(identifier) {
+            [] => Err(PathError::UnknownIdentifier(identifier.to_string())),
+            [one] => Ok(one.clone()),
+            _ => Err(PathError::AmbiguousIdentifier(identifier.to_string())),
+        }
+    };
+    let from = resolve(from_identifier)?;
+    let to = resolve(to_identifier)?;
+    let path = graph.find_path(&from, &to).ok_or(PathError::NoPath)?;
+    Ok(GraphAugmentResult {
+        target_chunk_id: from.clone(),
+        target_identifier: from_identifier.to_string(),
+        direction: GraphDirection::Path(from, to),
+        resolved_chunk_ids: path,
+    })
+}
+
 /// Merge graph-resolved ScoredChunks into existing vector results.
 ///
 /// C2: collision-safe merge. Graph chunks carry structural proof (an actual
@@ -528,6 +581,257 @@ pub fn reserve_graph_slots(
     kept
 }
 
+// ============================================================================
+// Track R (R1): RelationGraph — typed structural relations beside the CallGraph.
+// Pure, wasm32-safe. Built from persisted `graph_edges` at query time and
+// consulted for Relationship-intent queries like "what implements X?".
+// ============================================================================
+
+/// In-memory typed relation graph. Keyed by relation so a query can ask for a
+/// single edge kind (implements/extends/embeds/references) in either direction.
+pub struct RelationGraph {
+    /// relation → source_chunk_id → [target_chunk_id]
+    forward: HashMap<EdgeRelation, HashMap<String, Vec<String>>>,
+    /// relation → target_chunk_id → [source_chunk_id]
+    reverse: HashMap<EdgeRelation, HashMap<String, Vec<String>>>,
+    /// identifier (lowercased) → chunk_ids, for resolving a query's target term.
+    id_to_chunk: HashMap<String, Vec<String>>,
+    has_edges: bool,
+}
+
+impl RelationGraph {
+    /// Build from `(source_chunk_id, target_chunk_id, relation)` triples.
+    pub fn from_edges(edges: impl IntoIterator<Item = (String, String, EdgeRelation)>) -> Self {
+        let mut forward: HashMap<EdgeRelation, HashMap<String, Vec<String>>> = HashMap::new();
+        let mut reverse: HashMap<EdgeRelation, HashMap<String, Vec<String>>> = HashMap::new();
+        let mut has_edges = false;
+        for (src, tgt, rel) in edges {
+            has_edges = true;
+            forward
+                .entry(rel)
+                .or_default()
+                .entry(src.clone())
+                .or_default()
+                .push(tgt.clone());
+            reverse
+                .entry(rel)
+                .or_default()
+                .entry(tgt)
+                .or_default()
+                .push(src);
+        }
+        Self {
+            forward,
+            reverse,
+            id_to_chunk: HashMap::new(),
+            has_edges,
+        }
+    }
+
+    /// Register identifier → chunk_id mappings for target-term lookup.
+    pub fn register_identifiers(&mut self, pairs: impl IntoIterator<Item = (String, String)>) {
+        for (identifier, chunk_id) in pairs {
+            let entry = self
+                .id_to_chunk
+                .entry(identifier.to_lowercase())
+                .or_default();
+            if !entry.contains(&chunk_id) {
+                entry.push(chunk_id);
+            }
+        }
+    }
+
+    /// Unique chunk_id for an identifier (case-insensitive), or None if ambiguous.
+    pub fn unique_chunk_for_identifier(&self, identifier: &str) -> Option<&str> {
+        self.id_to_chunk
+            .get(&identifier.to_lowercase())
+            .filter(|ids| ids.len() == 1)
+            .map(|ids| ids[0].as_str())
+    }
+
+    /// Sources that relate to `target` via `relation` (reverse). E.g. for
+    /// `Implements`, the chunks that implement the trait/interface `target`.
+    pub fn sources_for(&self, target_chunk_id: &str, relation: EdgeRelation) -> &[String] {
+        self.reverse
+            .get(&relation)
+            .and_then(|m| m.get(target_chunk_id))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Targets that `source` relates to via `relation` (forward). E.g. for
+    /// `Implements`, the traits that `source` implements.
+    pub fn targets_for(&self, source_chunk_id: &str, relation: EdgeRelation) -> &[String] {
+        self.forward
+            .get(&relation)
+            .and_then(|m| m.get(source_chunk_id))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.has_edges
+    }
+}
+
+/// Direction of a typed-relation query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationDir {
+    /// "what implements X" → sources pointing at X (reverse).
+    Reverse,
+    /// "what does X implement" → targets X points at (forward).
+    Forward,
+}
+
+/// Detect a typed-relation intent from the query. Returns the relation kind and
+/// direction, or None if the query isn't about a structural relation. Only the
+/// relations that form chunk→chunk edges in R1 are recognized.
+pub fn detect_relation(query: &str) -> Option<(EdgeRelation, RelationDir)> {
+    let q = query.to_lowercase();
+    let forward = q.contains("does"); // "what does X implement/extend/embed"
+
+    if q.contains("implement") {
+        let dir = if forward {
+            RelationDir::Forward
+        } else {
+            RelationDir::Reverse
+        };
+        return Some((EdgeRelation::Implements, dir));
+    }
+    if q.contains("extend")
+        || q.contains("subclass")
+        || q.contains("inherit")
+        || q.contains("subtype")
+    {
+        let dir = if forward {
+            RelationDir::Forward
+        } else {
+            RelationDir::Reverse
+        };
+        return Some((EdgeRelation::Extends, dir));
+    }
+    if q.contains("embed") || q.contains("compose") {
+        let dir = if forward {
+            RelationDir::Forward
+        } else {
+            RelationDir::Reverse
+        };
+        return Some((EdgeRelation::Embeds, dir));
+    }
+    None
+}
+
+/// Extract the target type/trait identifier from a typed-relation query, e.g.
+/// "what implements `Embedder`?" → "Embedder". Handles `what <verb>s X`,
+/// `implementations/implementors of X`, and backtick-quoted identifiers.
+pub fn extract_relation_target(query: &str) -> Option<String> {
+    let q = query.to_lowercase();
+
+    // Backtick-quoted identifier wins if present.
+    if let Some(start) = query.find('`')
+        && let Some(end) = query[start + 1..].find('`')
+    {
+        let term = &query[start + 1..start + 1 + end];
+        if !term.is_empty() {
+            return Some(term.to_string());
+        }
+    }
+
+    // "implementations of X" / "implementors of X" / "subclasses of X" / "subtypes of X"
+    for prefix in &[
+        "implementations of ",
+        "implementors of ",
+        "implementers of ",
+        "subclasses of ",
+        "subtypes of ",
+        "implementers for ",
+    ] {
+        if let Some(rest) = q.find(prefix).map(|i| &query[i + prefix.len()..])
+            && let Some(term) = first_meaningful_token(rest)
+        {
+            return Some(term);
+        }
+    }
+
+    // "what does X implement/extend/embed" — Forward queries put the subject
+    // BEFORE the verb, so the verb-then-target loop below can never extract
+    // it (and often can't even match: "implement?" has no trailing space).
+    // Same idiom as `extract_target_term`'s "what does X call" handling.
+    // Leading-space verb forms so end-of-string / "?" endings don't matter.
+    if let Some(start) = q.find("does ").map(|i| i + "does ".len()) {
+        let rest = &query[start..];
+        let rest_lower = &q[start..];
+        for verb in &[
+            " implement",
+            " extend",
+            " subclass",
+            " inherit",
+            " embed",
+            " compose",
+        ] {
+            if let Some(end) = rest_lower.find(verb)
+                && let Some(term) = first_meaningful_token(rest[..end].trim())
+            {
+                return Some(term);
+            }
+        }
+    }
+
+    // "what implements X" / "what extends X" / "what embeds X" (verb then target)
+    for verb in &[
+        "implements ",
+        "implement ",
+        "extends ",
+        "extend ",
+        "embeds ",
+        "embed ",
+    ] {
+        if let Some(rest) = q.find(verb).map(|i| &query[i + verb.len()..])
+            && let Some(term) = first_meaningful_token(rest)
+        {
+            return Some(term);
+        }
+    }
+
+    None
+}
+
+/// Relationship-intent augmentation over the typed RelationGraph. Mirrors
+/// `graph_augment` but for structural relations. Returns the resolved target
+/// chunk_id and the chunk_ids reached via the detected relation/direction.
+pub fn relation_augment(
+    query: &str,
+    candidates: &[(String, String)],
+    graph: &RelationGraph,
+) -> Option<(String, Vec<String>)> {
+    if graph.is_empty() {
+        return None;
+    }
+    let (relation, dir) = detect_relation(query)?;
+    let term = extract_relation_target(query)?;
+    let term_lower = term.to_lowercase();
+
+    // Resolve the target chunk: exact candidate match, else the graph's id index.
+    let target_chunk_id = candidates
+        .iter()
+        .find(|(_, id)| id.to_lowercase() == term_lower)
+        .map(|(cid, _)| cid.clone())
+        .or_else(|| {
+            graph
+                .unique_chunk_for_identifier(&term_lower)
+                .map(String::from)
+        })?;
+
+    let resolved: Vec<String> = match dir {
+        RelationDir::Reverse => graph.sources_for(&target_chunk_id, relation).to_vec(),
+        RelationDir::Forward => graph.targets_for(&target_chunk_id, relation).to_vec(),
+    };
+    if resolved.is_empty() {
+        return None;
+    }
+    Some((target_chunk_id, resolved))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,6 +920,61 @@ mod tests {
     fn test_find_path_self() {
         let g = make_graph();
         assert_eq!(g.find_path("A", "A"), Some(vec!["A".into()]));
+    }
+
+    /// A → B → C with registered identifiers; `dup` registered twice.
+    fn path_graph() -> CallGraph {
+        let mut g = make_graph();
+        g.register_identifiers(vec![
+            ("alpha".to_string(), "A".to_string()),
+            ("beta".to_string(), "B".to_string()),
+            ("gamma".to_string(), "C".to_string()),
+            ("dup".to_string(), "A".to_string()),
+            ("dup".to_string(), "B".to_string()),
+        ]);
+        g
+    }
+
+    #[test]
+    fn test_path_augment_found_carries_path_direction() {
+        let g = path_graph();
+        let r = path_augment("alpha", "gamma", &g).unwrap();
+        assert_eq!(
+            r.direction,
+            GraphDirection::Path("A".to_string(), "C".to_string())
+        );
+        assert_eq!(r.resolved_chunk_ids, vec!["A", "B", "C"]);
+        assert_eq!(r.target_chunk_id, "A");
+        assert_eq!(r.target_identifier, "alpha");
+    }
+
+    #[test]
+    fn test_path_augment_no_path() {
+        let g = path_graph();
+        assert_eq!(
+            path_augment("gamma", "alpha", &g).unwrap_err(),
+            PathError::NoPath
+        );
+    }
+
+    #[test]
+    fn test_path_augment_unknown_and_ambiguous() {
+        let g = path_graph();
+        assert_eq!(
+            path_augment("nope", "gamma", &g).unwrap_err(),
+            PathError::UnknownIdentifier("nope".to_string())
+        );
+        assert_eq!(
+            path_augment("alpha", "dup", &g).unwrap_err(),
+            PathError::AmbiguousIdentifier("dup".to_string())
+        );
+    }
+
+    #[test]
+    fn test_path_augment_self_is_single_hop() {
+        let g = path_graph();
+        let r = path_augment("alpha", "alpha", &g).unwrap();
+        assert_eq!(r.resolved_chunk_ids, vec!["A"]);
     }
 
     #[test]
@@ -907,5 +1266,148 @@ mod tests {
             content_hash: "hash".into(),
             embedding_model_version: "test".into(),
         }
+    }
+
+    // ---- Track R (R1): RelationGraph + relation cues ----
+
+    fn make_relation_graph() -> RelationGraph {
+        // FastEmbedImpl(c_fe) and OnnxImpl(c_onnx) both Implement Embedder(c_emb).
+        // FooStruct(c_foo) Embeds Bar(c_bar).
+        let mut g = RelationGraph::from_edges(vec![
+            ("c_fe".into(), "c_emb".into(), EdgeRelation::Implements),
+            ("c_onnx".into(), "c_emb".into(), EdgeRelation::Implements),
+            ("c_foo".into(), "c_bar".into(), EdgeRelation::Embeds),
+        ]);
+        g.register_identifiers(vec![
+            ("FastEmbedImpl".into(), "c_fe".into()),
+            ("OnnxImpl".into(), "c_onnx".into()),
+            ("Embedder".into(), "c_emb".into()),
+            ("FooStruct".into(), "c_foo".into()),
+            ("Bar".into(), "c_bar".into()),
+        ]);
+        g
+    }
+
+    #[test]
+    fn test_relation_graph_sources_and_targets() {
+        let g = make_relation_graph();
+        let mut impls = g.sources_for("c_emb", EdgeRelation::Implements).to_vec();
+        impls.sort();
+        assert_eq!(impls, vec!["c_fe".to_string(), "c_onnx".to_string()]);
+        assert_eq!(
+            g.targets_for("c_fe", EdgeRelation::Implements),
+            &["c_emb".to_string()]
+        );
+        // Wrong relation kind → empty.
+        assert!(g.sources_for("c_emb", EdgeRelation::Embeds).is_empty());
+    }
+
+    #[test]
+    fn test_detect_relation() {
+        assert_eq!(
+            detect_relation("What implements Embedder?"),
+            Some((EdgeRelation::Implements, RelationDir::Reverse))
+        );
+        assert_eq!(
+            detect_relation("What does FastEmbedImpl implement?"),
+            Some((EdgeRelation::Implements, RelationDir::Forward))
+        );
+        assert_eq!(
+            detect_relation("What extends BaseConfig?"),
+            Some((EdgeRelation::Extends, RelationDir::Reverse))
+        );
+        assert_eq!(
+            detect_relation("What embeds Inner?"),
+            Some((EdgeRelation::Embeds, RelationDir::Reverse))
+        );
+        assert_eq!(detect_relation("How does retrieval work?"), None);
+    }
+
+    #[test]
+    fn test_extract_relation_target() {
+        assert_eq!(
+            extract_relation_target("What implements Embedder?"),
+            Some("Embedder".into())
+        );
+        assert_eq!(
+            extract_relation_target("implementations of `Reranker`"),
+            Some("Reranker".into())
+        );
+        assert_eq!(
+            extract_relation_target("what extends the BaseConfig class?"),
+            Some("BaseConfig".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_relation_target_forward_subject() {
+        // Forward phrasings put the subject BEFORE the verb; the trailing "?"
+        // means the verb-then-target patterns can't even match.
+        assert_eq!(
+            extract_relation_target("What does FastEmbedImpl implement?"),
+            Some("FastEmbedImpl".into())
+        );
+        assert_eq!(
+            extract_relation_target("what does the FooStruct embed?"),
+            Some("FooStruct".into())
+        );
+        assert_eq!(
+            extract_relation_target("What does MyHandler extend?"),
+            Some("MyHandler".into())
+        );
+        // Forward phrasing WITH a trailing target keeps extracting the subject
+        // (the traversal anchor): "does X implement Y" answers via X's targets.
+        assert_eq!(
+            extract_relation_target("Does FastEmbedImpl implement Embedder?"),
+            Some("FastEmbedImpl".into())
+        );
+    }
+
+    #[test]
+    fn test_relation_augment_implements_reverse() {
+        let g = make_relation_graph();
+        // Target not in vector candidates — resolved via the graph id index.
+        let candidates = vec![("c_other".into(), "something".into())];
+        let (target, mut resolved) =
+            relation_augment("What implements Embedder?", &candidates, &g).unwrap();
+        assert_eq!(target, "c_emb");
+        resolved.sort();
+        assert_eq!(resolved, vec!["c_fe".to_string(), "c_onnx".to_string()]);
+    }
+
+    #[test]
+    fn test_relation_augment_implements_forward() {
+        // The Copilot-flagged gap: Forward direction + subject-before-verb.
+        let g = make_relation_graph();
+        let candidates = vec![("c_other".into(), "something".into())];
+        let (target, resolved) =
+            relation_augment("What does FastEmbedImpl implement?", &candidates, &g).unwrap();
+        assert_eq!(target, "c_fe");
+        assert_eq!(resolved, vec!["c_emb".to_string()]);
+    }
+
+    #[test]
+    fn test_relation_augment_embeds_forward() {
+        let g = make_relation_graph();
+        let candidates = vec![("c_foo".into(), "FooStruct".into())];
+        let (target, resolved) =
+            relation_augment("What does FooStruct embed?", &candidates, &g).unwrap();
+        assert_eq!(target, "c_foo");
+        assert_eq!(resolved, vec!["c_bar".to_string()]);
+    }
+
+    #[test]
+    fn test_relation_augment_non_relation_query() {
+        let g = make_relation_graph();
+        let candidates = vec![("c_fe".into(), "FastEmbedImpl".into())];
+        assert!(relation_augment("What calls retrieve?", &candidates, &g).is_none());
+    }
+
+    #[test]
+    fn test_relation_graph_empty_is_noop() {
+        let g = RelationGraph::from_edges(std::iter::empty());
+        assert!(g.is_empty());
+        let candidates = vec![("c1".into(), "Foo".into())];
+        assert!(relation_augment("What implements Foo?", &candidates, &g).is_none());
     }
 }

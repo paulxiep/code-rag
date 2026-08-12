@@ -1,5 +1,693 @@
 # Development Log
 
+## 2026-08-10: Track R R5 — Architecture drift + topology view + exports + MCP topology tools
+
+### Summary
+
+R5 closes Track R: the emergent topology becomes user-facing. Four deliverables
+in one milestone — (1) **drift comparison** (emergent communities vs folder
+layout) as a new report section; (2) an **interactive topology view** in the
+GH-Pages demo (d3-force canvas, community-colored, click-a-node → chat query);
+(3) **exports** — per-project `graph_viz_<project>.json` (browser artifact) +
+GraphML (Gephi/yEd), both byte-deterministic; (4) the four **MCP topology
+tools** deferred from R4 (`code_rag_communities`, `code_rag_central_nodes`,
+`code_rag_cycles`, `code_rag_path` — the last pairing the revived `find_path`
+with a Mermaid call-flow rendering). Retrieval is untouched → no harness
+re-run (the "route architecture queries to both views" criterion is satisfied
+by the report + MCP surfaces).
+
+### Design
+
+- **Drift** ([drift.rs](crates/code-raptor/src/drift.rs)): folder identity =
+  parent dir of each member's `file_path` (the `dominant_dir` derivation — no
+  edge join), so MCP reuses it from persisted assignments +
+  `get_chunks_by_ids` alone. Per-community purity, per-folder concentration,
+  ranked `Divergence` list (`(1−purity)·size`, MIN_GROUP_SIZE 3, threshold
+  0.6, top 8), size-weighted mean purity. Renders as two tables (scattered
+  communities / fragmented folders) — the report's "tables for enumerable
+  facts" idiom — with an "aligned" fallback; feeds one suggested question.
+  The comparison is meaningful because R2 excluded folder edges from
+  partitioning: agreement is earned, not recovered from the input.
+- **Export model** ([graph_model.rs](crates/code-raptor/src/graph_model.rs)):
+  one shared assembly (nodes labeled via members + edge-record fallback,
+  `lift_communities` for containers; one edge per unordered pair with sorted
+  relation tags + folded confidence — extracted iff any contributor is
+  AST/import-proven, call tiers 1–2 count) feeding both writers. Viz JSON via
+  **serde** (deviation from the hand-roll convention, deliberate: struct
+  field order + Vec-only shapes are byte-deterministic and JSON escaping of
+  user paths is where hand-rolled bugs live; markdown/XML/Mermaid stay
+  hand-rolled). Caps: top-5000 nodes by degree, 15 000 edges (inferred
+  references-only dropped first); pre-cap totals + `truncated` recorded.
+- **Demo view**: d3-force/d3-zoom via jsdelivr `/+esm` in a new
+  `static/graph.js` singleton (the embedder.js global-function bridge
+  pattern); canvas 2d, DPR-scaled, own rAF (pauses when hidden); palette read
+  from new `--viz-c1..c8`/`--viz-other`/`--viz-edge` CSS custom properties
+  with a MutationObserver on `data-theme` → live re-skin. 8 fixed community
+  slots + neutral "Other" for id ≥ 8 — hues never wrap, the legend never
+  lies. Tabs keep both views mounted (`display:none`), chat state survives;
+  `PendingQuery` context + a ChatView effect auto-submits the clicked node's
+  query (definitions → relationship phrasing, containers → overview
+  phrasing). Artifacts fetched lazily per project, raw JSON handed to
+  graph.js (no serde_wasm_bindgen round-trip of 5000 nodes).
+- **MCP tools**: no tool runs Louvain or betweenness — community ids come
+  from persisted `community_assignments` (tool output matches report/DB);
+  degree/cycles/drift are O(E) pure recomputes through the new **`pub mod
+  insights`** facade (`central_nodes` extracted from `analytics::compute`,
+  behavior guarded by the report byte-determinism test). MCP gains a direct
+  `code-raptor` dep (legal direction: raptor → store+types+engine only).
+  Seam additions: `VectorReader::{get_community_assignments,
+  get_cluster_chunks}` (+ scalar `get_cluster_chunks_by_project` on the
+  store; the cluster extractor already tolerated a missing score column).
+  Response shaping is pure + unit-tested in
+  [topology_tools.rs](crates/code-rag-mcp/src/topology_tools.rs); absent
+  `project` param → per-project array, unknown → invalid_params listing
+  what's indexed.
+- **`find_path` revived** ([graph.rs](crates/code-rag-engine/src/graph.rs)
+  `path_augment`): explicit two-identifier params resolve via a new
+  `chunks_for_identifier` (distinguishes unknown vs ambiguous → clean MCP
+  errors), forward then reverse; `GraphDirection::Path` is now constructed in
+  production. NL two-identifier parsing stays deliberately unimplemented
+  (comment updated). Wasm-safe
+  [mermaid.rs](crates/code-rag-engine/src/mermaid.rs) renders the hop chain
+  (positional node ids → arbitrary identifiers can't break syntax).
+- **Wiring**: `TopologyOpts.viz_dir` (default `<db parent>/viz`) +
+  `viz_path`/`graphml_path` helpers (shared sanitizer with `report_path`,
+  mirrored in the UI's `viz_data.rs`); stale-artifact deletes on empty
+  topology and in `purge`; `--viz-dir` on the topology subcommand; gh-pages
+  gains one strict `cp` staging step (viz JSONs → `static/viz/`; GraphML
+  stays offline).
+
+### Deviations from R.md
+
+`ExportGraphEdge` (§3 crate table) was never added — the per-project viz
+artifact supersedes an index.json edge slot and keeps the 33 MB first-paint
+bundle untouched (topology loads lazily on first tab open). Obsidian export
+skipped as planned.
+
+### Verification
+
+- 547 workspace tests green (30 → 56 in code-raptor; engine +9; MCP +5 —
+  shaping; store +1 ignored round-trip); `trunk build --features standalone`
+  + backend-mode check green; zero warnings.
+- **Byte determinism:** two full topology runs → 12/12 artifacts (6 viz JSON
+  + 6 GraphML) byte-identical; all 6 GraphML parse as valid XML (852-node
+  code-rag → 3100-node concurrens).
+- **Drift finds real divergences** on first run: code-rag mean purity 0.78;
+  `code-rag-store/src` (177 defs — the `vector_store.rs` monolith) splits
+  into 15 communities at 0.27 concentration; the MCP-centric community 0
+  spans 4 crates at 0.48 purity.
+- **MCP live exercise** (stdio JSON-RPC, all four tools): cycles finds the
+  known `ingestion/mod.rs ↔ reconcile.rs` cycle; central nodes lead with
+  `CodeChunk`/`new`/`VectorStore`; path traces `build_topology →
+  build_for_project → detect → partition → louvain` (4 hops) with a correct
+  Mermaid flowchart; unknown/ambiguous identifiers produce clean
+  invalid_params.
+- **Browser smoke** (headless Edge + Playwright against `trunk serve`): tab
+  strip renders, force graph draws community-clustered, tooltip on hover,
+  **click-a-node switched to Chat and auto-submitted** "What is the role of
+  `patcher_llm.py` in the architecture of this project?", project switch
+  re-inits cleanly, dark theme + live theme flip re-color the canvas, zero
+  console errors.
+
+---
+
+## 2026-08-07: Rationale-scanner anchoring + relation provenance in the architecture report
+
+### The Reranker bridge, explained
+
+The `Reranker ↔ extract_rationale_targets` top "surprising connection" in
+code-rag's own report — flagged as unexplained after the import-match rewrite —
+is a self-referential false positive: **the R1 rationale scanner matched the
+`WHY:` inside its own doc comment's example.**
+[extract_rationale_targets](crates/code-rag-ingest/src/ingestion/language.rs)
+scans comment lines above a definition for `NOTE:`/`WHY:`/`HACK:`; its own doc
+contained `` `// WHY: needed because Reranker stalls` `` as an *example*, the
+marker check was `contains(…)` (unanchored), the token scan extracted
+`Reranker`, and tier-3 resolution found the unique project `Reranker`
+(seams.rs) → a `RationaleFor` edge from the scanner to the trait. The report
+compounded the mystery by not showing edge relations, and undirected bridge
+rendering obscured the direction.
+
+### Fixes (one incidental, one structural)
+
+- **Anchored marker rule** (same philosophy as the import-match rewrite): a
+  marker only counts when it *starts* the comment's text (leader `///`/`//!`/
+  `//`/`/*`/`#`/`*` stripped), and identifier tokens are extracted only from
+  the text *after* the marker — quoted/mid-sentence markers and the marker
+  words themselves can never produce targets. 6 new tests incl. the exact
+  self-trigger reproduction.
+- **Relation provenance on every reported bridge** — the structural guarantee
+  that no future edge is unexplainable at a glance: `Bridge.relations`
+  ([analytics.rs](crates/code-raptor/src/analytics.rs), built from the raw
+  call/graph edges with the topology's keep-rules) renders as a **Relation**
+  column in both bridge tables and inside the "Why are X and Y coupled (…)?"
+  suggested question.
+
+### Verification
+
+Re-ingest + report regeneration: the false bridge is gone from
+`architecture_code-rag.md`; every bridge row now reads `imports` /
+`re_exports` / `references` / `calls` — e.g. the new top bridge
+(`LanguageHandler ↔ ingestion/mod.rs`, `re_exports`) explains itself. Harness
+pair `post_rationale_anchor(_gt)_8064e31` vs `post_importmatch(_gt)_a099872`:
+flat (aggregate 0.60/0.69/0.72 vs 0.61/0.69/0.72; the only moving cell is
+overview@5 −3pp ≈ 1 query with @pool flat — rank jitter, again partly
+self-referential since this change edits code-rag's own corpus). All 178
+ingest + 30 raptor tests green; workspace build green.
+
+---
+
+## 2026-08-07: Language-aware anchored import matching + EdgeConfidence::Ambiguous removed
+
+### Why
+
+Follow-up to the project-scoping fix, pulled ahead of R5 because tier-2 import
+matching was undocumented and partly broken. The old `path_matches_import` was
+a single Rust-tuned normalization (strip `crate::`/`super::`/`self::`, `::`→`/`,
+blanket `.`→`/`) plus an **unanchored `contains` fallback**. Consequences,
+verified per language: TS relative specifiers (`./x`) normalized to `//x` and
+**never matched at all**; Go never matched (no `.go` check, domain dots
+mangled); Rust `super::foo` matched *any* `foo.rs` in the project; Python
+`from . import x` normalized to `"/"` and matched **every file** (tier-3
+resolutions mis-tagged tier-2/`Extracted`); cross-crate `code_rag_types` missed
+`code-rag-types/src/lib.rs` (underscore/hyphen).
+
+### Fix
+
+- **New [import_match.rs](crates/code-rag-ingest/src/import_match.rs)** — one
+  documented, anchored rule per language, dispatched on the *importing* file's
+  extension; no substring heuristics; external specifiers (stdlib, npm, Go
+  domain paths) match nothing by design. Rust: `crate::` anchored suffixes,
+  module-aware `super::`/`self::` (a file is a child of its directory module),
+  workspace-crate `<name>/src/…` with `_`/`-` interchange. Python: anchored
+  dotted paths + dot-relative resolution from the source package. TS: `./`/`../`
+  joined to the source dir (`.js` specifier → `.ts` file, `/index.ts(x)`
+  variants); bare/scoped specifiers are external. Go: ≥2-segment package-dir
+  suffix with module-prefix stripping. 12 matcher tests + first-ever TS and Go
+  end-to-end resolution tests (172 ingest tests total).
+- **`EdgeConfidence::Ambiguous` removed**
+  ([types](crates/code-rag-types/src/lib.rs)): never constructed anywhere —
+  ambiguity produces *no edge* by design, so nothing could carry the tag; and
+  confidence is currently written-but-never-read downstream. `from_tag` falls
+  back to `Inferred` for unknown tags, so old rows are safe. Deviation from
+  R.md §4 R1's original enum noted here.
+
+### Measurement (same purged 6-project corpus as `post_projscope_clean` — first unconfounded comparison)
+
+`post_importmatch(_gt)_a099872` vs `post_projscope_clean(_gt)_dc86662`,
+`--rerank --hybrid`: **flat everywhere** — aggregate 0.61/0.69/0.72 (Δ 0/−0.01/0),
+relationship GT 0.49/0.60/0.60 unchanged, comparison + implementation unchanged.
+The one moving cell is overview recall@10 −4pp (~1 query slid from rank ≤10 to
+>10; its @5 and @pool are flat, so retrieval still finds the chunks — rank
+jitter, partly self-referential: this change edits code-rag's own corpus).
+Expected: the recall dataset is Rust-centric, so the matcher's wins show in the
+*graph*, not recall — code-rag topology 1951→2205 edges (better cross-crate +
+`super::` anchoring, plus the new module's own code), and TS-heavy concurrens
+now has a 3100-node / 7882-edge topology with working relative-import edges.
+Curiosity kept for later: the `Reranker ↔ extract_rationale_targets` top
+surprise bridge survived the rewrite, so it is a real edge, not a matching
+artifact.
+
+---
+
+## 2026-08-06: Project-scoped edge resolution (R1 leak fix) + purge subcommand
+
+### Root cause
+
+The R4 report exposed cross-project edges (`String` → caravan, `Result` →
+quant-trading-gym). Structural cause, three facts stacked: (1) a portfolio
+ingest is one flat `WalkDir` pass — every project's chunks travel together into
+edge resolution ([orchestrate.rs](crates/code-rag-ingest/src/orchestrate.rs));
+(2) all three resolvers indexed `identifier → chunks` with **no project
+dimension**, so tier-3 "unique-global" meant unique across the whole corpus and
+tier-2's unanchored `path_matches_import` (`ends_with`/`contains`) let
+`crate::error` match another project's `error.rs`; (3) edges are stamped with
+the *source* chunk's project, so per-project store reads faithfully returned
+foreign targets. Design intent (RAG retrieves across projects; **the graph
+never links projects**) was documented in a comment but never implemented.
+
+### Fix
+
+- [edge_resolution.rs](crates/code-rag-ingest/src/edge_resolution.rs): the
+  identifier index is now keyed `(project, identifier)` (`IdIndex` alias);
+  `resolve_target` takes the source's project; call-edge tiers use the
+  caller's. Tier 3 is now unique-*within-project*; a name defined only in
+  another project is dropped like any unknown target. 4 new tests.
+- **Second bug, same call site:** `orchestrate.rs` took `project` from the
+  *first chunk* — in portfolio mode only one project's stale edges were purged
+  and only one topology rebuilt. Now loops sorted `collect_project_names`
+  for both edge-table deletes; `build_topology` gets `Some(p)` for a
+  single-project ingest, `None` (refresh all, one embedder load) otherwise.
+  This run was the first to resolve edges across all 6 projects.
+- **Latent crash surfaced by re-ingest:** byte-identical definitions in one
+  file hash to the same chunk_id (`deterministic_chunk_id` is path+content,
+  not line-aware) and LanceDB merge-insert rejects duplicate ids in a batch.
+  `run_ingestion` now dedups (keep first, `warn!` each) — 18 duplicates across
+  the corpus, incl. 4 in code-rag itself.
+- **`code-rag-ingest purge <PROJECT>...`** (new subcommand): removes a project
+  from every chunk table + call/graph edges + community assignments + cluster
+  chunks + its architecture report. Needed because a re-ingest can't see repos
+  deleted from disk. Used to purge `cioport` and `daccord` (repos removed from
+  the portfolio). `code-raptor` exposes `default_report_dir`/`report_path` for
+  the report cleanup. Architecture reports are now gitignored (regenerated
+  artifacts).
+
+### Measurement (post-fix, purged 6-project corpus, `--rerank --hybrid`)
+
+`post_projscope_clean_dc86662` (classifier) vs `post_r3_final_a70614c`
+(pre-fix, 8-project): comparison 0.62/0.73/0.75 (identical), implementation
+0.61/0.67/0.67 (−3pp r@5), overview 0.70/0.77/0.81 (+2pp r@5), relationship
+0.47/0.61/0.61 (−2pp r@5, **+1pp r@10/pool**). Flat within noise despite
+removing every cross-project edge — they were wrong answers, not signal; the
+implementation dip tracks corpus drift (concurrens grew, code-rag gained the
+R4 code, two projects purged). **This report pair is the new working baseline**
+for the 6-project corpus. The code-rag architecture report is now fully
+project-local (edge count 2355 → 1951) and still finds the real
+`ingestion/mod.rs ↔ reconcile.rs` cycle.
+
+### Follow-ups
+
+- `path_matches_import` unanchored fallback can still mis-match *within* a
+  project — tighten under its own measured run.
+- `EdgeConfidence::Ambiguous` is never constructed (ambiguity is skipped).
+
+---
+
+## 2026-08-06: Track R R4 — Structural analytics + architecture report
+
+### Summary
+
+R4 turns the R1–R3 topology into architectural insight: degree centrality ("read
+these first"), cross-community bridges (Brandes edge-betweenness),
+surprising-connection ranking, file-level dependency-cycle detection, and a
+deterministic markdown **architecture report** emitted per project at ingest and
+on cluster-only re-runs (`code-rag-ingest topology [--report-dir]`, default
+`data/reports/architecture_<project>.md`). Analytics are derived data —
+recomputed each run from the persisted edge tables, never stored (no retrieval
+consumer exists; revisit only if R5 MCP tools need sub-second responses). No
+retrieval path is touched, so no harness re-run is required.
+
+### Design
+
+- **Degree in the engine, the rest native** (per the plan split):
+  [centrality.rs](crates/code-rag-engine/src/centrality.rs) is pure/wasm-safe so
+  the R5 browser demo computes the identical ranking; Brandes
+  ([betweenness.rs](crates/code-raptor/src/betweenness.rs), source-capped at
+  1500 with deterministic stride sampling), cycles
+  ([cycles.rs](crates/code-raptor/src/cycles.rs)), assembly
+  ([analytics.rs](crates/code-raptor/src/analytics.rs)) and rendering
+  ([report.rs](crates/code-raptor/src/report.rs), timestamp-free →
+  byte-deterministic) stay native in `code-raptor`.
+- **Cycles: Tarjan SCC + bounded canonical DFS, not Johnson's blocked search.**
+  R.md named Johnson (1975), but its unblocking assumes complete exploration —
+  under a cycle-length cap (12, max 50 cycles) a depth-pruned blocked search can
+  miss short cycles. The SCC restriction + min-vertex-canonical bounded DFS is
+  exact for every cycle within the cap and cheap on mostly-acyclic import
+  graphs. File granularity falls out of R1's definition→file lift; only
+  `Imports`/`ReExports` edges are cycle inputs (`Contains` is hierarchical,
+  call cycles are recursion).
+- **Surprise score** = betweenness × weight / edges-between-the-pair: one of few
+  links between two communities outranks an edge inside a thick expected seam.
+- **petgraph removed** (deviation from R.md §3): declared since R0 but never
+  used — Louvain, Brandes, Tarjan and the cycle DFS are all hand-rolled for
+  determinism control.
+
+### Cross-project resolution leak (found by the report, follow-up)
+
+First real run put `String` (caravan) and `Result` (quant-trading-gym) at the
+top of code-rag's central list: R1 `References` resolution resolves ubiquitous
+identifiers to *other projects'* definitions (unique-global heuristic), so
+per-project topologies contain cross-project endpoints. Report-level fix
+shipped: central-node and community-concern picks are filtered to
+project-local chunks; **bridges are deliberately unfiltered so the leak stays
+visible**. The real fix is in `code-rag-ingest` edge resolution (same-project
+constraint and/or a ubiquitous-identifier stoplist for `References`) and
+changes partition inputs → needs a harness re-run when done. Until then,
+persisted communities are unchanged by R4.
+
+### Verification
+
+- `cargo build --workspace` + `cargo test --workspace` green (all suites, 0
+  failures); `trunk build --features standalone` green (wasm purity — new
+  engine module compiles to wasm32).
+- Cluster-only re-run (no re-parse) on `code-rag`: central list matches
+  intuition — `new`/`VectorStore` (store), `retrieve`, `run_retrieval`,
+  `ScoredChunk`, `run_ingestion` — and cycle detection found the real
+  `ingestion/mod.rs ↔ ingestion/reconcile.rs` import cycle.
+- Deferred per plan: MCP topology tools → R5; Overview central-node injection →
+  separate measured experiment (R3 precedent: unmeasured arms don't ship on).
+
+---
+
+## 2026-06-10: Track R R3 — ClusterChunks + empirical per-intent gating (clusters OFF)
+
+### Summary
+
+R3 builds the emergent-community retrieval layer on top of R2's communities: a
+`ClusterChunk` type + deterministic template summary (`code-rag-engine::cluster`,
+mirroring FolderChunk) produced + embedded (BGE-small) + upserted to a `cluster_chunks`
+table by the `code-raptor` topology engine, plus the retrieval arm (per-intent
+`cluster_limit`/`cluster_vec`, RRF-fused + reranked), flatten, export, and the WASM
+in-browser arm — a full vertical slice. No other arm regresses; the wasm32 standalone
+build stays clean.
+
+**Outcome: the cluster retrieval arm is gated OFF on all intents, by measurement.** The
+empirical sweep below shows it does not earn a slot on recall today. All R3 machinery
+stays wired for a later revisit.
+
+### Drift caught + fixed (creditability)
+
+Clusters first flattened to a synthetic `project#clusterN` `file_path`, so the
+file-substring recall metric could never credit them — yet the plan's testable criterion
+("cluster chunks hit for 'main subsystems'") *assumes* they're creditable. Fixed by
+adding `ClusterChunk.path` = the dominant member directory (the subsystem's "home" in the
+tree), used as the flatten `file_path`. A cluster is now credited like a FolderChunk when
+its subsystem matches an architecture query's expected path (verified: the engine cluster
+surfaced as `cluster:code-rag/crates/code-rag-engine/src`).
+
+### Empirical per-intent gating sweep
+
+`CLUSTER_LIMIT=N` harness override (added to [harness.rs](src/bin/harness.rs)) sweeps the
+arm without recompiling; run under **ground-truth intent** to isolate the arm from
+classifier routing; `--rerank --hybrid`. Cells are recall@5 / @10 / @pool:
+
+| intent | OFF | L=1 | L=2 | L=4 |
+|---|---|---|---|---|
+| overview | **0.67**/0.77/0.84 | 0.63/0.77/0.84 | 0.63/0.77/0.84 | 0.63/0.77/0.84 |
+| comparison | 0.62/**0.73**/0.75 | 0.62/0.73/0.75 | 0.62/0.69/0.75 | 0.62/0.69/0.75 |
+| relationship | 0.48/0.59/0.59 | 0.49/0.59/0.59 | 0.49/0.59/0.59 | 0.49/0.59/0.59 |
+| implementation | 0.57/0.62/**0.62** | 0.57/0.61/0.62 | 0.57/0.61/0.62 | 0.57/0.61/**0.65** |
+
+**Finding — R.md's "Overview recall improves with cluster chunks active" hypothesis is
+empirically false on this dataset.** As a retrieval arm, emergent ClusterChunks *displace*
+the code/folder chunks that already answer architecture queries: Overview recall@5 drops
+−4pp at every limit, Comparison recall@10 −4pp at limit ≥2, Relationship +1pp (noise), and
+the only positive is Implementation recall@pool +3pp at limit 4 (with −1pp recall@10, flat
+recall@5). No intent earns the arm on recall.
+
+### Decision + revisit
+
+**Gate clusters OFF on all intents** (`cluster_limit=0`, `cluster_vec=false` in
+[intent.rs](crates/code-rag-engine/src/intent.rs)) — same pattern as B2 hybrid (shipped →
+disabled after regression → re-enabled once B3 fixed the root cause). The impl-pool +3pp
+signal indicates relevant clusters *are* retrieved but the cross-encoder buries them, so
+the revisit is **slot-protection** (cf. C2 graph-slot reservation) or the optional **LLM
+cluster-summary tier**, not leaving a net-negative arm on. Secondary blocker: 4/5
+architecture queries classify as implementation/relationship rather than overview — a
+B4-classifier concern, tracked separately. The `cluster_chunks` table, embeddings, export,
+WASM arm, and the `CLUSTER_LIMIT` sweep knob all stay in place.
+
+### Plumbing (R3)
+
+- `ClusterChunk { cluster_id, project_name, path, member_chunk_ids, files, key_types,
+  key_functions, dominant_relation, cohesion, summary_text, … }` in
+  [code-rag-types](crates/code-rag-types/src/lib.rs); template +
+  `MAX_FILES`/`render_summary`/`canonical_tuple` in
+  [code-rag-engine/cluster.rs](crates/code-rag-engine/src/cluster.rs).
+- `cluster_chunks` vector+FTS table (to_batch/extract/upsert/delete/search/hybrid_search +
+  `VectorReader` seam) in [vector_store.rs](crates/code-rag-store/src/vector_store.rs);
+  `code-raptor` assembles ([clusterchunk.rs](crates/code-raptor/src/clusterchunk.rs)),
+  embeds, and upserts in `build_topology`.
+- Retrieval: `cluster_limit` on `RetrievalConfig` + `cluster_fetch_multiplier`,
+  `ArmPolicy.cluster_vec`, the cluster arm in
+  [code-rag-core/retriever.rs](crates/code-rag-core/src/retriever.rs), `cluster_chunks` on
+  `RetrievalResult` + flatten. Export (`ExportIndex.cluster_chunks` + `cluster_idf`) and
+  WASM (`ChunkIndex` + `search` cluster arm + standalone retrieval) at parity.
+
+---
+
+## 2026-06-10: Track R R2 — Community detection + cohesion (emergent modules)
+
+### Summary
+
+Filled the `code-raptor` topology engine: it reads the persisted edge tables
+(`call_edges` + R1's `graph_edges`), builds one in-memory relation graph, partitions it
+with a deterministic **Louvain** implementation, and persists a community id + cohesion
+per code chunk to an additive `community_assignments` side table. Runs per-project as a
+post-ingest stage (wired into `orchestrate.rs`) and as a standalone `code-rag-ingest
+topology` CLI re-run (no re-parse). Retrieval-neutral by construction — R2 only writes a
+new side table; nothing reads it until R3.
+
+### Decisions locked with the user before building (see R.md §4 R2)
+
+- **Algorithm: deterministic Louvain; Leiden deferred.** Rust has no graspologic/Leiden
+  equivalent and `petgraph` ships no community detection, so it's a from-scratch
+  implementation either way; Louvain is "deterministic enough to ship". Determinism via
+  fixed node order + sorted neighbor iteration + size-desc/min-id re-indexing (no RNG) —
+  not seeded randomization. Revisit Leiden (a refinement pass per community) only if a
+  spot-check shows internally-disconnected communities.
+- **Folder-agnostic partitioning, file-level containment only.** Partition over
+  `calls ∪ imports ∪ implements/extends/embeds/references ∪ file→function contains` at
+  equal weight; **folder→file `contains` is excluded** from the partition input. Rationale
+  (user's insight): high-level folders are frequently *not* cohesive, so feeding the
+  folder tree into clustering would make communities recover the folders and make R5's
+  emergent-vs-folder drift comparison self-fulfilling. A `contains` edge is file-level iff
+  `source_file == target_file`. File nodes stay in the graph as hub connectors (carrying
+  file-level cohesion + import signal) but are flagged as containers and dropped from
+  persistence — only code chunks get a community id.
+- **Per-project scope** (`build_topology(project_name)`); corpus-wide union deferred.
+- **Additive `community_assignments` side table**, no `code_chunks` schema migration.
+
+### Algorithm (in `code-raptor`)
+
+[louvain.rs](crates/code-raptor/src/louvain.rs) — modularity-maximizing Louvain over a
+weighted undirected graph (multi-level: local-moving → aggregate → repeat). Determinism:
+nodes visited in fixed index order, ties broken toward the smallest community index,
+neighbor communities iterated in sorted order. [topology.rs](crates/code-raptor/src/topology.rs)
+projects the edge tables onto the graph per the keep-rules above.
+[cluster.rs](crates/code-raptor/src/cluster.rs) wraps it with the cross-cutting handling
+R.md calls for: code-node hub exclusion (degree > p99/floor) + majority-vote reattach
+(container/file nodes never excluded — folders aren't nodes at all, so the only folder-tree
+distortion risk is already gone), oversized-community split (>25% of the graph, recursive),
+low-cohesion re-split (≥50 nodes, cohesion <0.05), cohesion = intra-community edges / max
+possible, and stable re-indexing by `(code-member count desc, min code chunk_id asc)`.
+
+### Verification
+
+`cargo build --workspace` + targeted tests green (9 new code-raptor unit tests covering
+Louvain on known graphs, the folder-vs-file contains discriminator, determinism, and
+cohesion). Real-corpus run is **deterministic across two passes** (e.g. quant-trading-gym
+2184 chunks → 119 communities, daccord 533 → 18, invoice-parse 236 → 11, identical ids
+both runs); LanceDB delete-by-project + upsert round-trip clean.
+
+### Plumbing (R2)
+
+- `CommunityAssignment { project_name, chunk_id, community_id, cohesion }` in
+  [code-rag-types](crates/code-rag-types/src/lib.rs); `community_assignments` scalar table
+  (to_batch/extract/upsert/get/delete-by-project) in
+  [vector_store.rs](crates/code-rag-store/src/vector_store.rs).
+- `code-raptor::build_topology` invoked from
+  [orchestrate.rs](crates/code-rag-ingest/src/orchestrate.rs) after the R1 edge step, and
+  from a new `code-rag-ingest topology` subcommand for cluster-only re-runs.
+
+---
+
+## 2026-06-08: Track R R1 — RelationGraph + Richer Edges (typed structural topology)
+
+### Summary
+
+Built the typed relation layer that Track R's topology engine will consume. Where
+C1 persisted only `calls` edges, R1 adds a full taxonomy of structural relations —
+extracted per language, resolved with the same tiered disambiguation as call edges,
+and persisted to a new `graph_edges` table beside `call_edges`. A pure
+`RelationGraph` is added next to the wasm-safe `CallGraph`, and Relationship/
+Implementation retrieval consults it so "what implements `Embedder`?" resolves via
+structural edges, not just vector similarity. **9925 relation edges** persisted
+across the 8-project corpus.
+
+Additive throughout: C1/C2's `CallGraph`, `graph_augment`, and `reserve_graph_slots`
+are untouched; the new path is a strict no-op when `graph_edges` is empty or the
+query carries no structural cue, so non-relationship intents and the pre-R1 baseline
+are unaffected.
+
+### Edge taxonomy (all landed — no deferrals)
+
+`EdgeRelation { Calls, Imports, Contains, Implements, Extends, References, Embeds,
+ReExports, RationaleFor }` + `EdgeContext { ParameterType, ReturnType, GenericArg,
+FieldType, Attribute, None }` + `EdgeConfidence { Extracted, Inferred, Ambiguous }`
+in [code-rag-types](crates/code-rag-types/src/lib.rs). `calls` is **not** duplicated
+into `graph_edges` — it is projected from `call_edges` at topology-build time so
+C1/C2's `resolution_tier` semantics stay intact.
+
+- **Implements / Extends / Embeds / References** — new `extract_type_relations` on
+  `LanguageHandler` (default-empty, mirroring `extract_calls`). Rust: `impl Trait for
+  T` → Implements, trait supertrait bounds → Extends, struct fields → Embeds, fn
+  param/return types → References. Python: base classes → Extends, annotations →
+  References. TypeScript: `implements`/`extends` clauses, annotations. Go: struct
+  embedding → Embeds, field/param/return types → References (interface satisfaction
+  is structural/implicit → no Implements, by design). Resolved by `resolve_type_edges`
+  reusing the same-file > import > unique-global tiers; non-project targets (`Vec`,
+  `String`, third-party types) drop out at resolution.
+- **Contains** — folder ⊇ file ⊇ definition, derived from the chunk hierarchy
+  (`build_contains_edges`); endpoints are existing folder/file/code chunk ids, no
+  parsing.
+- **Imports / ReExports** — `build_import_edges` resolves each file-level import to
+  its symbol chunk; the edge source is the *importing file's* FileChunk. `pub use`
+  (Rust, via a `visibility_modifier` on the `use_declaration`) and `export … from`
+  (TS) are tagged `is_reexport` on `ImportInfo` → `ReExports`; everything else →
+  `Imports`.
+- **RationaleFor** — `extract_rationale_targets` scans the comment block immediately
+  above a definition for `NOTE:`/`WHY:`/`HACK:` markers and links the definition to
+  any project symbols mentioned (high-precision token filter: CamelCase/snake_case,
+  len ≥ 4; resolution drops non-symbols). Chunk→chunk interpretation of R.md's
+  "rationale → definition" (GraphEdge has no text payload); its *report* consumption
+  lands at R4.
+
+### Plumbing
+
+- `graph_edges` is an all-`Utf8` scalar table mirroring `call_edges`
+  ([vector_store.rs](crates/code-rag-store/src/vector_store.rs)); `relation`/`context`/
+  `confidence` stored as their string tags. `get_all_graph_edges` added to the
+  `VectorReader` seam. New-table-additive: no `SCHEMA_VERSION` bump (old DBs simply
+  return empty via the "table doesn't exist" path).
+- Type relations are extracted in the *same* second parse `process_code_file` already
+  does for file imports, keyed by the identical `deterministic_chunk_id(path, code)`
+  so they line up with emitted chunks without threading through `analyze_file`.
+  Surfaced to the orchestrator via a 4th `run_ingestion` return (`TypeRelationsMap`).
+- `code-rag-engine::graph`: pure `RelationGraph` (per-relation forward/reverse
+  adjacency + id index), `detect_relation` (implements/extends/embeds cue + Forward/
+  Reverse direction), `extract_relation_target`, `relation_augment`. Wired into
+  [code-rag-core/retriever.rs](crates/code-rag-core/src/retriever.rs) via
+  `augment_with_relations`, gated to Relationship + Implementation (the latter because
+  "what implements X?" is often misclassified) and unioned into the C2 `graph_ids`
+  protection set.
+
+### Verification
+
+- 291 workspace tests green (new: per-language `extract_type_relations`, the
+  `collect_type_idents` bare-type fix, `resolve_type_edges`, contains/imports
+  builders, `RelationGraph` + relation cues). `trunk build --features standalone`
+  green → the new engine types stay wasm-safe; native graph algorithms remain in
+  `code-raptor`/ingest only.
+- Harness on a fresh full ingest, matched `--rerank --hybrid` config, vs the
+  `post_r0_rr` baseline (both fresh full builds of the same 8-project corpus):
+
+  | Intent | post_r0_rr | post_r1_rr | Δ r@5 | r@pool |
+  |---|---|---|---|---|
+  | comparison | 0.62 | 0.62 | flat | 0.75→0.75 |
+  | implementation | 0.57 | 0.64 | +0.07 | 0.64→0.69 |
+  | overview | 0.67 | 0.68 | +0.01 | 0.87→0.87 |
+  | relationship | 0.44 | 0.49 | +0.05 | 0.53→0.60 |
+  | **aggregate** | **0.58** | **0.61** | **+0.03** | 0.71→0.73 |
+
+  Honest read: **implementation +0.07** (2/29 cases) is a real lift — relation
+  augmentation surfaces implementing types for structurally-phrased queries. The
+  **relationship +0.05** is the two added `r1-implements` cases passing (existing
+  relationship cases are "what calls X" → `CallGraph`/C1 territory, unchanged — R1
+  adds a *new* query capability rather than lifting old call-queries). **relationship
+  recall@pool 0.53 → 0.60**: the new edges put more structurally-related chunks into
+  the pool. No intent regressed. Two `r1`-tagged cases added per the dataset-freeze
+  policy (ADD, don't modify).
+
+  This is the structural follow-on B1 already pointed to: B1's space search pinned
+  relationship at a ~0.50 ceiling across *every* rerank/hybrid combination (rerank-only
+  even dropped it to 0.33) and identified it as a graph/structural bottleneck that
+  B-track tooling can't move. Track B is complete; lifting relationship is C (call
+  graph) + R (structural relations) work, which is what this is — R1 lands the typed
+  edges and the "what implements X" path; the call-query relationship cases remain C1's.
+
+### Gotchas
+
+- **Bare type identifiers were silently dropped.** `collect_type_idents` only
+  inspected a type node's *children*, so a bare `type_identifier` (`VectorStore`,
+  `Embedder`) — which has no relevant children — yielded nothing. All three initial
+  Rust extraction tests failed until the helper also checked the node itself.
+- **Killed mid-write ingest corrupts the lance index.** Stopping the R1a verification
+  chain during its re-ingest left `portfolio.lance` partially written; the next
+  *incremental* ingest then died with an ungraceful `Ambiguous merge insert` (a batch
+  with duplicate merge keys). `rm -rf <db> && ingest --full` recovered it cleanly,
+  confirming corruption rather than an R1 bug. Incremental ingest hardening against
+  partial-write states is a follow-up.
+- **`cargo run … | tail` masks the exit code.** A verification chain that piped the
+  ingest through `grep | tail` reported success (tail's exit) even though cargo exited
+  1, so the harness ran against the stale index and produced invalid numbers.
+  Capture `${PIPESTATUS[0]}` for gated steps.
+- **Multi-project edge delete.** `delete_graph_edges_by_project` clears only the first
+  chunk's project before upserting edges spanning all projects — mirrors the existing
+  `call_edges` behavior and is idempotent via deterministic edge ids, but stale edges
+  for *removed* code in non-first projects would linger (pre-existing pattern).
+
+### Deferred to later milestones (not deferred *away*)
+
+- `References` and `RationaleFor` edges are persisted but **excluded from the R2
+  community-detection union** (only `calls ∪ imports ∪ contains ∪ implements/extends/
+  embeds` partition the topology) — by design, to keep high-volume/noisy edges out of
+  the clusters.
+- `RationaleFor` *report* surfacing ("why does X exist?") lands at R4.
+
+## 2026-06-08: Track R R0 — Crate Split (code-raptor → code-rag-ingest; new code-raptor topology crate)
+
+### Summary
+
+Reshaped the workspace so the marquee `code-raptor` name lands on the feature it
+belongs to. The crate that did ingestion (tree-sitter parsing, edge resolution,
+chunk + edge export) is renamed **`code-raptor` → `code-rag-ingest`**, and a new
+**`code-raptor`** crate is scaffolded as the topology engine that later Track R
+milestones fill in (RelationGraph build, community detection, analytics, cluster
+chunks). Pure organizational prep — **zero retrieval-behavior change**.
+
+### Why split (SoC)
+
+- `code-rag-ingest` has one job: source → chunks + raw relation edges.
+- `code-raptor` has one job: derive topology from those persisted edges. It depends
+  on `code-rag-store` + `code-rag-types` (to *read* the edge tables), **not** on
+  `code-rag-ingest` — ingestion writes edges, topology reads them.
+- The brand `code-raptor` now names the topology brain, which is what "RAPTOR" is
+  about. The docs ([development_plan.md](development_plan.md), [architecture.md](architecture.md))
+  were already written in this post-R0 naming; R0 is the code catching up.
+
+### What changed
+
+- `git mv crates/code-raptor crates/code-rag-ingest`; `[package] name` →
+  `code-rag-ingest` (binary + `ingest`/`status`/`export` subcommands rename with it).
+  Module layout (`ingestion/`, `edge_resolution.rs`, `export.rs`, `orchestrate.rs`)
+  untouched.
+- New lib-only `crates/code-raptor` (deps `code-rag-types`/`code-rag-store`/`petgraph`)
+  with a stub `build_topology()` seam — stable call site for R2+, no algorithms yet.
+- Sole consumer rewired: `code-rag-mcp` dep + `use` + call site `code_raptor::ingest_repo`
+  → `code_rag_ingest::` ([crates/code-rag-mcp/src/main.rs:729](crates/code-rag-mcp/src/main.rs#L729)).
+  MCP `ingest` behavior byte-identical.
+- Audited every `code-raptor`/`code_raptor` ref: renamed binary/CLI invocations in
+  CI ([.github/workflows/gh-pages.yml](.github/workflows/gh-pages.yml)), Docker
+  (build stage `raptor` → `ingest`, binary artifact, dummy-cache + real-source COPY
+  for both crates), `docker-compose-ingest.yaml`, runtime strings
+  ([src/api/error.rs](src/api/error.rs), `vector_store.rs` schema-recovery help), and
+  user docs. Preserved the `matching.rs` negative-test literal (not ground truth).
+- **Test-set repair.** `data/test_queries.json` had 4 cases pinned to the old crate
+  path. Retargeted `overview-crate-raptor` ("What is code-raptor?" → "What is
+  code-rag-ingest?"), `edge-multi-project`, `a3-ingestion-module`, and
+  `a4-language-handlers` to `code-rag-ingest` paths; also added the missing **`go.rs`**
+  handler to `a4-language-handlers` (the case predated Go support and listed only 3).
+
+### Verification
+
+- `cargo check`/`build --workspace` green; `code-rag-ingest` tests 9/9; renamed binary
+  CLI correct (no stray `code-raptor` binary — topology crate is lib-only). `trunk build
+  --features standalone` green → no native topology dep leaked into the wasm path.
+- **Harness / baseline isolation.** No prior index existed, so the corpus was ingested
+  fresh — it now holds **8 projects** (`auto-dash, caravan, cioport, code-rag,
+  concurrens, daccord, invoice-parse, quant-trading-gym`), ~4 more than at the Phase-A
+  baseline. Re-ran with the Phase-A-matched config (`--rerank --hybrid`, per-intent
+  ArmPolicy gating, dual off): aggregate recall@5 **0.58** vs Phase-A (`post_a4_fresh`)
+  **0.72**. The −0.14 is **corpus growth, not R0** — a rename can't alter embeddings
+  (vectors derive from chunk content, not paths/crate names), and **overview recall@pool
+  held 0.90 → 0.87** (correct chunks still retrieved, just displaced from top-5 by
+  cross-project distractors — `tui`/`news`/`invoice-parse`/`cioport`). Failure *set*
+  structurally unchanged; `a4-language-handlers` was already failing (granularity) at
+  Phase A.
+- **New working baseline** for Track R = `post_r0_rr_bbc5805` (8-project, matched config):
+  recall@5 comparison 0.62 · implementation 0.57 · overview 0.67 · relationship 0.44;
+  recall@pool overview 0.87 · relationship 0.53. Track R's levers map to the weak spots:
+  **R1 richer edges → relationship** (0.44, pool 0.53 means related chunks aren't even in
+  the pool); **R3 ClusterChunks → overview recall@5** (pool 0.87 headroom). Implementation/
+  comparison are B-track/C3 territory, not expected to move under R.
+
+### Notes
+
+- R0 footprint: 19 tracked files (+109/−74) plus the new `code-raptor` crate.
+- Stopping after R0 per the milestone-gated plan; R1 (RelationGraph + richer edges across
+  Rust/Python/TS/Go) is next.
+
 ## 2026-04-24: MCP — Standalone Claude Code server
 
 ### Summary
